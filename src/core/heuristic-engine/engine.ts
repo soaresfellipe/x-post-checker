@@ -1,0 +1,220 @@
+/**
+ * HeuristicEngine draft scoring (architecture: "HeuristicEngine (pure, unit-tested)"). Pure
+ * functions only: DraftSnapshot -> LocalScore. No DOM, no storage, no network, no mutation.
+ *
+ * Every weight/band/pattern comes from `./config` — this file contains no scoring numbers.
+ */
+import type { DraftSnapshot } from '@/core/draft-snapshot';
+import {
+  BAIT_PATTERNS,
+  DM_SHARE_PATTERNS,
+  HEURISTIC_CONFIG,
+  LIST_ITEM_PATTERN,
+  SHAREABLE_FORMATS,
+  STRONG_CLAIM_PATTERNS,
+} from './config';
+import type { LocalScore, SignalEntry } from './types';
+
+/** Stable breakdown order: scoring floor, content signals, context, penalties. */
+const SIGNAL_IDS = {
+  baseline: 'baseline',
+  replyMagnet: 'reply-magnet',
+  copyLink: 'copy-link',
+  dmShare: 'share-dm',
+  length: 'length',
+  hashtags: 'hashtags',
+  externalLink: 'external-link',
+  media: 'media',
+  replyMutual: 'reply-mutual',
+  engagementBait: 'engagement-bait',
+  moderation: 'moderation',
+} as const;
+
+/** English UI labels, one per signal id. */
+const SIGNAL_LABELS: Readonly<Record<keyof typeof SIGNAL_IDS, string>> = {
+  baseline: 'Baseline',
+  replyMagnet: 'Reply magnet',
+  copyLink: 'Shareable format',
+  dmShare: 'DM-worthy',
+  length: 'Length',
+  hashtags: 'Hashtags',
+  externalLink: 'External links',
+  media: 'Media',
+  replyMutual: 'Reply context',
+  engagementBait: 'Engagement bait',
+  moderation: 'Moderation flags',
+};
+
+/**
+ * Scores one eligible draft into a 0-100 headline plus a per-signal breakdown. The eligibility
+ * gate (minDraftLength) belongs to the watcher/analyzer; this function scores whatever it gets.
+ */
+export function scoreDraft(snapshot: DraftSnapshot): LocalScore {
+  // Pattern checks run on the text WITHOUT URLs so "?utm=..." cannot fake a question and long
+  // slugs cannot fake a keyword match. `urls` are as-written, so plain strip is exact.
+  const contentText = stripUrls(snapshot.text, snapshot.urls);
+
+  const signals: SignalEntry[] = [
+    baselineSignal(),
+    replyMagnetSignal(contentText),
+    copyLinkSignal(contentText),
+    dmShareSignal(contentText),
+    lengthSignal(snapshot.charCount),
+    hashtagSignal(snapshot.hashtags.length),
+    externalLinkSignal(snapshot.urls.length),
+    mediaSignal(snapshot.hasMedia),
+    replyMutualSignal(snapshot),
+    baitSignal(contentText),
+    moderationSignal(contentText),
+  ];
+
+  const totalPoints = signals.reduce((sum, signal) => sum + signal.points, 0);
+  return { headline: clampHeadline(totalPoints), totalPoints, signals };
+}
+
+/** Points -> headline scale: neutral base plus the weighted sum, clamped to the 0-100 range. */
+function clampHeadline(totalPoints: number): number {
+  const { base, min, max } = HEURISTIC_CONFIG.headline;
+  return Math.round(Math.min(max, Math.max(min, base + totalPoints)));
+}
+
+function entry(signal: keyof typeof SIGNAL_IDS, value: string, points: number): SignalEntry {
+  return {
+    id: SIGNAL_IDS[signal],
+    label: SIGNAL_LABELS[signal],
+    value,
+    points,
+    direction: points > 0 ? 'positive' : points < 0 ? 'negative' : 'neutral',
+    applied: points !== 0,
+  };
+}
+
+function stripUrls(text: string, urls: readonly string[]): string {
+  let stripped = text;
+  for (const url of urls) stripped = stripped.split(url).join(' ');
+  return stripped;
+}
+
+function baselineSignal(): SignalEntry {
+  return entry('baseline', 'eligible draft', HEURISTIC_CONFIG.weights.likeBaseline);
+}
+
+function replyMagnetSignal(contentText: string): SignalEntry {
+  const isQuestion = contentText.includes('?');
+  const isStrongClaim = STRONG_CLAIM_PATTERNS.some((pattern) => pattern.test(contentText));
+  const { question, strongClaim, maxPoints } = HEURISTIC_CONFIG.replyMagnet;
+
+  if (isQuestion && isStrongClaim) {
+    return entry('replyMagnet', 'question + strong claim (capped)', Math.min(question + strongClaim, maxPoints));
+  }
+  if (isQuestion) return entry('replyMagnet', 'question', question);
+  if (isStrongClaim) return entry('replyMagnet', 'strong claim', strongClaim);
+  return entry('replyMagnet', 'none detected', 0);
+}
+
+function copyLinkSignal(contentText: string): SignalEntry {
+  const detected: string[] = [];
+  let listLines = 0;
+  for (const _match of contentText.matchAll(LIST_ITEM_PATTERN)) {
+    listLines += 1;
+    if (listLines >= HEURISTIC_CONFIG.detection.minListItems) {
+      detected.push('list');
+      break;
+    }
+  }
+  for (const format of SHAREABLE_FORMATS) {
+    if (format.patterns.some((pattern) => pattern.test(contentText))) detected.push(format.label);
+  }
+  if (detected.length === 0) return entry('copyLink', 'no shareable format', 0);
+  return entry('copyLink', detected.join(', '), HEURISTIC_CONFIG.weights.copyLinkTrigger);
+}
+
+function dmShareSignal(contentText: string): SignalEntry {
+  const matched = DM_SHARE_PATTERNS.filter((pattern) => pattern.test(contentText));
+  if (matched.length === 0) return entry('dmShare', 'no send-to-a-friend phrasing', 0);
+  return entry('dmShare', 'send/share-to-a-friend phrasing', HEURISTIC_CONFIG.weights.shareDmTrigger);
+}
+
+function lengthSignal(charCount: number): SignalEntry {
+  const band =
+    HEURISTIC_CONFIG.lengthBands.find((candidate) => charCount >= candidate.min && charCount <= candidate.max) ??
+    HEURISTIC_CONFIG.lengthBands[HEURISTIC_CONFIG.lengthBands.length - 1]!;
+  return entry('length', `${charCount} chars (${band.label})`, band.points);
+}
+
+function hashtagSignal(count: number): SignalEntry {
+  const band =
+    HEURISTIC_CONFIG.hashtagBands.find((candidate) => count <= candidate.max) ??
+    HEURISTIC_CONFIG.hashtagBands[HEURISTIC_CONFIG.hashtagBands.length - 1]!;
+  const noun = count === 1 ? 'hashtag' : 'hashtags';
+  return entry('hashtags', `${count} ${noun} - ${band.note}`, band.points);
+}
+
+function externalLinkSignal(linkCount: number): SignalEntry {
+  if (linkCount === 0) return entry('externalLink', 'none', 0);
+  const noun = linkCount === 1 ? 'link' : 'links';
+  return entry(
+    'externalLink',
+    `${linkCount} external ${noun} (may reduce reply/share rates)`,
+    HEURISTIC_CONFIG.weights.externalLink,
+  );
+}
+
+function mediaSignal(hasMedia: boolean): SignalEntry {
+  return hasMedia
+    ? entry('media', 'media attached', HEURISTIC_CONFIG.weights.media)
+    : entry('media', 'none', 0);
+}
+
+/**
+ * The mutual/followed signal for reply drafts. Applied ONLY when `replyToFollowedByViewer` is
+ * present in the snapshot (the DOM showed the follow badge) — absent means unknown, never guessed.
+ */
+function replyMutualSignal(snapshot: DraftSnapshot): SignalEntry {
+  if (!snapshot.isReply) return entry('replyMutual', 'not a reply', 0);
+
+  const followed = snapshot.replyToFollowedByViewer;
+  if (followed === true) {
+    return entry('replyMutual', 'reply to an account that follows the viewer (visible)', HEURISTIC_CONFIG.weights.replyMutualBoost);
+  }
+  if (followed === false) {
+    return entry('replyMutual', 'reply target does not follow the viewer (visible)', 0);
+  }
+  return entry('replyMutual', 'reply - follow state not visible, boost not applied (never guessed)', 0);
+}
+
+function baitSignal(contentText: string): SignalEntry {
+  for (const pattern of BAIT_PATTERNS) {
+    const match = pattern.exec(contentText);
+    if (match) {
+      return entry('engagementBait', `bait pattern: "${match[0].toLowerCase()}"`, HEURISTIC_CONFIG.weights.engagementBait);
+    }
+  }
+  return entry('engagementBait', 'clean', 0);
+}
+
+function moderationSignal(contentText: string): SignalEntry {
+  const { moderation } = HEURISTIC_CONFIG;
+  const flags: string[] = [];
+  let points = 0;
+
+  const letters = countMatches(contentText, /\p{L}/gu);
+  const uppercase = countMatches(contentText, /\p{Lu}/gu);
+  if (letters >= moderation.allCapsMinLetters && uppercase / letters >= moderation.allCapsRatio) {
+    flags.push('ALL-CAPS shouting');
+    points += moderation.allCapsPoints;
+  }
+  if (new RegExp(`[!?]{${moderation.punctuationRunLength},}`).test(contentText)) {
+    flags.push('excessive punctuation');
+    points += moderation.excessivePunctuationPoints;
+  }
+
+  if (flags.length === 0) return entry('moderation', 'clean', 0);
+  return entry('moderation', flags.join(', '), points);
+}
+
+function countMatches(text: string, pattern: RegExp): number {
+  let count = 0;
+  for (const _match of text.matchAll(pattern)) count += 1;
+  return count;
+}
