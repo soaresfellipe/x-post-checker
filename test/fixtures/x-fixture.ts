@@ -44,6 +44,36 @@ export const FIXTURE_POSTS: readonly FixturePost[] = [
   { id: '1800000000000000012', handle: 'badge_elsewhere', displayName: 'Badge Elsewhere', text: 'My reply view shows a social badge that is not about me.', ageMinutes: 85, timeLabel: '1 h', replies: 5, reposts: 3, likes: 24, followBadge: 'unrelated' },
 ];
 
+/**
+ * Posts revealed ONLY by scrolling the home timeline: the fixture recycles its article nodes to
+ * show them (the virtualized-feed behavior — VAL-TARGET-001 off-screen, VAL-TARGET-002 recycle).
+ * id '15' doubles as a search-timeline post ("tool").
+ */
+export const EXTENDED_POSTS: readonly FixturePost[] = [
+  { id: '1800000000000000013', handle: 'rafa_ops', displayName: 'Rafa Ops', text: 'Migrated our CI to remote runners and cut build times in half.', ageMinutes: 45, timeLabel: '45 min', replies: 9, reposts: 6, likes: 140 },
+  { id: '1800000000000000014', handle: 'sofia_data', displayName: 'Sofia Data', verified: true, text: 'Hot take: dashboards are where insight goes to die.', ageMinutes: 200, timeLabel: '3 h', replies: 33, reposts: 11, likes: 260 },
+  { id: '1800000000000000015', handle: 'lucas_sec', displayName: 'Lucas Sec', text: 'What is your favorite tool for dependency auditing these days?', ageMinutes: 15, timeLabel: '15 min', replies: 21, reposts: 3, likes: 66 },
+];
+
+/** Posts reachable only from the profile and search timelines (SPA routes — VAL-TARGET-003). */
+export const EXTRA_POSTS: readonly FixturePost[] = [
+  { id: '1800000000000000016', handle: 'ana_builds', displayName: 'Ana Builds', verified: true, text: 'Weekend build: a tiny CLI that turns TODOs into issues.', ageMinutes: 90, timeLabel: '1 h', replies: 12, reposts: 5, likes: 180, followsViewer: true },
+  { id: '1800000000000000017', handle: 'ana_builds', displayName: 'Ana Builds', verified: true, text: 'Shipping beats perfect. Every time.', ageMinutes: 1440, timeLabel: '1 dia', replies: 7, reposts: 9, likes: 240, followsViewer: true },
+  { id: '1800000000000000018', handle: 'tool_finder', displayName: 'Tool Finder', text: 'Compiled a list of the best tools for small teams this year.', ageMinutes: 120, timeLabel: '2 h', replies: 18, reposts: 22, likes: 310 },
+];
+
+/** Every post the fixture can render, on any route. */
+export const ALL_POSTS: readonly FixturePost[] = [...FIXTURE_POSTS, ...EXTENDED_POSTS, ...EXTRA_POSTS];
+
+/** The home timeline's Following tab: in-network posts, two of them shared with the scroll set. */
+export const FOLLOWING_IDS: readonly string[] = [
+  '1800000000000000002',
+  '1800000000000000006',
+  '1800000000000000008',
+  '1800000000000000013',
+  '1800000000000000014',
+];
+
 const escapeHtml = (value: string): string =>
   value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
@@ -65,6 +95,12 @@ function renderPost(post: FixturePost, now: number): string {
   const verified = post.verified
     ? '<svg viewBox="0 0 22 22" width="18" height="18" aria-label="Conta verificada" role="img" data-testid="icon-verified"><path d="M0 0h22v22H0z" fill="none"/></svg>'
     : '';
+  // The article-level viewer-follows-author marker (the inNetwork extraction contract): rendered
+  // ONLY for authors the viewer follows. Real x.com exposes no such marker in timeline articles
+  // (library/x-dom.md, verified absence) — this fixture shape is what exercises the extraction.
+  const followsMarker = post.followsViewer
+    ? '<span data-testid="viewerFollowsAuthor">Seguindo</span>'
+    : '';
   const replyingTo = post.replyingTo
     ? `<div dir="ltr"><span>Respondendo a </span><a href="/${post.replyingTo}" role="link">@${post.replyingTo}</a></div>`
     : '';
@@ -81,6 +117,7 @@ function renderPost(post: FixturePost, now: number): string {
     <a href="/${post.handle}/status/${post.id}" role="link"><time datetime="${datetime}">${escapeHtml(post.timeLabel)}</time></a>
   </div>
   <button data-testid="caret" type="button" aria-label="Mais"></button>
+  ${followsMarker}
   ${replyingTo}
   <div data-testid="tweetText" lang="en" dir="auto"><span>${body}</span></div>
   ${photo}
@@ -92,6 +129,8 @@ function renderPost(post: FixturePost, now: number): string {
   </div>
 </article></div></div>`;
 }
+
+export { renderPost };
 
 /**
  * A composer-LESS route view (like x.com's Explore): an unrelated DraftEditor search box with no
@@ -125,11 +164,17 @@ export function renderFixtureHtml(now: number = Date.now()): string {
   [data-testid="sidebarNav"] { position: fixed; top: 6px; left: 8px; z-index: 20; }
   [contenteditable] { min-height: 48px; border: 1px solid #cfd9de; padding: 8px; }
   button { background: none; border: 0; cursor: pointer; }
+  [role="tab"] { display: inline-block; padding: 8px 16px; cursor: pointer; color: #536471; }
+  [role="tab"][aria-selected="true"] { color: #0f1419; font-weight: 700; border-bottom: 2px solid #1d9bf0; }
 </style>
 </head>
 <body>
 <div id="react-root">
-<nav data-testid="sidebarNav"><a href="/explore" role="link" data-testid="navExplore"><span>Explorar</span></a></nav>
+<nav data-testid="sidebarNav">
+  <a href="/explore" role="link" data-testid="navExplore"><span>Explorar</span></a>
+  <a href="/ana_builds" role="link" data-testid="navProfile"><span>Perfil</span></a>
+  <a href="/search?q=tool" role="link" data-testid="navSearch"><span>Buscar</span></a>
+</nav>
 <main role="main">
   <div data-testid="primaryColumn">
     <div data-testid="toolBar">
@@ -142,7 +187,11 @@ export function renderFixtureHtml(now: number = Date.now()): string {
       <button type="button" data-testid="addMedia" aria-label="Adicionar midia"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M0 0h24v24H0z" fill="none"/></svg></button>
       <button type="button" data-testid="tweetButtonInline" aria-disabled="true">Postar</button>
     </div>
-    <div aria-label="Timeline: Sua Página Inicial">
+    <div role="tablist" data-testid="homeTabs">
+      <div role="tab" data-testid="tabForYou" aria-selected="true"><span>Para voce</span></div>
+      <div role="tab" data-testid="tabFollowing" aria-selected="false"><span>Seguindo</span></div>
+    </div>
+    <div data-testid="primaryTimeline" aria-label="Timeline: Sua Página Inicial">
 ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
     </div>
   </div>
@@ -151,30 +200,90 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
 <script>
 (function () {
   'use strict';
+  // Per-DOCUMENT-LOAD stamp: pushState navigation keeps this value, a reload replaces it —
+  // E2E asserts SPA navigation ran without a reload by comparing epochs.
+  window.__fixtureEpoch = Math.random();
   var primary = document.querySelector('[data-testid="primaryColumn"]');
   if (!primary) return;
   var homeHtml = primary.innerHTML;
   var POSTS_BY_ID = ${JSON.stringify(
     Object.fromEntries(
-      FIXTURE_POSTS.map((post) => [
+      ALL_POSTS.map((post) => [
         post.id,
         {
           handle: post.handle,
+          text: post.text,
           followBadge: post.followBadge ?? (post.followsViewer === true ? 'visible' : null),
         },
       ]),
     ),
   )};
-  // Rendered primary-post markup by status id, for the REAL status-page view below.
-  var STATUS_POSTS_HTML = ${JSON.stringify(
-    Object.fromEntries(FIXTURE_POSTS.map((post) => [post.id, renderPost(post, now)])),
+  var ALL_IDS = ${JSON.stringify(ALL_POSTS.map((post) => post.id))};
+  // Full cell (cellInnerDiv wrapper) and bare article-inner markup by status id: the first renders
+  // timelines from data, the second is the recycling payload (the SAME article node re-rendered
+  // for a different post — VAL-TARGET-002).
+  var CELL_HTML = ${JSON.stringify(
+    Object.fromEntries(ALL_POSTS.map((post) => [post.id, renderPost(post, now)])),
   )};
+  var ARTICLE_INNER_HTML = ${JSON.stringify(
+    Object.fromEntries(
+      ALL_POSTS.map((post) => {
+        // String surgery (no DOM here — the fixture server renders this in Node): the markup
+        // between <article ...> and </article> of the canonical render.
+        const cell = renderPost(post, now);
+        const openTagEnd = cell.indexOf('>', cell.indexOf('<article')) + 1;
+        return [post.id, cell.slice(openTagEnd, cell.lastIndexOf('</article>'))];
+      }),
+    ),
+  )};
+  var FOLLOWING_IDS = ${JSON.stringify(FOLLOWING_IDS)};
+  var EXTENDED_IDS = ${JSON.stringify(EXTENDED_POSTS.map((post) => post.id))};
+  var extendedNext = 0;
+  var currentTab = 'foryou';
 
   function statusId(path) {
     var match = /\\/status\\/(\\d+)/.exec(path);
     return match ? match[1] : null;
   }
 
+  function searchQuery(path) {
+    var match = /\\/search\\/?\\?q=([^&]+)/.exec(path);
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
+  function isKnownHandle(path) {
+    var match = /^\\/([A-Za-z0-9_]{1,20})\\/?$/.exec(path);
+    return match && POSTS_BY_ID[ALL_IDS.find(function (id) { return POSTS_BY_ID[id].handle === match[1]; })] ? match[1] : null;
+  }
+
+  function cellOf(id) { return CELL_HTML[id] || ''; }
+
+  function setTab(tab) {
+    currentTab = tab;
+    var forYou = primary.querySelector('[data-testid="tabForYou"]');
+    var following = primary.querySelector('[data-testid="tabFollowing"]');
+    if (forYou) forYou.setAttribute('aria-selected', tab === 'foryou' ? 'true' : 'false');
+    if (following) following.setAttribute('aria-selected', tab === 'following' ? 'true' : 'false');
+  }
+
+  function renderTimelineIds(ids) {
+    var timeline = primary.querySelector('[data-testid="primaryTimeline"]');
+    if (timeline) timeline.innerHTML = ids.map(cellOf).join('');
+    extendedNext = 0;
+  }
+
+  // For You: restore the captured home chrome (composer + tabs + timeline); Following: same
+  // chrome, the Following timeline rendered in place (like x.com's tab — no route change).
+  function renderHome(tab) {
+    primary.innerHTML = homeHtml;
+    setTab(tab);
+    if (tab === 'following') renderTimelineIds(FOLLOWING_IDS);
+  }
+
+  /**
+   * The reply-DIALOG view (tweetTextarea_1 + visible reply chip): what a status-link CLICK opens
+   * (kept from M2). Popstate/back lands on the REAL status-page shape instead (below).
+   */
   function renderReplyView(id) {
     var post = POSTS_BY_ID[id];
     if (!post) return;
@@ -202,10 +311,6 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
       '</div>';
   }
 
-  function renderHome() {
-    primary.innerHTML = homeHtml;
-  }
-
   /**
    * The REAL status-page view (library/x-dom.md, verified 2026-10-03): the primary post above an
    * inline "Post your reply" composer whose testid is tweetTextarea_0 and whose REGION (the plain
@@ -213,7 +318,7 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
    * follow badge. Reply context on this shape comes from the ROUTE (/<handle>/status/<id>).
    */
   function renderStatusPageView(id) {
-    var postHtml = STATUS_POSTS_HTML[id];
+    var postHtml = CELL_HTML[id];
     if (!postHtml) return;
     primary.innerHTML =
       '<div data-testid="statusView">' +
@@ -230,17 +335,67 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
       '</div>';
   }
 
+  // The profile timeline: every post by the handle, newest first (data-derived — VAL-TARGET-003).
+  function renderProfileView(handle) {
+    var ids = ALL_IDS.filter(function (id) { return POSTS_BY_ID[id].handle === handle; });
+    primary.innerHTML =
+      '<div data-testid="profileView">' +
+      '<nav><a href="/" role="link" data-testid="navHome"><span>Pagina inicial</span></a></nav>' +
+      '<h1>@' + handle + '</h1>' +
+      '<div data-testid="primaryTimeline">' + ids.map(cellOf).join('') + '</div>' +
+      '</div>';
+  }
+
+  // The search timeline: every post whose text matches the query (data-derived — VAL-TARGET-003).
+  function renderSearchView(query) {
+    var needle = query.toLowerCase();
+    var ids = ALL_IDS.filter(function (id) { return POSTS_BY_ID[id].text.toLowerCase().indexOf(needle) !== -1; });
+    primary.innerHTML =
+      '<div data-testid="searchView">' +
+      '<nav><a href="/" role="link" data-testid="navHome"><span>Pagina inicial</span></a></nav>' +
+      '<h1>Buscar: ' + query + '</h1>' +
+      '<div data-testid="primaryTimeline">' + ids.map(cellOf).join('') + '</div>' +
+      '</div>';
+  }
+
   var EXPLORE_VIEW_HTML = ${JSON.stringify(renderExploreViewHtml())};
   function renderExploreView() {
     primary.innerHTML = EXPLORE_VIEW_HTML;
   }
 
-  // A direct load of /explore starts on the composer-less view (full reloads keep real routes).
-  if (location.pathname === '/explore') renderExploreView();
-  // A direct load of a status URL starts on the REAL status-page view (inline "Post your reply"
-  // composer, tweetTextarea_0, NO chip — the verified real shape; home stays captured above).
-  var initialStatusId = statusId(location.pathname);
-  if (initialStatusId) renderStatusPageView(initialStatusId);
+  // Direct loads keep real routes: /explore is composer-less, status URLs show the REAL
+  // status-page shape, /search?q= and known-handle paths show their timelines, everything else
+  // is the For You home.
+  if (location.pathname === '/explore') {
+    renderExploreView();
+  } else if (location.pathname === '/search') {
+    renderSearchView(searchQuery(location.search) || '');
+  } else if (statusId(location.pathname)) {
+    renderStatusPageView(statusId(location.pathname));
+  } else if (isKnownHandle(location.pathname)) {
+    renderProfileView(isKnownHandle(location.pathname));
+  }
+
+  /**
+   * Virtualized-feed recycling (VAL-TARGET-002): near the bottom, the OLDEST timeline cell is
+   * recycled for the next extended post — the SAME article node re-rendered for a different post
+   * id and moved to the end, so the node count never grows.
+   */
+  window.addEventListener('scroll', function () {
+    if (location.pathname !== '/' && location.pathname !== '/home') return;
+    if (currentTab !== 'foryou') return; // only the For You timeline extends by recycling
+    if (extendedNext >= EXTENDED_IDS.length) return;
+    var doc = document.documentElement;
+    if (window.scrollY + window.innerHeight < doc.scrollHeight - 60) return;
+    var timeline = primary.querySelector('[data-testid="primaryTimeline"]');
+    var firstCell = timeline ? timeline.firstElementChild : null;
+    var article = firstCell ? firstCell.querySelector('article') : null;
+    if (!article) return;
+    var nextId = EXTENDED_IDS[extendedNext];
+    extendedNext += 1;
+    article.innerHTML = ARTICLE_INNER_HTML[nextId];
+    timeline.appendChild(firstCell);
+  });
 
   function makeAttachments() {
     var wrap = document.createElement('div');
@@ -273,10 +428,32 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
       renderExploreView();
       return;
     }
+    if (target.closest('[data-testid="navProfile"]')) {
+      event.preventDefault();
+      history.pushState({}, '', '/ana_builds');
+      renderProfileView('ana_builds');
+      return;
+    }
+    if (target.closest('[data-testid="navSearch"]')) {
+      event.preventDefault();
+      history.pushState({}, '', '/search?q=tool');
+      renderSearchView('tool');
+      return;
+    }
     if (target.closest('[data-testid="navHome"]')) {
       event.preventDefault();
       history.pushState({}, '', '/');
-      renderHome();
+      renderHome('foryou');
+      return;
+    }
+    if (target.closest('[data-testid="tabForYou"]')) {
+      renderHome('foryou');
+      return;
+    }
+    if (target.closest('[data-testid="tabFollowing"]')) {
+      // Like x.com's Following tab: the timeline swaps in place, the URL does not change.
+      setTab('following');
+      renderTimelineIds(FOLLOWING_IDS);
       return;
     }
     var statusLink = target.closest('a[href*="/status/"]');
@@ -304,7 +481,9 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
     // Back/forward into a status route lands on the REAL status-page shape (like a fresh visit);
     // status-link CLICKS above still open the reply-DIALOG shape (tweetTextarea_1 + chip).
     if (id) renderStatusPageView(id);
-    else renderHome();
+    else if (location.pathname === '/search') renderSearchView(searchQuery(location.search) || '');
+    else if (isKnownHandle(location.pathname)) renderProfileView(isKnownHandle(location.pathname));
+    else renderHome('foryou');
   });
 })();
 </script>

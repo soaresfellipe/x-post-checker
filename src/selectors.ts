@@ -38,11 +38,27 @@ export const SELECTORS = {
   userName: ['[data-testid="User-Name"]'],
   verifiedIcon: ['[data-testid="icon-verified"]'],
   timestamp: ['time[datetime]'],
+  /** Media attached to a timeline post (article-scoped queries only). */
+  postMedia: ['[data-testid="tweetPhoto"]', '[data-testid="videoPlayer"]'],
+  /**
+   * Timeline-article viewer-follows-author marker — the `inNetwork` extraction source. Real x.com
+   * exposes NO viewer-follows-author marker in timeline articles (verified read-only inspection
+   * 2026-10-03: the real Following feed had zero `socialContext`/`userFollowIndicator` nodes at
+   * scan time — `library/x-dom.md`), so on the real site this chain matches nothing and
+   * `inNetwork` extracts false — honest absence, never guessed. `socialContext` is deliberately
+   * NOT used: on real x.com it is a generic context slot ("X liked"), and `userFollowIndicator`
+   * means the REVERSE ("Follows you"). The fixture renders this marker (fixture contract) on
+   * articles of authors the viewer follows; a future REAL marker gets registered here only with
+   * the same evidence standard.
+   */
+  viewerFollowsAuthor: ['[data-testid="viewerFollowsAuthor"]'],
   replyButton: ['[data-testid="reply"]'],
   retweetButton: ['[data-testid="retweet"]'],
   likeButton: ['[data-testid="like"]'],
   bookmarkButton: ['[data-testid="bookmark"]'],
   statusLink: ['a[href*="/status/"]'],
+  /** The visible count inside an engagement button (real x.com testid). */
+  buttonCount: ['[data-testid="app-text-transition-container"]'],
 } as const satisfies Record<string, readonly string[]>;
 
 export type SelectorKey = keyof typeof SELECTORS;

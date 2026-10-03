@@ -5,6 +5,7 @@ import { createLocalSettingsStore, DEFAULT_SETTINGS, type Settings } from '@/cor
 import { stampMarkerRevision } from '@/dom/marker';
 import { applyEnabled } from '@/dom/marker/lifecycle';
 import { createScoreOverlay } from '@/dom/overlay';
+import { createTimelineScanner, stampScannerDiagnostics, type TimelineScanner } from '@/dom/timeline-scanner';
 import {
   createComposerWatcher,
   describeComposer,
@@ -100,6 +101,31 @@ export default defineContentScript({
       stamp();
     }
 
+    // Timeline scanner lifecycle parallels the watcher's: scanning (and the badge-host mounts it
+    // guarantees) run only while the master switch is on. Scoring dispatches are counted and
+    // stamped; the target-scoring pipeline (m3-target-scorer + badges) consumes the scanner's
+    // dispatch events through the typed background protocol — the diff policy (new/changed only)
+    // is enforced by the scanner itself.
+    let scanner: TimelineScanner | null = null;
+    let scannerDispatches = 0;
+
+    function startScanner(): void {
+      if (scanner) return;
+      scanner = createTimelineScanner({
+        dispatchScoring: () => {
+          scannerDispatches += 1;
+          stampScannerDiagnostics(document, { dispatches: scannerDispatches });
+        },
+      });
+      scanner.start();
+    }
+
+    function stopScanner(): void {
+      scanner?.stop();
+      scanner = null;
+      scannerDispatches = 0;
+    }
+
     // One apply path for both delivery routes: broadcasts (the background's low-latency hint) and
     // storage.onChanged events (authoritative — they fire for every persisted write, so a lost or
     // rejected broadcast still converges). The revision gate inside drops anything not strictly
@@ -107,9 +133,15 @@ export default defineContentScript({
     const sync = createSettingsSync((settings, revision) => {
       current = settings;
       overlay.onSettings(settings, revision);
-      if (settings.enabled) startWatcher();
-      else stopWatcher();
+      // The marker mounts FIRST so the scanner's start-up diagnostics land on it.
       applyEnabled(settings.enabled, onMounted);
+      if (settings.enabled) {
+        startWatcher();
+        startScanner();
+      } else {
+        stopWatcher();
+        stopScanner();
+      }
       stampMarkerRevision(revision);
       stamp();
     });
@@ -129,9 +161,14 @@ export default defineContentScript({
       if (sync.hasAppliedAny()) return;
       current = settings;
       overlay.onSettings(settings);
-      if (settings.enabled) startWatcher();
-      else stopWatcher();
       applyEnabled(settings.enabled, onMounted);
+      if (settings.enabled) {
+        startWatcher();
+        startScanner();
+      } else {
+        stopWatcher();
+        stopScanner();
+      }
     });
 
     // Initial key-presence fact (presence only). The gate drops it when a storage event already
