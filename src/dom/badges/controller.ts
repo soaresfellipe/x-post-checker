@@ -117,12 +117,14 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
 
   function paintBadge(event: ScanEvent, score: TargetScore): void {
     const shadow = event.host.shadowRoot ?? event.host.attachShadow({ mode: 'open' });
-    if (shadow.querySelector('style') === null) {
-      const style = doc.createElement('style');
+    // Idempotent repaint: every scan pass rebuilds the shadow content from THIS event's data, so
+    // repeated passes (and recycled hosts re-rendered for a new post) can never accumulate
+    // duplicate badge buttons (VAL-TARGET-008's "without duplicate hosts" contract).
+    let style = shadow.querySelector('style');
+    if (style === null) {
+      style = doc.createElement('style');
       style.textContent = BADGE_STYLE;
-      shadow.append(style);
     }
-    event.host.style.height = 'auto';
 
     const reason = badgeReason(score);
     const button = doc.createElement('button');
@@ -140,6 +142,8 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
     reasonSpan.className = 'reason';
     reasonSpan.textContent = reason;
     button.append(scoreSpan, reasonSpan);
+    shadow.replaceChildren(style, button);
+    event.host.style.height = 'auto';
     // Click isolation (VAL-TARGET-016): the badge consumes its own activation so the underlying
     // post's handlers, navigation, and controls never see it. The popover still opens.
     button.addEventListener('click', (domEvent) => {
@@ -147,7 +151,6 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
       domEvent.preventDefault();
       openPopoverFor(event.post, score, event.article);
     });
-    shadow.append(button);
   }
 
   function clearHost(event: ScanEvent): void {

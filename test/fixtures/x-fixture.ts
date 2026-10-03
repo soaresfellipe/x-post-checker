@@ -203,6 +203,42 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
   // Per-DOCUMENT-LOAD stamp: pushState navigation keeps this value, a reload replaces it —
   // E2E asserts SPA navigation ran without a reload by comparing epochs.
   window.__fixtureEpoch = Math.random();
+  // E2E activation counters (VAL-TARGET-007/016): a BUBBLE-phase document listener records every
+  // click that reaches the page — a badge (or any extension surface) that stops propagation is
+  // invisible here, which is exactly what the tests assert. Native controls additionally mark
+  // themselves, so the "fixture handler ran" evidence is per-control and per-article.
+  window.__fixtureClicks = { articles: {}, controls: {} };
+  document.addEventListener('click', function (event) {
+    var target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    var article = target.closest('article[data-testid="tweet"]');
+    if (article) {
+      var link = article.querySelector('a[href*="/status/"]');
+      var match = link ? /\\/status\\/(\\d+)/.exec(link.getAttribute('href') || '') : null;
+      if (match) window.__fixtureClicks.articles[match[1]] = (window.__fixtureClicks.articles[match[1]] || 0) + 1;
+    }
+    var control = target.closest('[data-testid="reply"],[data-testid="retweet"],[data-testid="like"],[data-testid="bookmark"]');
+    if (control) {
+      var key = control.getAttribute('data-testid');
+      window.__fixtureClicks.controls[key] = (window.__fixtureClicks.controls[key] || 0) + 1;
+      control.setAttribute('data-fixture-activated', 'true');
+    }
+  }, false);
+  // E2E re-render hook (VAL-TARGET-008): re-render one article's subtree from its canonical
+  // markup while preserving its status URL — the badge host dies with the subtree and the
+  // scanner's next pass must restore exactly one badge.
+  window.__fixtureReplaceArticleInner = function (id) {
+    var articles = document.querySelectorAll('article[data-testid="tweet"]');
+    for (var i = 0; i < articles.length; i++) {
+      var link = articles[i].querySelector('a[href*="/status/' + id + '"]');
+      if (link && ARTICLE_INNER_HTML[id]) {
+        articles[i].innerHTML = ARTICLE_INNER_HTML[id];
+        return true;
+      }
+    }
+    return false;
+  };
+
   var primary = document.querySelector('[data-testid="primaryColumn"]');
   if (!primary) return;
   var homeHtml = primary.innerHTML;

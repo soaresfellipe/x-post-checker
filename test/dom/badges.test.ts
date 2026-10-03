@@ -170,9 +170,11 @@ describe('badge eligibility and content (VAL-TARGET-005/006, DOM tier)', () => {
     const harness = startHarness();
     await waitThrottle();
     await waitThrottle(); // a second full pass over the same visible posts
-    const hostCounts = harness.badgeHosts().map((host) => (badgeInShadow(host) ? 1 : 0));
+    const hostCounts = harness.badgeHosts().map(
+      (host) => host.shadowRoot?.querySelectorAll(`[data-testid="${BADGE_TESTID}"]`).length ?? 0,
+    );
     expect(hostCounts.length).toBeGreaterThan(0);
-    expect(hostCounts.every((count) => count <= 1)).toBe(true);
+    expect(hostCounts.every((count) => count <= 1)).toBe(true); // one BUTTON per host, not just one host
     expect(harness.badgeCount()).toBe(harness.badgeHosts().filter((host) => badgeInShadow(host) !== null).length);
     harness.teardown();
   });

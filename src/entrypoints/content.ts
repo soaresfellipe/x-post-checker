@@ -5,6 +5,7 @@ import { createLocalSettingsStore, DEFAULT_SETTINGS, type Settings } from '@/cor
 import { stampMarkerRevision } from '@/dom/marker';
 import { applyEnabled } from '@/dom/marker/lifecycle';
 import { createScoreOverlay } from '@/dom/overlay';
+import { createTargetBadges } from '@/dom/badges';
 import { createTimelineScanner, stampScannerDiagnostics, type TimelineScanner } from '@/dom/timeline-scanner';
 import {
   createComposerWatcher,
@@ -103,11 +104,26 @@ export default defineContentScript({
 
     // Timeline scanner lifecycle parallels the watcher's: scanning (and the badge-host mounts it
     // guarantees) run only while the master switch is on. Scoring dispatches are counted and
-    // stamped; the target-scoring pipeline (m3-target-scorer + badges) consumes the scanner's
-    // dispatch events through the typed background protocol — the diff policy (new/changed only)
-    // is enforced by the scanner itself.
+    // stamped; target scoring itself is the pure in-tab scorer inside the badges controller
+    // (timeline scanning NEVER touches the network — VAL-TARGET-019), and the scanner's diff
+    // policy (new/changed only) governs the scoring-dispatch counter.
     let scanner: TimelineScanner | null = null;
     let scannerDispatches = 0;
+
+    // The target badges + popover. The ONLY AI path is the popover's explicit "Deep analysis"
+    // action, dispatched per post through the typed background protocol (cached there per post
+    // id); every refusal/failure maps to a typed result the popover renders.
+    const badges = createTargetBadges({
+      getSettings: () => current,
+      getKeyPresence: () => keyPresent,
+      requestDeepAnalysis: (post) =>
+        sendMessage('analyze-target', { post }).then((response) =>
+          response.ok ? response.data : { kind: 'error', failure: { kind: 'network', reason: 'unreachable' } },
+        ),
+      openOptions: () => {
+        void sendMessage('open-options-page', {}).catch(() => undefined);
+      },
+    });
 
     function startScanner(): void {
       if (scanner) return;
@@ -117,11 +133,14 @@ export default defineContentScript({
           stampScannerDiagnostics(document, { dispatches: scannerDispatches });
         },
       });
+      scanner.onScan((event) => badges.onScan(event));
       scanner.start();
+      badges.start();
     }
 
     function stopScanner(): void {
-      scanner?.stop();
+      badges.stop(); // closes the popover, forgets per-post analysis state
+      scanner?.stop(); // removes every badge host — zero extension presence remains
       scanner = null;
       scannerDispatches = 0;
     }
@@ -131,6 +150,7 @@ export default defineContentScript({
     // rejected broadcast still converges). The revision gate inside drops anything not strictly
     // newer than what this tab already applied, whatever order the events arrive in.
     const sync = createSettingsSync((settings, revision) => {
+      const previous = current;
       current = settings;
       overlay.onSettings(settings, revision);
       // The marker mounts FIRST so the scanner's start-up diagnostics land on it.
@@ -141,6 +161,13 @@ export default defineContentScript({
       } else {
         stopWatcher();
         stopScanner();
+      }
+      // Live preference propagation for the badge surfaces: the OPEN popover re-renders against
+      // the new settings immediately (AI off wins over a settled verdict, like the overlay), and
+      // a threshold change re-gates every visible badge on the next scan (VAL-TARGET-024).
+      if (settings.enabled) {
+        badges.onSettingsChanged();
+        if (previous.targetThreshold !== settings.targetThreshold) scanner?.rescan();
       }
       stampMarkerRevision(revision);
       stamp();
@@ -169,9 +196,7 @@ export default defineContentScript({
         stopWatcher();
         stopScanner();
       }
-    });
-
-    // Initial key-presence fact (presence only). The gate drops it when a storage event already
+    });    // Initial key-presence fact (presence only). The gate drops it when a storage event already
     // delivered a presence fact at this or a newer keyRevision.
     void store.getApiKeyWithRevision().then(({ apiKeyPresent, keyRevision }) => {
       if (keyGate.accept(keyRevision)) keyPresent = apiKeyPresent;
