@@ -23,3 +23,7 @@ research/
 # misc
 .DS_Store
 *.log
+
+# WXT
+.wxt/
+build/
