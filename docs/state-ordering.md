@@ -1,10 +1,13 @@
-# State-ordering spec — Options and popup pages
+# State-ordering spec — Options, popup, and draft-analysis state
 
-How the two extension pages order concurrent state facts so that what they render never regresses
-behind storage. Both pages conform to exactly these lanes; scrutiny review verifies against this
+How the extension orders concurrent state facts so that what it renders never regresses behind
+storage or behind newer in-flight work. The two pages conform to lanes (a)–(c); the draft
+overlay's terminal states to lane (d) and the Jev client's durable rate accounting to lane (e) —
+both extending this document's analysis-ordering family. Scrutiny review verifies against this
 document.
 
-Implementations: `src/dom/options/options-page.ts`, `src/dom/popup/popup-page.ts`.
+Implementations: `src/dom/options/options-page.ts`, `src/dom/popup/popup-page.ts`,
+`src/dom/overlay/{overlay,view-model}.ts`, `src/core/jev-client/rate-window.ts`.
 Shared gate: `createRevisionGate` in `src/core/message-protocol/broadcast.ts`.
 Store contracts: `src/core/settings-store/{store,types}.ts`.
 
@@ -109,6 +112,74 @@ and analysis updates never reorder settings state (nor the reverse).
 - The settings part of a refresh follows lane (a). When a refresh is dropped as settings-stale,
   its analysis render is dropped with it: any newer analysis fact arrives with its own event and
   its own refresh.
+
+## Lane (d) — draft terminal state: per-draft ownership (overlay)
+
+**Invariant:** every dispatched draft reaches exactly ONE terminal render — analyzed, failed, or
+superseded — and a settling dispatch affects only the draft identity it belongs to. No draft ever
+spins forever, and no draft silently downgrades to the ready phase
+(VAL-DRAFT-018; `src/dom/overlay/overlay.ts`, `src/dom/overlay/view-model.ts`).
+
+- Dispatches, results, and transport failures are keyed by the draft identity (`draftCacheKey`).
+  A settling dispatch may only mutate the state that belongs to ITS identity: its own pending
+  entry, its own failure entry, its own reply. It never settles "whatever is oldest".
+- Terminal transport failures are tracked PER DRAFT (a set of hashes), never in a single slot.
+  (A single slot let an older failing draft overwrite the current draft's failure record and
+  render it as ready — silently deleting both its local score and its explicit error notice.)
+- A result or failure for a NON-CURRENT draft never mutates what the current draft renders: the
+  current draft's render reads only its own pending entry, its own failure entry, and its own
+  matching reply. A non-current success retires only its own hash's failure and never claims the
+  reply slot (VAL-DRAFT-011's discard rule).
+- Capture prunes: when a new draft is captured, terminal state belonging to other identities is
+  dropped (bounded bookkeeping). The captured draft's own prior failure survives, so an identical
+  retype still shows its last terminal outcome until a fresh result retires it.
+- Precedence for the current draft's Jev half: matching reply > own transport failure >
+  pending spinner. The draft's OWN success clears its failure (success after failure recovers);
+  a draft's failure is never lifted by another draft's outcome.
+- A per-draft failure renders the honest degraded state: the local score stays usable with an
+  explicit transport-error notice — the failure never throws into the UI and never fabricates a
+  verdict.
+
+Pinned interleavings (regression tests, `test/dom/overlay.test.ts`, "transport-failure identity"):
+
+- B (current) fails first, then older A fails → B keeps its local score and explicit error, never
+  a downgrade to ready (the round-2 blocker regression).
+- A fails first while B is pending → B unaffected; B's own later failure settles B.
+- B settles with a verdict, then older A's transport fails late → B's verdict is intact
+  (failure after success).
+- B's transport fails, then its own re-dispatch (identical retype) succeeds → the failure is
+  cleared and the verdict renders (success after failure).
+
+## Lane (e) — durable rate accounting: fail closed (Jev client)
+
+**Invariant:** the configured requests-per-window maximum is never exceeded — not by retries, not
+across MV3 service-worker suspension, and not when storage fails (VAL-DRAFT-031;
+`src/core/jev-client/rate-window.ts`, wired to `storage.local` in the background).
+
+- Every transport attempt (retries included) persists a send stamp BEFORE the send starts,
+  write-serialized (the verdict-cache pattern), and a recreated client rehydrates the persisted
+  window at creation. These are the M1 single-writer/write-order invariants applied to the rate
+  window, so a restarted worker inherits the in-window send count.
+- FAIL CLOSED: when durable rate accounting cannot be established — the hydration read rejects,
+  or a reservation's write rejects — the limiter DENIES the send with the existing typed
+  `rate-limited` failure. It never sends with an unpersisted stamp, and it never silently drops
+  to in-memory-only accounting for a send: an unpersisted stamp is exactly the hole an MV3
+  restart walks through to exceed the hard maximum.
+- A denied reservation rolls its in-memory stamp back, so the in-memory window mirrors the
+  durable one (what a restarted worker would rehydrate).
+- The denial is the analyzer's honest degraded outcome (`jevStatus: 'rate-limited'`): the overlay
+  shows its explicit error notice while the local score stays usable — no thrown error reaches
+  the UI, and the render obeys lane (d)'s ownership rules as usual.
+
+Pinned interleavings (regression tests, `test/unit/jev-client.test.ts`, "persistent rate window"):
+
+- Rejected hydration read → typed rate-limited denial, zero transport calls.
+- Rejected reservation write → typed denial, zero transport calls.
+- Rejected writes plus a fresh client (simulated restart) inside the window → still denied; the
+  ceiling held across both client instances.
+- Storage breaks after an earlier successful send → the unpersistable reservation is denied, and
+  the restarted client (which rehydrated the persisted stamp) still denies: the real-send count
+  never exceeds the configured maximum.
 
 ## Pinned interleavings (regression tests)
 
