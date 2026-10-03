@@ -65,6 +65,54 @@ function makeKeyPageContext(handlers: Handlers) {
 }
 
 const okResult: ConnectionTestResult = { status: 'ok', model: 'jev-1.13.0', latencyMs: 5 };
+describe('seed-test-state handler (e2e-build-only seeding seam)', () => {
+  it('refuses when no seeder is wired (production builds never seed)', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend);
+    const handlers = createBackgroundHandlers({ store, analyzer, optimizer: test.optimizer, targetAnalyzer: test.targetAnalyzer });
+    const response = await handleRequest(
+      createRequest('seed-test-state', { settings: { enabled: false }, apiKey: 'key', jevEndpointOverride: 'http://localhost:3177/x' }),
+      handlers,
+    );
+    expect(response.ok).toBe(false);
+    if (!response.ok) expect(response.error).toContain('only available in e2e builds');
+    // Nothing leaked into storage through the refusal.
+    expect(Object.keys(memory.data)).toEqual([]);
+  });
+
+  it('applies the seed through the real single-writer store paths when wired', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend);
+    const handlers = createBackgroundHandlers({
+      store,
+      analyzer,
+      optimizer: test.optimizer,
+      targetAnalyzer: test.targetAnalyzer,
+      seedTestState: async ({ settings, apiKey }) => {
+        if (settings !== undefined) await store.setSettings(settings);
+        let keyRevision = 0;
+        if (apiKey !== undefined) {
+          keyRevision = (apiKey === '' ? await store.clearApiKey() : await store.setApiKey(apiKey)).keyRevision;
+        }
+        const settingsRevision = (await store.getSettingsWithRevision()).revision;
+        return { seeded: true, settingsRevision, keyRevision };
+      },
+    });
+    const response = await handleRequest(
+      createRequest('seed-test-state', {
+        settings: { enabled: true, jevForDrafts: true, targetThreshold: 70 },
+        apiKey: 'synthetic-key',
+      }),
+      handlers,
+    );
+    expect(response).toEqual({ ok: true, data: { seeded: true, settingsRevision: 1, keyRevision: 1 } });
+    // The write went through the store: sanitized settings + stamped revisions persisted.
+    expect(memory.data[API_KEY_STORAGE_KEY]).toBe('synthetic-key');
+    expect(memory.data[SETTINGS_REVISION_STORAGE_KEY]).toBe(1);
+    expect(memory.data[KEY_REVISION_STORAGE_KEY]).toBe(1);
+  });
+});
+
 describe('background single-writer for settings', () => {
   it('serializes concurrent writes from two independent contexts with unique revisions', async () => {
     const memory = createMemoryBackend();

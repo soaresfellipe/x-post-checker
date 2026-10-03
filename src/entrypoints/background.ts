@@ -9,7 +9,6 @@ import { createOptimizerService } from '@/core/optimizer';
 import { createJevClient, createStorageVerdictCache, createStorageTargetVerdictCache, createStorageOptimizerCache } from '@/core/jev-client';
 import { isE2EBuild, JEV_ENDPOINT_OVERRIDE_STORAGE_KEY } from '@/core/test-hooks';
 import { setJevEndpointOverrideForTests } from '@/core/jev-client/transport';
-
 export default defineBackground(() => {
   // Test-only seam (e2e builds): the Jev endpoint override is read live from storage so the
   // Firefox smoke harness can steer every Jev exchange to the fixture mock. Release builds never
@@ -55,6 +54,29 @@ export default defineBackground(() => {
     optimizer,
     // Content scripts cannot call runtime.openOptionsPage; their "Connect Jev" prompt routes here.
     openOptionsPage: () => browser.runtime.openOptionsPage(),
+    // Test-only (e2e builds): the smoke harness's seed, applied through the REAL single-writer
+    // paths. The endpoint override is applied to the live transport AND persisted for later
+    // worker restarts (the startup read below restores it).
+    ...(isE2EBuild() && {
+      seedTestState: async ({ settings, apiKey, jevEndpointOverride, openOptionsPage }) => {
+        if (settings !== undefined) await store.setSettings(settings);
+        let keyRevision = 0;
+        if (apiKey !== undefined) {
+          keyRevision = (apiKey === '' ? await store.clearApiKey() : await store.setApiKey(apiKey)).keyRevision;
+        }
+        if (jevEndpointOverride !== undefined) {
+          setJevEndpointOverrideForTests(jevEndpointOverride === '' ? undefined : jevEndpointOverride);
+          await browser.storage.local.set({ [JEV_ENDPOINT_OVERRIDE_STORAGE_KEY]: jevEndpointOverride });
+        }
+        if (openOptionsPage) {
+          // Firefox smoke harness: Marionette cannot navigate to extension pages, so the Options
+          // page is opened through the extension's own runtime API (same path as the popup).
+          browser.runtime.openOptionsPage().catch(() => {});
+        }
+        const settingsRevision = (await store.getSettingsWithRevision()).revision;
+        return { seeded: true, settingsRevision, keyRevision };
+      },
+    }),
   });
 
   browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {

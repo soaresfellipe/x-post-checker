@@ -2,7 +2,7 @@ import { onSettingsBroadcast, sendMessage } from '@/core/message-protocol/client
 import { createRevisionGate } from '@/core/message-protocol/broadcast';
 import { createSettingsSync } from '@/core/message-protocol/settings-sync';
 import { createLocalSettingsStore, DEFAULT_SETTINGS, type Settings } from '@/core/settings-store';
-import { E2E_SEED_MESSAGE_TYPE, isE2EBuild } from '@/core/test-hooks';
+import { E2E_SEED_APPLIED_MESSAGE_TYPE, E2E_SEED_MESSAGE_TYPE, isE2EBuild } from '@/core/test-hooks';
 import { stampMarkerRevision } from '@/dom/marker';
 import { applyEnabled } from '@/dom/marker/lifecycle';
 import { createScoreOverlay } from '@/dom/overlay';
@@ -20,16 +20,32 @@ export default defineContentScript({
   matches: ['https://x.com/*', 'https://twitter.com/*'],
   runAt: 'document_idle',
   main() {
-    // Test-only seed listener (e2e builds): the smoke harness's page driver posts an
-    // `amplifyx:e2e-seed` message whose payload lands in storage.local verbatim (settings, the
-    // synthetic key, the Jev endpoint override). Release builds never register it.
+    // Test-only seed relay (e2e builds): the smoke harness's page driver posts an
+    // `amplifyx:e2e-seed` message; this relays it to the background over the typed protocol
+    // ('seed-test-state'), whose handler applies it through the real single-writer store paths.
+    // The ack is posted back as `amplifyx:e2e-seed-applied` so the driver can await the seed
+    // deterministically. Direct storage writes from a content script are NOT used —
+    // `storage.onChanged` is unreliable in content scripts (fires for the first write only).
     if (isE2EBuild()) {
       window.addEventListener('message', (event) => {
         if (event.source !== window) return;
-        const data = event.data as { type?: unknown; payload?: unknown } | null;
-        if (!data || data.type !== E2E_SEED_MESSAGE_TYPE) return;
-        if (typeof data.payload !== 'object' || data.payload === null) return;
-        void browser.storage.local.set(data.payload as Record<string, unknown>);
+        const data = event.data as { type?: unknown; seedId?: unknown; payload?: unknown } | null;
+        if (!data || data.type !== E2E_SEED_MESSAGE_TYPE || typeof data.seedId !== 'string') return;
+        const payload = (typeof data.payload === 'object' && data.payload !== null ? data.payload : {}) as {
+          settings?: Partial<Settings>;
+          apiKey?: string;
+          jevEndpointOverride?: string;
+        };
+        void sendMessage('seed-test-state', payload)
+          .then((response) =>
+            window.postMessage(
+              { type: E2E_SEED_APPLIED_MESSAGE_TYPE, seedId: data.seedId, ok: response.ok, error: response.ok ? undefined : response.error },
+              '*',
+            ),
+          )
+          .catch((error: unknown) =>
+            window.postMessage({ type: E2E_SEED_APPLIED_MESSAGE_TYPE, seedId: data.seedId, ok: false, error: String(error) }, '*'),
+          );
       });
     }
 

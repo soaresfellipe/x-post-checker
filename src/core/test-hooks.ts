@@ -26,5 +26,8 @@ export function isE2EBuild(): boolean {
  */
 export const JEV_ENDPOINT_OVERRIDE_STORAGE_KEY = 'amplifyxTestJevEndpoint';
 
-/** The seed message type the fixture page posts; the e2e content script applies its payload. */
+/** The seed message type the fixture page posts; the e2e content script relays it to the background. */
 export const E2E_SEED_MESSAGE_TYPE = 'amplifyx:e2e-seed';
+
+/** The relay's ack, posted back to the page when the background applied (or refused) the seed. */
+export const E2E_SEED_APPLIED_MESSAGE_TYPE = 'amplifyx:e2e-seed-applied';

@@ -1,5 +1,5 @@
 import { defineConfig } from 'wxt';
-import { TEST_FIXTURE_MATCH, TEST_MODE } from './scripts/build-variants';
+import { TEST_FIXTURE_MATCH, TEST_FIXTURE_HOST_PERMISSIONS, TEST_MODE } from './scripts/build-variants';
 
 export default defineConfig({
   srcDir: 'src',
@@ -18,7 +18,9 @@ export default defineConfig({
     name: 'AmplifyX',
     description: 'Viral-potential assistant for X: live draft scoring and reply-target hints.',
     permissions: ['storage'],
-    host_permissions: ['https://api.typesafe.ai/*'],
+    // Firefox MV3 gates content-script injection on host permissions covering the match;
+    // Chrome treats these as granted at install, so the prompt text is unchanged.
+    host_permissions: ['https://api.typesafe.ai/*', 'https://x.com/*', 'https://twitter.com/*'],
     ...(browser === 'firefox' && {
       browser_specific_settings: {
         gecko: {
@@ -35,6 +37,11 @@ export default defineConfig({
       for (const script of manifest.content_scripts ?? []) {
         script.matches = [...(script.matches ?? []), TEST_FIXTURE_MATCH];
       }
+      // Same Firefox MV3 rule for the fixture origin: without host permission the e2e
+      // content script never injects in Firefox.
+      manifest.host_permissions = [
+        ...new Set([...(manifest.host_permissions ?? []), ...TEST_FIXTURE_HOST_PERMISSIONS]),
+      ];
     },
   },
 });

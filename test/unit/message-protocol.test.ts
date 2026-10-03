@@ -36,6 +36,9 @@ const handlers: Handlers = {
   'analyze-target': () => ({ kind: 'unavailable' }),
   'optimize-draft': () => ({ kind: 'unavailable' }),
   'open-options-page': () => ({ opened: true }),
+  'seed-test-state': () => {
+    throw new Error('seed-test-state is only available in e2e builds.');
+  },
 };
 
 describe('message protocol', () => {
@@ -99,6 +102,9 @@ describe('message protocol', () => {
         throw new Error('boom');
       },
       'open-options-page': () => {
+        throw new Error('boom');
+      },
+      'seed-test-state': () => {
         throw new Error('boom');
       },
     };

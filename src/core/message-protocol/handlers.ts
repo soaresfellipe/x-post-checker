@@ -9,6 +9,7 @@ import type { AnalyzerService } from '@/core/analyzer';
 import type { TargetAnalysisService } from '@/core/target-analysis';
 import type { OptimizerService } from '@/core/optimizer';
 import type { SettingsStore } from '@/core/settings-store';
+import type { MessageMap } from './index';
 import { PROTOCOL_VERSION, type Handlers } from './index';
 
 /** The slice of the connection-test runner the handler depends on (injectable for tests). */
@@ -33,6 +34,12 @@ export interface BackgroundHandlerDeps {
    * instead of pretending the page opened.
    */
   openOptionsPage?: () => Promise<void>;
+  /**
+   * Test-only seeder (e2e builds only — src/core/test-hooks.ts): applies the smoke harness's
+   * seed through the real single-writer store paths and persists the Jev endpoint override.
+   * Wired only in e2e builds; when absent the handler refuses (release builds never seed).
+   */
+  seedTestState?: (payload: MessageMap['seed-test-state']['request']) => Promise<MessageMap['seed-test-state']['response']>;
 }
 
 const TRIGGERS: readonly AnalysisTrigger[] = ['auto', 'manual'];
@@ -89,6 +96,12 @@ export function createBackgroundHandlers(deps: BackgroundHandlerDeps): Handlers 
       if (!deps.openOptionsPage) throw new Error('Options page opening is not available.');
       await deps.openOptionsPage();
       return { opened: true };
+    },
+    // Test-only (e2e builds): the smoke harness's settings/key/endpoint seed, applied through the
+    // REAL single-writer paths. Release builds refuse: no test seeding ships.
+    'seed-test-state': async (payload) => {
+      if (!deps.seedTestState) throw new Error('seed-test-state is only available in e2e builds.');
+      return deps.seedTestState(payload);
     },
   };
 }

@@ -12,6 +12,7 @@
     "@eslint/js": "^10.0.1",
     "@playwright/test": "1.63.0",
     "@types/node": "^22",
+    "esbuild": "^0.28.2",
     "eslint": "^10.12.0",
     "globals": "^17.13.0",
     "happy-dom": "^20.14.5",
@@ -38,6 +39,10 @@
     "test:unit": "vitest run test/unit",
     "test:dom": "vitest run test/dom",
     "test:e2e": "playwright test",
-    "fixture": "tsx scripts/fixture-server.ts"
+    "fixture": "tsx scripts/fixture-server.ts",
+    "parity": "tsx scripts/parity/run.ts --browser=both",
+    "parity:chrome": "tsx scripts/parity/run.ts --browser=chrome",
+    "smoke:firefox": "tsx scripts/parity/run.ts --browser=firefox",
+    "verify:packages": "pnpm package && tsx scripts/verify-packages.ts"
   }
 }

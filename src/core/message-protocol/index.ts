@@ -95,6 +95,28 @@ export interface MessageMap {
     request: Record<string, never>;
     response: { opened: true };
   };
+  /**
+   * Test-only seeding for the smoke harness (e2e builds — src/core/test-hooks.ts). The Firefox
+   * harness cannot reach the background any other way: it relays this request through the content
+   * script, and the background applies it through the REAL single-writer paths (settings, key)
+   * plus the e2e Jev endpoint override. Direct `storage.local` writes from a content script are
+   * NOT used: `storage.onChanged` is unreliable there (observed firing for only the first write
+   * per document), while runtime messages are the proven lane. Production builds throw.
+   */
+  'seed-test-state': {
+    request: {
+      /** Full settings applied via `set-settings` (sanitized by the store). */
+      settings?: Partial<Settings>;
+      /** `''` clears the key; any other string is stored as the API key. */
+      apiKey?: string;
+      /** `''` clears the override; a URL redirects every Jev exchange (e2e builds only). */
+      jevEndpointOverride?: string;
+      /** When true, the background also calls `open-options-page` (used by the Firefox smoke
+       * harness to exercise the Options page: Marionette cannot navigate to extension pages). */
+      openOptionsPage?: boolean;
+    };
+    response: { seeded: true; settingsRevision: number; keyRevision: number };
+  };
 }
 
 export type MessageType = keyof MessageMap;
@@ -123,6 +145,7 @@ const MESSAGE_TYPES: readonly string[] = [
   'analyze-target',
   'optimize-draft',
   'open-options-page',
+  'seed-test-state',
 ] satisfies MessageType[];
 
 export function createRequest<T extends MessageType>(type: T, payload: MessageMap[T]['request']): Request<T> {
