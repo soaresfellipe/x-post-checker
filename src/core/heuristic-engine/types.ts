@@ -34,6 +34,33 @@ export interface LocalScore {
   readonly signals: readonly SignalEntry[];
 }
 
+/**
+ * Why the eligibility filters remove a post from the reply-target set (scoreTarget). The two
+ * gates mirror the x-algorithm pre-score filters: AgeFilter (48h) and OONRetweetReplyFilter
+ * (out-of-network replies; out-of-network ORIGINALS remain eligible). When both gates hit, the
+ * recency reason wins (the age filter runs first in the source pipeline).
+ */
+export type TargetIneligibilityReason = 'stale-over-48h' | 'out-of-network-reply';
+
+/** The local heuristic result for one reply target. Pure data; rendering belongs to the badge/popover. */
+export interface TargetScore {
+  /**
+   * 0-100 headline; always 0 for an ineligible post — an ineligible post is never a reply target,
+   * regardless of its engagement counts (the 48h filter is a hard eligibility rule, not a decay).
+   */
+  readonly headline: number;
+  /** Raw weighted sum of the signal points; 0 for an ineligible post. */
+  readonly totalPoints: number;
+  readonly eligible: boolean;
+  /** Present only when `eligible` is false. */
+  readonly ineligibleReason?: TargetIneligibilityReason;
+  /**
+   * Per-signal breakdown. For an eligible post, one entry per evaluated signal; for an ineligible
+   * post, a single `eligibility` entry explaining the exclusion.
+   */
+  readonly signals: readonly SignalEntry[];
+}
+
 /** Qualitative Jev rubric band derived from the ordinal score (never shown as a probability). */
 export type JevBand = 'weak' | 'below-average' | 'moderate' | 'strong' | 'exceptional';
 

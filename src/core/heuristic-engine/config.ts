@@ -32,6 +32,14 @@ export interface ShareableFormat {
   readonly patterns: readonly RegExp[];
 }
 
+/**
+ * Engagement-bait downrank, shared by draft and target scoring (same BAIT_PATTERNS). The public
+ * model has no bait coefficient; the magnitude mirrors the strong negative-feedback coefficients
+ * ("not interested" -47.52, mute -58.8). One flat penalty per post, regardless of how many bait
+ * patterns match.
+ */
+const ENGAGEMENT_BAIT_PENALTY = -50;
+
 export const HEURISTIC_CONFIG = {
   /** Headline scale: raw signal points map onto the 0-100 headline from this neutral base. */
   headline: { base: 50, min: 0, max: 100 },
@@ -53,12 +61,8 @@ export const HEURISTIC_CONFIG = {
     externalLink: -2,
     /** Media flag: small positive (photo-expand/video-open are +0.05/+0.07; no large media bonus is public). */
     media: 1,
-    /**
-     * Engagement-bait downrank. The public model has no bait coefficient; the magnitude mirrors the
-     * strong negative-feedback coefficients ("not interested" -47.52, mute -58.8). One flat penalty
-     * per draft, regardless of how many bait patterns match.
-     */
-    engagementBait: -50,
+    /** Engagement-bait downrank (shared with target scoring, constant below). */
+    engagementBait: ENGAGEMENT_BAIT_PENALTY,
     /**
      * Reply drafts replying to an account the VIEWER visibly follows (`replyToFollowedByViewer`:
      * the viewer follows the reply target — never the reverse). Grounded in
@@ -155,6 +159,73 @@ export const JEV_BAND_LABELS: Readonly<Record<string, string>> = {
   strong: 'Strong',
   exceptional: 'Exceptional',
 };
+
+/**
+ * Reply-target scoring (M3, `scoreTarget` in ./target-scorer). The signal set and directions are
+ * the mission-approved ones; the two eligibility gates mirror the x-algorithm pre-score filters
+ * (AgeFilter, OONRetweetReplyFilter). Weights are headline-scale points on the SAME 0-100 scale as
+ * draft scoring (`HEURISTIC_CONFIG.headline`), NOT the source model's coefficients.
+ */
+export const TARGET_CONFIG = {
+  /**
+   * AgeFilter (hard eligibility): candidates older than 48 hours are removed regardless of
+   * engagement. "Older than" is strict — a post captured at exactly maxAgeMinutes is still in.
+   */
+  recency: { maxAgeMinutes: 48 * 60 },
+
+  weights: {
+    /** A question invites predicted replies (the +5.0 reply coefficient, as the draft question signal). */
+    question: 5,
+    /**
+     * Verified author: small directional modifier, never dominant (contract: the verified gain
+     * must stay smaller than the reply-ratio gain). The source publishes no verified weight —
+     * author-credibility nudge only, never an account-size proxy.
+     */
+    verified: 2,
+    /**
+     * Conversation depth: a post that is itself a reply sits inside an already-deep thread, where
+     * a new reply is buried; shallow (original) conversations are better reply targets. Directional
+     * only — the source publishes no thread-depth coefficient.
+     */
+    deepThreadPenalty: -3,
+    /**
+     * BidirectionalFollowReplyWeightBoost direction (+15 added to the reply coefficient for
+     * ORIGINAL posts by mutuals; the source excludes replies/reposts). Per the validation contract
+     * the +15 is NOT reused as a literal extension score, and the DOM only ever proves
+     * viewer-follows-author — so this applies to original posts with a visible network marker,
+     * never to replies as targets.
+     */
+    mutualBoost: 5,
+    /** Same engagement-bait downrank as drafts (shared constant above). */
+    engagementBait: ENGAGEMENT_BAIT_PENALTY,
+  },
+
+  /**
+   * Engagement-velocity bands (visible counts / post age), checked top-down: the first band whose
+   * minPerHour the velocity reaches wins. Directional bands — the source publishes no velocity
+   * formula. Zero visible engagement scores 0 (no momentum yet); posts with NO visible counts are
+   * never scored (never guessed).
+   */
+  velocityBands: [
+    { minPerHour: 100, points: 14, note: 'very high velocity' },
+    { minPerHour: 20, points: 10, note: 'high velocity' },
+    { minPerHour: 4, points: 6, note: 'moderate velocity' },
+    { minPerHour: 0.5, points: 3, note: 'low velocity' },
+    { minPerHour: Number.NEGATIVE_INFINITY, points: 1, note: 'minimal velocity' },
+  ] as readonly { minPerHour: number; points: number; note: string }[],
+
+  /**
+   * Reply:like ratio bands (active-conversation detector), checked top-down. The source publishes
+   * no ratio threshold; bands are directional. Both counts must be visible (never guessed);
+   * replies with zero likes divide by 1 (replies-without-likes are maximally conversational).
+   */
+  replyRatioBands: [
+    { minRatio: 0.2, points: 12, note: 'very active conversation' },
+    { minRatio: 0.1, points: 9, note: 'active conversation' },
+    { minRatio: 0.03, points: 5, note: 'growing conversation' },
+    { minRatio: Number.NEGATIVE_INFINITY, points: 2, note: 'light conversation' },
+  ] as readonly { minRatio: number; points: number; note: string }[],
+} as const;
 
 /** Strong/definitive claims that invite quote-replies ("strong claims" in the reply-magnet signal). */
 export const STRONG_CLAIM_PATTERNS: readonly RegExp[] = [
