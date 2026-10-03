@@ -131,8 +131,8 @@ function startHarness(options: HarnessOptions = {}): Harness {
     },
   });
   scanner.onScan((event) => badges.onScan(event));
+  badges.start(); // running BEFORE the first pass: scanner.start() scans synchronously
   scanner.start();
-  badges.start();
   harness.scanner = scanner;
   return harness;
 }
@@ -484,12 +484,13 @@ describe('view-model helpers', () => {
   });
 });
 
+/** The like-count digits + aria-label of a fixture article, changed IN PLACE (text node + attribute). */
+function bumpLikeCount(article: Element, value: string): void {
+  article.querySelector('[data-testid="like"] [data-testid="app-text-transition-container"] span')!.firstChild!.textContent = value;
+  article.querySelector('[data-testid="like"]')!.setAttribute('aria-label', `${value} Curtidas. Curtir`);
+}
+
 describe('scoring memoization — unchanged posts are never rescored (VAL-TARGET-004, integrated)', () => {
-  /** The like-count digits + aria-label of the first fixture article, changed IN PLACE. */
-  function bumpLikeCount(article: Element, value: string): void {
-    article.querySelector('[data-testid="like"] [data-testid="app-text-transition-container"] span')!.textContent = value;
-    article.querySelector('[data-testid="like"]')!.setAttribute('aria-label', `${value} Curtidas. Curtir`);
-  }
 
   it('repeated scans of unchanged posts call the scorer exactly once per post', async () => {
     const harness = startHarness();
@@ -565,6 +566,29 @@ describe('scoring memoization — unchanged posts are never rescored (VAL-TARGET
 
     expect(harness.badgeOf(firstId)).not.toBeNull(); // re-painted on the fresh host...
     expect(harness.scoreCalls.length).toBe(calls); // ...from the cached score: zero rescores
+    harness.teardown();
+  });
+});
+
+describe('in-place metric change rescoring (VAL-TARGET-004, observer-driven)', () => {
+  it('an in-place engagement-count change triggers exactly one rescore with NO rescan() call', async () => {
+    const harness = startHarness();
+    await waitThrottle();
+    const firstId = POST_ID(0);
+    const callsFor = (): number => harness.scoreCalls.filter((call) => call.id === firstId).length;
+    expect(callsFor()).toBe(1);
+    const scoreBefore = Number(harness.badgeOf(firstId)!.querySelector(`[data-testid="${BADGE_TESTIDS.score}"]`)!.textContent);
+
+    // The page updates engagement counts INSIDE the existing article (count text node + button
+    // aria-label). The scanner's observer must pick this up; nothing calls rescan() here.
+    bumpLikeCount(document.querySelector('article')!, '3100');
+
+    await waitThrottle();
+    expect(callsFor()).toBe(2); // exactly one rescore of that post
+    const badgeScore = Number(harness.badgeOf(firstId)!.querySelector(`[data-testid="${BADGE_TESTIDS.score}"]`)!.textContent);
+    expect(badgeScore).not.toBe(scoreBefore); // the badge reflects the new metrics
+    await waitThrottle();
+    expect(callsFor()).toBe(2); // the settle pass stays quiet
     harness.teardown();
   });
 });

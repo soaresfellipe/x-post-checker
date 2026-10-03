@@ -224,6 +224,44 @@ describe('timeline scanner rescoring policy (VAL-TARGET-004)', () => {
     expect(h.dispatchesFor('1900000000000000100')).toHaveLength(1);
   });
 
+  it('rescans on an in-place metric edit (count text node + aria-label) WITHOUT rescan()', async () => {
+    const h = startHarness();
+    await waitThrottle();
+    const firstId = FIXTURE_POSTS[0]!.id;
+    expect(h.dispatchesFor(firstId)).toHaveLength(1);
+
+    // TRUE in-place edits — the count TEXT NODE's data and the button's aria-label attribute.
+    // A childList-only observer sees neither (the round-1 scrutiny blocker): no rescan() here.
+    const likeButton = h.articles()[0]!.querySelector('[data-testid="like"]')!;
+    likeButton.querySelector('[data-testid="app-text-transition-container"] span')!.firstChild!.textContent = '311';
+    likeButton.setAttribute('aria-label', '311 Curtidas. Curtir');
+
+    await waitThrottle(); // the throttled observer pass covers the edits
+    const rescored = h.dispatchesFor(firstId);
+    expect(rescored).toHaveLength(2); // changed captured metrics -> exactly one rescore
+    expect(rescored[1]!.reason).toBe('changed');
+    expect(rescored[1]!.post.likeCount).toBe(311);
+  });
+
+  it('extension-owned mutations (badge hosts, marker stamps) never schedule a pass', async () => {
+    const h = startHarness();
+    await waitThrottle();
+    const before = scans();
+
+    // Everything the extension itself writes while running: a host appearing in an article, the
+    // host's inline style, and the diagnostics stamps on the marker host.
+    const article = h.articles()[0]!;
+    const host = document.createElement('div');
+    host.setAttribute(BADGE_HOST_ATTRIBUTE, 'badge');
+    host.style.height = 'auto';
+    article.append(host);
+    marker().dataset.scannerPosts = '[]';
+    marker().dataset.scannerScanCount = String(scans());
+
+    await waitThrottle();
+    expect(scans()).toBe(before); // zero self-triggered passes (no feedback loop)
+  });
+
   it('stamps scanner diagnostics (state, scan count, last scan, visible posts) onto the marker host', () => {
     startHarness();
     expect(marker().dataset.scannerState).toBe('scanning');

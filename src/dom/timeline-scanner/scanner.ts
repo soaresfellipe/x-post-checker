@@ -144,13 +144,58 @@ export function createTimelineScanner(options: TimelineScannerOptions = {}): Tim
   }
 
   const onSignal = (): void => scheduleScan(); // scroll, resize, and route signals all coalesce
-  const mutationObserver = new MutationObserver(onSignal);
+
+  /**
+   * Whether a node lives inside DOM the extension owns: any `amplifyx-*` host (marker, overlay,
+   * popover) or a per-article badge host. Mutations wholly inside owned DOM are the scanner's own
+   * writes echoing back and must never schedule a pass (that would be an endless feedback loop:
+   * every pass stamps diagnostics, every paint styles the host).
+   */
+  function isOwnNode(node: Node): boolean {
+    for (let current: Node | null = node; current !== null; current = current.parentNode) {
+      if (current.nodeType !== current.ELEMENT_NODE) continue;
+      const element = current as Element;
+      if (element.id.startsWith('amplifyx-')) return true;
+      if (element.hasAttribute(BADGE_HOST_ATTRIBUTE)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * A record is "own" when it happened inside owned DOM or ADDS an owned node (the host-append
+   * record's target is the page's article). Removals are NEVER treated as own: a virtualized-feed
+   * recycling record bundles the page's new content with the old host's removal, and that record
+   * must schedule the re-diff. A batch schedules exactly one pass when ANY record is page-owned.
+   */
+  function isOwnMutation(record: MutationRecord): boolean {
+    if (isOwnNode(record.target)) return true;
+    for (const node of record.addedNodes) if (isOwnNode(node)) return true;
+    return false;
+  }
+
+  const mutationObserver = new MutationObserver((records) => {
+    for (const record of records) {
+      if (!isOwnMutation(record)) {
+        scheduleScan(); // the same throttled pipeline as scroll/resize/route — never a direct scan
+        return;
+      }
+    }
+  });
 
   return {
     start() {
       if (running) return;
       running = true;
-      mutationObserver.observe(doc.body ?? doc, { childList: true, subtree: true });
+      // childList covers timeline re-renders; attributes + characterData cover the IN-PLACE
+      // engagement-count updates x.com makes inside an existing article (count text nodes and
+      // button aria-labels) — without them a changed metric is never re-extracted (VAL-TARGET-004).
+      // Everything funnels through the own-mutation filter + throttle above.
+      mutationObserver.observe(doc.body ?? doc, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        characterData: true,
+      });
       win.addEventListener('scroll', onSignal, { passive: true });
       win.addEventListener('resize', onSignal);
       win.addEventListener('popstate', onSignal);

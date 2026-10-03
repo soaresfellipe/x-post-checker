@@ -134,8 +134,8 @@ export default defineContentScript({
         },
       });
       scanner.onScan((event) => badges.onScan(event));
+      badges.start(); // running BEFORE the first pass: scanner.start() scans synchronously
       scanner.start();
-      badges.start();
     }
 
     function stopScanner(): void {
