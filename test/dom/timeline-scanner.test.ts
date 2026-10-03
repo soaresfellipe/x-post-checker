@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished } from 'vitest';
 import { MARKER_HOST_ID } from '../../src/dom/marker';
 import { BADGE_HOST_ATTRIBUTE, createTimelineScanner, type TimelineScanner } from '../../src/dom/timeline-scanner/scanner';
 import type { ScanEvent, TimelineScannerOptions } from '../../src/dom/timeline-scanner/types';
@@ -60,6 +60,10 @@ function startHarness(
     dispatchScoring: (event) => dispatches.push(event),
     ...extra,
   });
+  // A leaked live scanner keeps observing every later test's DOM (its MutationObserver survives
+  // the body reset) and stamps THAT test's marker — polluting scan-count assertions like the
+  // throttle bound. Guaranteed teardown, mirroring the badges harness.
+  onTestFinished(() => scanner.stop());
   scanner.onScan((event) => events.push(event));
   scanner.start();
 
