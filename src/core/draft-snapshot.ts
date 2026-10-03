@@ -10,7 +10,11 @@ export interface DraftSnapshot {
   text: string;
   /** Hashtag words without the leading `#`, in order of appearance. */
   hashtags: string[];
-  /** URLs found in the text as written (t.co expansion happens later, per-snapshot consumer). */
+  /**
+   * URLs from the draft text, t.co-EXPANDED when the composer markup exposes the destination
+   * (link chip href / data); the short form is kept only when no expansion is visible. `text`
+   * still holds the URL exactly as typed.
+   */
   urls: string[];
   /** The composer shows a media chip (photo/video attachment). */
   hasMedia: boolean;

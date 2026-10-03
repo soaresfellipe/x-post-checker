@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test';
 import { expect, FIXTURE_URL, optionsUrl, popupUrl, test } from './extension';
+import { FIXTURE_POSTS } from '../fixtures/x-fixture';
 
 const SYNTHETIC_KEY = 'synthetic-popup-key-0001';
 const MARKER = '#amplifyx-marker-host [data-testid="amplifyx-marker"]';
@@ -122,7 +123,7 @@ test.describe('popup master switch broadcast', () => {
 
     const fixture = await context.newPage();
     await fixture.goto(FIXTURE_URL, { waitUntil: 'domcontentloaded' });
-    await expect(fixture.locator('article[data-testid="tweet"]')).toHaveCount(10);
+    await expect(fixture.locator('article[data-testid="tweet"]')).toHaveCount(FIXTURE_POSTS.length);
     await fixture.waitForTimeout(1000);
     await expect(fixture.locator('#amplifyx-marker-host')).toHaveCount(0);
 

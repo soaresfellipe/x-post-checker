@@ -27,6 +27,16 @@ const REPLY_VIEW_HTML = `
   </div>
 </div>`;
 
+/** Composer-less route (Explore): an unrelated DraftEditor editor with no composer container. */
+const EXPLORE_VIEW_HTML = `
+<div data-testid="primaryColumn">
+  <div data-testid="exploreView">
+    <div class="DraftEditor-root">
+      <div class="public-DraftEditor-content" role="textbox" contenteditable="true" id="searchbox"></div>
+    </div>
+  </div>
+</div>`;
+
 interface Harness {
   dispatches: AnalysisDispatch[];
   draftEvents: DraftEvent[];
@@ -150,6 +160,23 @@ describe('composer detection', () => {
     document.body.innerHTML = HOME_HTML;
     await vi.advanceTimersByTimeAsync(0);
     expect(harness.composerEvents).toEqual([{ type: 'attached', composer: composer() }]);
+  });
+
+  it('attaches nothing on a composer-less route that contains an unrelated DraftEditor editor', async () => {
+    // The structural fallback must not match outside a composer container: no attach, no events,
+    // and typing into the unrelated editor produces nothing (VAL-DRAFT-029).
+    document.body.innerHTML = EXPLORE_VIEW_HTML;
+    const { watcher, harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(watcher.getActiveComposer()).toBeNull();
+    expect(harness.composerEvents).toEqual([]);
+
+    typeText(document.getElementById('searchbox')!, 'unrelated editor text that would qualify');
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS * 2);
+    expect(harness.draftEvents).toEqual([]);
+    expect(harness.dispatches).toEqual([]);
+    expect(watcher.getActiveComposer()).toBeNull();
   });
 });
 
@@ -287,6 +314,26 @@ describe('minDraftLength gate (VAL-SETUP-014)', () => {
     await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
     expect(harness.dispatches).toHaveLength(1);
   });
+
+  it('counts a blank line block as a raw character (9-char line + blank line = 10)', async () => {
+    const { harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+    const box = composer();
+    box.replaceChildren();
+    const line = document.createElement('div');
+    line.textContent = '123456789';
+    const blank = document.createElement('div');
+    blank.innerHTML = '<br>'; // DraftEditor's empty-line block
+    box.append(line, blank);
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS - 1);
+    expect(harness.dispatches).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(harness.dispatches).toHaveLength(1);
+    expect(harness.dispatches[0]!.snapshot.charCount).toBe(10);
+    expect(harness.dispatches[0]!.snapshot.text).toBe('123456789\n');
+  });
 });
 
 describe('autoAnalyze off (VAL-SETUP-010)', () => {
@@ -366,5 +413,30 @@ describe('snapshot payload on dispatch', () => {
     expect('replyToFollowedByViewer' in snapshot).toBe(false);
     expect(snapshot.hashtags).toEqual(['gratitude']);
     expect(snapshot.urls).toEqual(['https://thanks.example/x']);
+  });
+
+  it('grants replyToFollowedByViewer only for a visible, target-specific follow badge', async () => {
+    // Visible badge beside the reply-to line → boost proof. Hidden or unrelated badges elsewhere
+    // in the composer region must leave the field ABSENT (never guessed, VAL-DRAFT-019).
+    const replyLine = '<div dir="ltr"><span>Respondendo a </span><a href="/ana_builds" role="link">@ana_builds</a></div>';
+    const badgeCases = [
+      { html: '<span data-testid="socialContext">Seguindo</span>', expectField: true },
+      { html: '<span data-testid="socialContext" style="display:none">Seguindo</span>', expectField: false },
+      { html: '<div class="quoted-post-context"><span data-testid="socialContext">Seguindo</span></div>', expectField: false },
+    ] as const;
+    for (const { html, expectField } of badgeCases) {
+      document.body.innerHTML = REPLY_VIEW_HTML.replace(replyLine, `${replyLine}${html}`);
+      const { harness } = start();
+      await vi.advanceTimersByTimeAsync(0);
+      typeText(composer(), 'Reply draft that is long enough');
+      await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+
+      expect(harness.dispatches).toHaveLength(1);
+      const snapshot = harness.dispatches[0]!.snapshot;
+      expect(snapshot.replyToHandle).toBe('ana_builds');
+      if (expectField) expect(snapshot.replyToFollowedByViewer).toBe(true);
+      else expect('replyToFollowedByViewer' in snapshot).toBe(false);
+      document.body.innerHTML = '';
+    }
   });
 });

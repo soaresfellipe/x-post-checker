@@ -19,6 +19,12 @@ export interface FixturePost {
   replyingTo?: string;
   /** Viewer follows this author: renders the follow-state badge in the reply composer view. */
   followsViewer?: boolean;
+  /**
+   * Reply-composer follow-badge variant (scrutiny round 1, m2-composer-watcher): 'visible' renders
+   * the badge beside the reply-to line, 'hidden' renders it display:none, 'unrelated' renders it
+   * nested away from the reply-to line (present in the region, not bound to the reply target).
+   */
+  followBadge?: 'visible' | 'hidden' | 'unrelated';
 }
 
 export const FIXTURE_POSTS: readonly FixturePost[] = [
@@ -32,6 +38,10 @@ export const FIXTURE_POSTS: readonly FixturePost[] = [
   { id: '1800000000000000008', handle: 'pedro_pm', displayName: 'Pedro PM', text: 'Hot take: roadmaps are fiction. Do you agree?', ageMinutes: 60, timeLabel: '1 h', replies: 130, reposts: 8, likes: 240 },
   { id: '1800000000000000009', handle: 'growth_guru', displayName: 'Growth Guru', text: 'Like and retweet if you want to win! Follow for follow!', ageMinutes: 90, timeLabel: '1 h', replies: 3, reposts: 400, likes: 800 },
   { id: '1800000000000000010', handle: 'lia_writes', displayName: 'Lia Writes', text: 'A long thought about why the best creators treat every post as a small experiment: they write the hook last, they cut the first paragraph, and they reread the draft out loud before hitting send.', ageMinutes: 420, timeLabel: '7 h', replies: 19, reposts: 4, likes: 97 },
+  // Scrutiny round-1 variants: reply composers whose follow-state proof is hidden or unrelated
+  // (appended last so the first timeline status link stays ana_builds, the visible-badge post).
+  { id: '1800000000000000011', handle: 'badge_hidden', displayName: 'Badge Hidden', text: 'My reply view keeps a follow badge that the page hides.', ageMinutes: 75, timeLabel: '1 h', replies: 4, reposts: 2, likes: 21, followBadge: 'hidden' },
+  { id: '1800000000000000012', handle: 'badge_elsewhere', displayName: 'Badge Elsewhere', text: 'My reply view shows a social badge that is not about me.', ageMinutes: 85, timeLabel: '1 h', replies: 5, reposts: 3, likes: 24, followBadge: 'unrelated' },
 ];
 
 const escapeHtml = (value: string): string =>
@@ -83,6 +93,23 @@ function renderPost(post: FixturePost, now: number): string {
 </article></div></div>`;
 }
 
+/**
+ * A composer-LESS route view (like x.com's Explore): an unrelated DraftEditor search box with no
+ * `tweetTextarea` testid and NO recognized composer container around it (`RichTextInputContainer`
+ * /`toolBar`). The structural composer fallback must not match here, the watcher must attach
+ * nothing, and the overlay must stay unmounted (VAL-DRAFT-029, scrutiny round 1).
+ */
+export function renderExploreViewHtml(): string {
+  return (
+    '<div data-testid="exploreView">' +
+    '<h2>Explorar</h2>' +
+    '<div class="DraftEditor-root">' +
+    '<div class="public-DraftEditor-content" role="textbox" contenteditable="true" aria-label="Buscar" spellcheck="true"></div>' +
+    '</div>' +
+    '</div>'
+  );
+}
+
 export function renderFixtureHtml(now: number = Date.now()): string {
   return `<!doctype html>
 <html lang="pt">
@@ -93,12 +120,16 @@ export function renderFixtureHtml(now: number = Date.now()): string {
   body { margin: 0; font-family: system-ui, sans-serif; background: #fff; color: #0f1419; }
   main { max-width: 600px; margin: 0 auto; }
   article { border-bottom: 1px solid #eff3f4; padding: 12px 16px; }
+  /* Out of flow like x.com's fixed sidebar: route navigation must not shift the composer/timeline
+     layout (overlay placement math depends on it). */
+  [data-testid="sidebarNav"] { position: fixed; top: 6px; left: 8px; z-index: 20; }
   [contenteditable] { min-height: 48px; border: 1px solid #cfd9de; padding: 8px; }
   button { background: none; border: 0; cursor: pointer; }
 </style>
 </head>
 <body>
 <div id="react-root">
+<nav data-testid="sidebarNav"><a href="/explore" role="link" data-testid="navExplore"><span>Explorar</span></a></nav>
 <main role="main">
   <div data-testid="primaryColumn">
     <div data-testid="toolBar">
@@ -125,7 +156,13 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
   var homeHtml = primary.innerHTML;
   var POSTS_BY_ID = ${JSON.stringify(
     Object.fromEntries(
-      FIXTURE_POSTS.map((post) => [post.id, { handle: post.handle, followsViewer: post.followsViewer === true }]),
+      FIXTURE_POSTS.map((post) => [
+        post.id,
+        {
+          handle: post.handle,
+          followBadge: post.followBadge ?? (post.followsViewer === true ? 'visible' : null),
+        },
+      ]),
     ),
   )};
 
@@ -137,7 +174,15 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
   function renderReplyView(id) {
     var post = POSTS_BY_ID[id];
     if (!post) return;
-    var followBadge = post.followsViewer ? '<span data-testid="socialContext">Seguindo</span>' : '';
+    var badgeVariant = post.followBadge;
+    var followBadge =
+      badgeVariant === 'hidden'
+        ? '<span data-testid="socialContext" style="display:none">Seguindo</span>'
+        : badgeVariant === 'unrelated'
+          ? '<div class="quoted-post-context"><span data-testid="socialContext">Seguindo</span></div>'
+          : badgeVariant === 'visible'
+            ? '<span data-testid="socialContext">Seguindo</span>'
+            : '';
     primary.innerHTML =
       '<div data-testid="statusView">' +
       '<div data-testid="app-bar-close" role="button" tabindex="0">Voltar</div>' +
@@ -156,6 +201,14 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
   function renderHome() {
     primary.innerHTML = homeHtml;
   }
+
+  var EXPLORE_VIEW_HTML = ${JSON.stringify(renderExploreViewHtml())};
+  function renderExploreView() {
+    primary.innerHTML = EXPLORE_VIEW_HTML;
+  }
+
+  // A direct load of /explore starts on the composer-less view (full reloads keep real routes).
+  if (location.pathname === '/explore') renderExploreView();
 
   function makeAttachments() {
     var wrap = document.createElement('div');
@@ -182,6 +235,12 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
       }
       return;
     }
+    if (target.closest('[data-testid="navExplore"]')) {
+      event.preventDefault();
+      history.pushState({}, '', '/explore');
+      renderExploreView();
+      return;
+    }
     var statusLink = target.closest('a[href*="/status/"]');
     if (statusLink) {
       event.preventDefault();
@@ -199,6 +258,10 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
   });
 
   window.addEventListener('popstate', function () {
+    if (location.pathname === '/explore') {
+      renderExploreView();
+      return;
+    }
     var id = statusId(location.pathname);
     if (id) renderReplyView(id);
     else renderHome();

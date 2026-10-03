@@ -1,4 +1,5 @@
 import { expect, FIXTURE_URL, test } from './extension';
+import { FIXTURE_POSTS } from '../fixtures/x-fixture';
 
 test.describe('extension smoke', () => {
   test('content script mounts its Shadow DOM marker on the fixture page', async ({ context }) => {
@@ -25,7 +26,7 @@ test.describe('extension smoke', () => {
     await page.goto(FIXTURE_URL, { waitUntil: 'domcontentloaded' });
 
     await expect(page.locator('div[data-testid="tweetTextarea_0"][role="textbox"][contenteditable="true"]')).toBeVisible();
-    await expect(page.locator('article[data-testid="tweet"]')).toHaveCount(10);
+    await expect(page.locator('article[data-testid="tweet"]')).toHaveCount(FIXTURE_POSTS.length);
     await expect(page.locator('article [data-testid="like"]').first()).toHaveAttribute('aria-label', /Curtir/);
   });
 

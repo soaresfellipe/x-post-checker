@@ -2,6 +2,7 @@ import type { BrowserContext, Page } from '@playwright/test';
 import { expect, FIXTURE_URL, optionsUrl, test } from './extension';
 
 const MARKER_HOST = '#amplifyx-marker-host';
+const OVERLAY_HOST = '#amplifyx-overlay-host';
 const HOME_COMPOSER = '[data-testid="tweetTextarea_0"]';
 const REPLY_COMPOSER = '[data-testid="tweetTextarea_1"]';
 
@@ -37,6 +38,18 @@ test.describe('composer watcher', () => {
 
     await page.keyboard.type('0'); // exactly 10 raw chars
     await expect(page.locator(MARKER_HOST)).toHaveAttribute('data-watcher-dispatches', '1', { timeout: 5_000 });
+  });
+
+  test('counts a trailing blank line toward minDraftLength: raw chars include the newline (VAL-SETUP-014)', async ({ context }) => {
+    const page = await openFixture(context);
+    const marker = page.locator(MARKER_HOST);
+    await page.locator(HOME_COMPOSER).click();
+    await page.keyboard.type('123456789'); // 9 raw chars on the line
+    await page.waitForTimeout(1_200);
+    await expect(marker).toHaveAttribute('data-watcher-dispatches', '0');
+
+    await page.keyboard.press('Enter'); // blank line block: the newline makes it 10 raw chars
+    await expect(marker).toHaveAttribute('data-watcher-dispatches', '1', { timeout: 5_000 });
   });
 
   test('analyzes an IME composition exactly once, after compositionend + debounce', async ({ context }) => {
@@ -120,4 +133,58 @@ test.describe('composer watcher', () => {
     await expect(marker).toHaveAttribute('data-watcher-state', 'watching');
     await expect(marker).toHaveAttribute('data-watcher-composer', 'tweetTextarea_0');
   });
+
+  test('ignores an unrelated editor on a composer-less route: no overlay, no analysis, no error (VAL-DRAFT-029)', async ({ context }) => {
+    const page = await openFixture(context);
+    const errors: string[] = [];
+    page.on('console', (message) => {
+      if (message.type() === 'error') errors.push(message.text());
+    });
+    page.on('pageerror', (error) => errors.push(String(error)));
+    const marker = page.locator(MARKER_HOST);
+
+    // The Explore route carries an unrelated DraftEditor search box and NO composer container.
+    await page.locator('[data-testid="navExplore"]').click();
+    await expect(marker).toHaveAttribute('data-watcher-state', 'idle');
+    await expect(marker).toHaveAttribute('data-watcher-composer', '(none)');
+    await expect(page.locator(OVERLAY_HOST)).toHaveCount(0);
+
+    // Typing into the unrelated editor must not attract the watcher, an overlay or a request.
+    await page.locator('[data-testid="exploreView"] [role="textbox"]').click();
+    await page.keyboard.type('Text typed into an unrelated editor, long enough to qualify');
+    await page.waitForTimeout(1_200);
+    await expect(marker).toHaveAttribute('data-watcher-dispatches', '0');
+    await expect(page.locator(OVERLAY_HOST)).toHaveCount(0);
+    expect(errors).toEqual([]);
+
+    // Returning home resumes normal watching.
+    await page.goBack();
+    await expect(marker).toHaveAttribute('data-watcher-state', 'watching');
+    await expect(marker).toHaveAttribute('data-watcher-composer', 'tweetTextarea_0');
+  });
+
+  for (const badgeCase of [
+    { href: '/ana_builds/status/1800000000000000001', expectBoost: true, name: 'visible badge beside the reply line' },
+    { href: '/badge_hidden/status/1800000000000000011', expectBoost: false, name: 'hidden follow badge' },
+    { href: '/badge_elsewhere/status/1800000000000000012', expectBoost: false, name: 'unrelated follow badge' },
+  ]) {
+    test(`reply follow boost only with a visible, target-specific badge: ${badgeCase.name} (VAL-DRAFT-019)`, async ({ context }) => {
+      const page = await openFixture(context);
+      await page.locator(`a[href="${badgeCase.href}"]`).first().click();
+      await expect(page.locator(REPLY_COMPOSER)).toBeVisible();
+      await page.locator(REPLY_COMPOSER).click();
+      await page.keyboard.type('Reply draft that is long enough');
+
+      const signals = page.getByTestId('overlay-signals');
+      await expect(signals).toBeVisible({ timeout: 5_000 });
+      const row = signals.locator('li[data-signal-id="reply-mutual"]');
+      if (badgeCase.expectBoost) {
+        await expect(row).toContainText('follows the viewer (visible)');
+        await expect(row.locator('.points')).toHaveText('+5');
+      } else {
+        await expect(row).toContainText('not visible, boost not applied');
+        await expect(row.locator('.points')).toHaveText('0');
+      }
+    });
+  }
 });

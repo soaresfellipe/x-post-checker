@@ -4,7 +4,7 @@
  *
  * Every weight/band/pattern comes from `./config` — this file contains no scoring numbers.
  */
-import type { DraftSnapshot } from '@/core/draft-snapshot';
+import { parseUrls, type DraftSnapshot } from '@/core/draft-snapshot';
 import {
   BAIT_PATTERNS,
   DM_SHARE_PATTERNS,
@@ -51,7 +51,8 @@ const SIGNAL_LABELS: Readonly<Record<keyof typeof SIGNAL_IDS, string>> = {
  */
 export function scoreDraft(snapshot: DraftSnapshot): LocalScore {
   // Pattern checks run on the text WITHOUT URLs so "?utm=..." cannot fake a question and long
-  // slugs cannot fake a keyword match. `urls` are as-written, so plain strip is exact.
+  // slugs cannot fake a keyword match. Snapshot urls may be t.co-EXPANDED while `text` keeps the
+  // URL as typed, so strip BOTH the as-written tokens and the expanded destinations.
   const contentText = stripUrls(snapshot.text, snapshot.urls);
 
   const signals: SignalEntry[] = [
@@ -91,7 +92,9 @@ function entry(signal: keyof typeof SIGNAL_IDS, value: string, points: number): 
 
 function stripUrls(text: string, urls: readonly string[]): string {
   let stripped = text;
-  for (const url of urls) stripped = stripped.split(url).join(' ');
+  // The as-written tokens re-parsed from `text` cover short forms whose expansion replaced them
+  // in `urls`; the exact split/join keeps the strip deterministic for both lists.
+  for (const url of [...parseUrls(text), ...urls]) stripped = stripped.split(url).join(' ');
   return stripped;
 }
 

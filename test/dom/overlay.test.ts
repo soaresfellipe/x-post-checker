@@ -856,7 +856,7 @@ describe('structural fallback composer (VAL-DRAFT-029 overlay leg)', () => {
   it('mounts the overlay for a fallback-detected composer and hides it when none matches', async () => {
     document.body.innerHTML = `
       <div data-testid="primaryColumn">
-        <div class="composer-wrap">
+        <div data-testid="tweetTextarea_0RichTextInputContainer">
           <div role="textbox" contenteditable="true" class="public-DraftEditor-content"></div>
         </div>
       </div>`;

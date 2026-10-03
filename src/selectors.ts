@@ -11,6 +11,14 @@ export const SELECTORS = {
     'div[data-testid^="tweetTextarea_"][role="textbox"][contenteditable="true"]',
     'div.public-DraftEditor-content[role="textbox"][contenteditable="true"]',
   ],
+  /**
+   * Recognized composer CONTAINERS (the real composer structure: the toolbar region wrapping the
+   * `tweetTextarea_*RichTextInputContainer`). Only an editor inside one of these may match the
+   * composer chain's STRUCTURAL fallback — an unrelated DraftEditor elsewhere on the page (e.g. a
+   * search box on a composer-less route) must attract no watcher, overlay or analysis
+   * (VAL-DRAFT-029).
+   */
+  composerContainer: ['[data-testid$="RichTextInputContainer"]', '[data-testid="toolBar"]'],
   /** Media chips attached to a composer; always queried scoped to the composer region. */
   composerMedia: [
     '[data-testid="attachments"] [data-testid="tweetPhoto"]',
@@ -21,7 +29,10 @@ export const SELECTORS = {
   ],
   /** Primary "replying to" handle chip in a composer region (structural fallback is scan-based). */
   replyToHandle: ['[data-testid="replyToHandle"]'],
-  /** Follow-state badge (x.com social context); presence only — its text is localized. */
+  /**
+   * Follow-state badge (x.com social context). Its text is localized, so only its VISIBILITY and
+   * its binding to the reply target's reply-to line may be used — never the words it shows.
+   */
   followIndicator: ['[data-testid="socialContext"]', '[data-testid="userFollowIndicator"]'],
   article: ['article[data-testid="tweet"]', 'article[role="article"]'],
   tweetText: ['[data-testid="tweetText"]'],
@@ -53,6 +64,14 @@ export function findAll(root: ParentNode, key: SelectorKey): Element[] {
     if (matches.length > 0) return [...matches];
   }
   return [];
+}
+
+/**
+ * True when the element sits INSIDE a recognized composer container (`RichTextInputContainer` /
+ * `toolBar`). Gates the composer chain's structural fallback (VAL-DRAFT-029).
+ */
+export function isInsideComposerContainer(element: Element): boolean {
+  return SELECTORS.composerContainer.some((selector) => element.closest(selector) !== null);
 }
 
 /**
