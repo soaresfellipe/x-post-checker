@@ -764,6 +764,71 @@ describe('transport-failure identity: out-of-order dispatches (VAL-DRAFT-018)', 
     expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('error');
   });
 
+  it('keeps the current draft failure when the older dispatch fails afterwards (B fails, then A fails)', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'Draft A: what is your favorite database and why does it matter?');
+    await settleCapture();
+    typeText(composer(), 'Draft B: the one habit that made my writing stick was reading aloud #writing');
+    await settleCapture();
+    const requestA = harness.requests[0]!;
+    const requestB = harness.requests.at(-1)!;
+
+    harness.failTransport(requestB); // the current draft fails first
+    harness.failTransport(requestA); // then the OLDER dispatch fails too
+
+    // A's failure owns A only: it must not overwrite B's terminal state. B keeps its local score
+    // and its explicit transport error (never a silent downgrade to the ready phase).
+    const panel = harness.panel();
+    expect(panel.dataset.state).toBe('analyzed');
+    expect(find(panel, 'overlay-gauge')).not.toBeNull();
+    expect(find(panel, 'overlay-gauge')!.dataset.headlineSource).toBe('local');
+    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('error');
+    expect(find(panel, 'overlay-jev')!.textContent).toContain('did not respond');
+  });
+
+  it('a late transport failure for an older draft never downgrades a settled verdict (failure after success)', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'Draft A: what is your favorite database and why does it matter?');
+    await settleCapture();
+    typeText(composer(), 'Draft B: the one habit that made my writing stick was reading aloud #writing');
+    await settleCapture();
+    const requestA = harness.requests[0]!;
+    const requestB = harness.requests.at(-1)!;
+
+    harness.replyFor(requestB); // B (current) settles with a verdict first
+    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('verdict');
+
+    harness.failTransport(requestA); // the older dispatch's transport fails LAST
+
+    const panel = harness.panel();
+    expect(panel.dataset.state).toBe('analyzed');
+    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('verdict'); // B's verdict intact
+    expect(find(panel, 'overlay-jev-band')).not.toBeNull();
+    expect(find(panel, 'overlay-gauge')).not.toBeNull();
+  });
+
+  it('clears the draft failure when its own re-dispatch succeeds (success after failure)', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    const draftText = 'Draft A: what is your favorite database and why does it matter?';
+    typeText(composer(), draftText);
+    await settleCapture();
+    harness.failTransport(harness.requests[0]!);
+    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('error');
+
+    // The user retypes the identical draft: a fresh dispatch for the SAME identity (same hash).
+    typeText(composer(), draftText);
+    await settleCapture();
+    expect(harness.requests).toHaveLength(2);
+    harness.replyFor(harness.requests[1]!);
+
+    const panel = harness.panel();
+    expect(panel.dataset.state).toBe('analyzed');
+    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('verdict'); // the failure is gone
+  });
+
   it('an honest refusal settles its own dispatch, not the oldest one', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);

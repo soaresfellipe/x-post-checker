@@ -105,7 +105,10 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
   let capture: DraftSnapshot | null = null;
   const pending = new Map<string, number>();
   let reply: { hash: string; result: DraftAnalysis } | null = null;
-  let transportFailure: { hash: string } | null = null;
+  // Per-draft terminal-state ownership (VAL-DRAFT-018): each draft hash owns its own transport
+  // failure, so a settling dispatch can never displace another draft's terminal state (a single
+  // slot let an older failing draft erase the current draft's error and downgrade it to ready).
+  const transportFailures = new Set<string>();
 
   let mounted = false;
   let destroyed = false;
@@ -290,7 +293,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       capture,
       pending,
       reply,
-      transportFailure,
+      transportFailures,
     });
     const panel = el('div', { className: 'panel', testid: OVERLAY_TESTIDS.panel });
     renderViewInto(panel, view);
@@ -383,7 +386,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     capture = null;
     pending.clear();
     reply = null;
-    transportFailure = null;
+    transportFailures.clear();
   }
 
   function pendingCount(hash: string): number {
@@ -423,7 +426,11 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     onDraftCaptured(event) {
       const hash = draftIdentity(event.snapshot);
       if (reply !== null && reply.hash !== hash) reply = null;
-      if (transportFailure !== null && transportFailure.hash !== hash) transportFailure = null;
+      // Failures are owned per draft: only the captured draft's own failure survives the capture
+      // (a different draft's stale entry is pruned to keep the set bounded).
+      for (const failedHash of transportFailures) {
+        if (failedHash !== hash) transportFailures.delete(failedHash);
+      }
       capture = event.snapshot;
       render();
     },
@@ -460,7 +467,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       }
       const hash = result.meta.draftHash;
       settlePending(hash);
-      if (transportFailure?.hash === hash) transportFailure = null;
+      transportFailures.delete(hash); // the draft's own success retires its failure
       // Stale-response discard (VAL-DRAFT-011): only the newest draft's result may render.
       if (capture !== null && draftIdentity(capture) === hash) {
         reply = { hash, result };
@@ -471,11 +478,12 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       // The transport failure carries the failing draft's identity — the same identity successes
       // use — so ONLY that dispatch settles (VAL-DRAFT-018): an older in-flight analysis stays
       // pending, and the failing draft's local score shows with an explicit transport error
-      // instead of spinning forever.
+      // instead of spinning forever. The failure is recorded under ITS OWN hash, so a later
+      // failure for another draft can never displace this draft's terminal state.
       const hash = draftIdentity(snapshot);
       if (pendingCount(hash) <= 0) return; // unknown or already-settled dispatch: nothing to settle
       settlePending(hash);
-      transportFailure = { hash };
+      transportFailures.add(hash);
       render();
     },
     destroy() {

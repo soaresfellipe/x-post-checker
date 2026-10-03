@@ -44,11 +44,13 @@ export interface OverlayViewInputs {
   /** The latest settled analyze-draft reply, when it matches the current draft's hash. */
   readonly reply: { readonly hash: string; readonly result: DraftAnalysis } | null;
   /**
-   * The latest dispatch whose reply transport failed (never a Jev failure — those settle as
-   * replies): lets the panel keep the optimistic local score with an explicit error notice
+   * Hashes whose latest dispatch settled as a transport failure (never a Jev failure — those
+   * settle as replies), tracked PER DRAFT (VAL-DRAFT-018): a settling dispatch owns only its own
+   * draft identity, so a failure for a non-current draft can never displace the current draft's
+   * terminal state. Lets the panel keep the optimistic local score with an explicit error notice
    * instead of silently reverting.
    */
-  readonly transportFailure: { readonly hash: string } | null;
+  readonly transportFailures: ReadonlySet<string>;
 }
 
 export interface ScoreOverlayOptions {

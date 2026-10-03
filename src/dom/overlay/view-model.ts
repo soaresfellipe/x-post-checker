@@ -84,15 +84,17 @@ function deriveJevSection(
 }
 
 export function deriveOverlayView(inputs: OverlayViewInputs): OverlayView {
-  const { settings, keyPresent, capture, pending, reply, transportFailure } = inputs;
+  const { settings, keyPresent, capture, pending, reply, transportFailures } = inputs;
   if (!capture || !isDraftEligible(capture, settings.minDraftLength)) {
     return { phase: 'empty', minDraftLength: settings.minDraftLength };
   }
 
   const hash = draftIdentity(capture);
   const matchingReply = reply?.hash === hash ? reply.result : null;
-  const hasAnalysis =
-    (pending.get(hash) ?? 0) > 0 || matchingReply !== null || transportFailure?.hash === hash;
+  // Per-draft terminal-state ownership (VAL-DRAFT-018): this draft's own failure entry decides —
+  // another draft's failure or result can neither add nor remove it.
+  const transportFailed = transportFailures.has(hash);
+  const hasAnalysis = (pending.get(hash) ?? 0) > 0 || matchingReply !== null || transportFailed;
   if (!hasAnalysis) return { phase: 'ready' };
 
   // Live-setting precedence again (VAL-DRAFT-021): with jevForDrafts off the panel is local-only —
@@ -103,7 +105,7 @@ export function deriveOverlayView(inputs: OverlayViewInputs): OverlayView {
     settings,
     keyPresent,
     matchingReply,
-    transportFailure?.hash === hash && !matchingReply,
+    transportFailed && !matchingReply,
   );
   return {
     phase: 'analyzed',
