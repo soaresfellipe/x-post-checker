@@ -72,6 +72,37 @@ function typeText(composer: Element, text: string): void {
   composer.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
+/**
+ * Mutates the composer DOM WITHOUT dispatching any event — the real-site edit path the m4
+ * clear-reset defect ran on: Draft.js performs selection deletion (Ctrl+A + Backspace) through
+ * its own programmatic DOM writes, and neither `beforeinput` nor `input` fires (verified live,
+ * read-only, 2026-10-03: the clear produced childList mutations with the text dropping to empty
+ * and ZERO input events).
+ */
+function setDomText(composer: Element, text: string): void {
+  composer.replaceChildren();
+  const line = document.createElement('div');
+  line.textContent = text;
+  composer.append(line);
+}
+
+/** The verified real-site post-clear composer shape: one empty Draft.js block (`br[data-text]`). */
+function draftJsClearShape(composer: Element): void {
+  composer.replaceChildren();
+  const contents = document.createElement('div');
+  contents.setAttribute('data-contents', 'true');
+  const block = document.createElement('div');
+  block.setAttribute('data-block', 'true');
+  const line = document.createElement('div');
+  const span = document.createElement('span');
+  span.setAttribute('data-text', 'true');
+  span.append(document.createElement('br'));
+  line.append(span);
+  block.append(line);
+  contents.append(block);
+  composer.append(contents);
+}
+
 function fire(composer: Element, type: string): void {
   composer.dispatchEvent(new Event(type, { bubbles: true }));
 }
@@ -343,6 +374,93 @@ describe('paste (VAL-DRAFT-013)', () => {
     expect(harness.dispatches).toHaveLength(1);
     expect(harness.dispatches[0]!.snapshot.text).toBe('Pasted full text that is long enough to qualify here');
     expect(harness.dispatches[0]!.snapshot.charCount).toBe(52);
+  });
+});
+
+describe('content-mutation lane (real-site clear, m4-fix-real-site-clear-reset)', () => {
+  it('captures a clear that fires NO input event — the verified real Draft.js deletion path', async () => {
+    const { watcher, harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft long enough to be analyzed and then cleared');
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.draftEvents).toHaveLength(1);
+    expect(harness.draftEvents[0]!.eligible).toBe(true);
+
+    // Ctrl+A + Backspace on real x.com: the DOM drops to the empty block shape, NO input event.
+    draftJsClearShape(composer());
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+
+    expect(harness.draftEvents).toHaveLength(2);
+    expect(harness.draftEvents[1]!.snapshot.text).toBe('');
+    expect(harness.draftEvents[1]!.snapshot.charCount).toBe(0);
+    expect(harness.draftEvents[1]!.eligible).toBe(false);
+    expect(harness.dispatches).toHaveLength(1); // only the earlier eligible draft re-dispatched nothing
+    expect(watcher.getSnapshot()?.charCount).toBe(0);
+  });
+
+  it('captures programmatic text changes without an input event at all (no event needed)', async () => {
+    const { harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+    setDomText(composer(), 'Changed entirely by the editor itself, no events');
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.draftEvents).toHaveLength(1);
+    expect(harness.draftEvents[0]!.snapshot.text).toBe('Changed entirely by the editor itself, no events');
+  });
+
+  it('does not re-emit when a content mutation preserves the draft text (identity dedupe)', async () => {
+    const { harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'Hello viral world again');
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.draftEvents).toHaveLength(1);
+
+    // Editor re-render with identical text, different markup, no input event: not a new draft.
+    const box = composer();
+    const text = box.textContent ?? '';
+    setDomText(box, text);
+    const span = document.createElement('span');
+    span.textContent = text;
+    const line = document.createElement('div');
+    line.append(span);
+    box.replaceChildren(line);
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS * 2);
+
+    expect(harness.draftEvents).toHaveLength(1);
+    expect(harness.dispatches).toHaveLength(1);
+  });
+
+  it('re-emits when a user-edit event re-captures an identical draft (retype-retry contract)', async () => {
+    // The dedupe only governs the AMBIENT mutation lane: a user edit (input event) that reads
+    // identical must still re-emit and re-dispatch — retyping the identical draft is the retry
+    // that lets its own transport failure settle with a success (pinned by the overlay's
+    // success-after-failure flow).
+    const { harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'Identical text typed twice for the retry');
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.draftEvents).toHaveLength(1);
+
+    typeText(composer(), 'Identical text typed twice for the retry');
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.draftEvents).toHaveLength(2);
+    expect(harness.dispatches).toHaveLength(2);
+  });
+
+  it('stays silent for content mutations during composition and captures once after compositionend', async () => {
+    const { harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+    const box = composer();
+    fire(box, 'compositionstart');
+
+    setDomText(box, 'composed text written by the IME itself'); // mutates without input
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS * 3);
+    expect(harness.draftEvents).toEqual([]);
+    expect(harness.dispatches).toEqual([]);
+
+    fire(box, 'compositionend');
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.dispatches).toHaveLength(1);
+    expect(harness.dispatches[0]!.snapshot.text).toBe('composed text written by the IME itself');
   });
 });
 

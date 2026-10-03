@@ -113,6 +113,27 @@ export function isDraftEligible(snapshot: Pick<DraftSnapshot, 'charCount'>, minD
 }
 
 /**
+ * Capture identity: whether two snapshots carry the same DRAFT (all content fields; `capturedAt`
+ * is deliberately excluded — it differs on every extraction). Used by the composer watcher to
+ * dedupe re-captures of an unchanged draft, so content-mutation bursts that preserve the text
+ * (editor re-renders, decorator polish) never re-emit or re-dispatch.
+ */
+export function sameDraftSnapshot(a: DraftSnapshot, b: DraftSnapshot): boolean {
+  return (
+    a.text === b.text &&
+    a.hasMedia === b.hasMedia &&
+    a.isReply === b.isReply &&
+    a.replyToHandle === b.replyToHandle &&
+    a.replyToFollowedByViewer === b.replyToFollowedByViewer &&
+    a.charCount === b.charCount &&
+    a.hashtags.length === b.hashtags.length &&
+    a.hashtags.every((tag, index) => tag === b.hashtags[index]) &&
+    a.urls.length === b.urls.length &&
+    a.urls.every((url, index) => url === b.urls[index])
+  );
+}
+
+/**
  * Runtime guard for snapshots crossing the message boundary (`analyze-draft`): the shape the
  * watcher extracts is trusted, but a message payload is untrusted input. Optional fields must be
  * absent-or-typed, never wrong-typed.

@@ -4,6 +4,7 @@ import {
   isDraftEligible,
   parseHashtags,
   parseUrls,
+  sameDraftSnapshot,
   statusRouteHandle,
   type DraftSnapshot,
 } from '../../src/core/draft-snapshot';
@@ -108,6 +109,33 @@ describe('statusRouteHandle (status-page reply context, M2 scrutiny round 3)', (
     expect(statusRouteHandle('/bad!handle/status/123')).toBeUndefined();
     expect(statusRouteHandle('/ana_builds/status/notanumber')).toBeUndefined();
     expect(statusRouteHandle('/ana_builds/status/')).toBeUndefined();
+  });
+});
+
+describe('sameDraftSnapshot (capture identity, excluding capturedAt)', () => {
+  const withText = (text: string): DraftSnapshot => ({ ...BASE_SNAPSHOT, text, charCount: text.length });
+
+  it('is true for two extractions that differ only in capturedAt', () => {
+    const a = withText('Hello #world');
+    const b = { ...withText('Hello #world'), capturedAt: 999 };
+    expect(sameDraftSnapshot(a, b)).toBe(true);
+  });
+
+  it('is false when the text changes (the clear path depends on this)', () => {
+    expect(sameDraftSnapshot(withText('Hello #world'), withText(''))).toBe(false);
+  });
+
+  it('is false when media, reply context or extracted lists change', () => {
+    expect(sameDraftSnapshot(BASE_SNAPSHOT, { ...BASE_SNAPSHOT, hasMedia: true })).toBe(false);
+    expect(sameDraftSnapshot(BASE_SNAPSHOT, { ...BASE_SNAPSHOT, isReply: true, replyToHandle: 'ana_builds' })).toBe(false);
+    expect(sameDraftSnapshot(BASE_SNAPSHOT, { ...BASE_SNAPSHOT, hashtags: ['world', 'more'] })).toBe(false);
+    expect(sameDraftSnapshot(BASE_SNAPSHOT, { ...BASE_SNAPSHOT, urls: ['https://example.com/a'] })).toBe(false);
+  });
+
+  it('is false when the extracted hashtag ORDER changes (same members)', () => {
+    const a = { ...BASE_SNAPSHOT, hashtags: ['one', 'two'] };
+    const b = { ...BASE_SNAPSHOT, hashtags: ['two', 'one'] };
+    expect(sameDraftSnapshot(a, b)).toBe(false);
   });
 });
 

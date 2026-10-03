@@ -6,11 +6,16 @@
  * - exactly one attachment at a time; re-scans are idempotent (no duplicate events/overlays);
  * - no analysis during IME composition; exactly one capture after compositionend (+debounce);
  * - paste flows through the same debounced path as typing;
+ * - editor edits that fire NO input event are still captured through a composer-scoped
+ *   content-mutation lane (verified on real x.com: the Draft.js composer performs select-all +
+ *   Backspace deletion via its own DOM writes — neither beforeinput nor input fires — so an
+ *   input-only watcher left the overlay stuck on the last analyzed panel);
+ * - an unchanged draft is never re-emitted (identity dedupe over re-captures);
  * - minDraftLength (raw char count) gates BOTH the automatic path and the explicit request;
  * - autoAnalyze off → typing only captures, never dispatches (manual path stays available);
  * - stop() removes every observer/listener/timer — zero activity while the master switch is off.
  */
-import { DRAFT_DEBOUNCE_MS, isDraftEligible } from '@/core/draft-snapshot';
+import { DRAFT_DEBOUNCE_MS, isDraftEligible, sameDraftSnapshot } from '@/core/draft-snapshot';
 import { findAllCandidates } from '@/selectors';
 import { extractDraftSnapshot, findComposer } from './extract';
 import type {
@@ -37,6 +42,11 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
   let captureTimer: ReturnType<typeof setTimeout> | undefined;
   let scanTimer: ReturnType<typeof setTimeout> | undefined;
   let lastSnapshot: DraftEvent['snapshot'] | null = null;
+  let contentObserver: MutationObserver | null = null;
+  // A user-edit event (input/paste/compositionend) scheduled the pending capture. Such a capture
+  // always emits — the user re-editing an identical draft is a fresh analysis request — while
+  // AMBIENT content mutations (no user-edit event) may only emit when the draft actually changed.
+  let captureForced = false;
   const draftListeners = new Set<(event: DraftEvent) => void>();
   const composerListeners = new Set<(event: ComposerChangeEvent) => void>();
 
@@ -69,6 +79,14 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
   function captureNow(): void {
     if (!active) return;
     const snapshot = extractDraftSnapshot(active);
+    const forced = captureForced;
+    captureForced = false;
+    // Identity dedupe: the ambient content-mutation lane re-captures on every editor DOM write,
+    // including text-preserving re-renders (decorator polish) — an identical re-capture must not
+    // re-emit or re-dispatch. A user-edit event's capture always emits (the retype-retry contract:
+    // retyping an identical draft re-dispatches so its own failure can settle with success).
+    // `capturedAt` is excluded from the identity on purpose.
+    if (!forced && lastSnapshot !== null && sameDraftSnapshot(lastSnapshot, snapshot)) return;
     lastSnapshot = snapshot;
     const eligible = isDraftEligible(snapshot, options.getMinDraftLength());
     emitDraft({ kind: 'captured', snapshot, eligible });
@@ -78,11 +96,22 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
   function attach(element: Element): void {
     active = element;
     composing = false;
+    captureForced = false;
     element.addEventListener('input', onInput);
     element.addEventListener('compositionstart', onCompositionStart);
     element.addEventListener('compositionupdate', onCompositionUpdate);
     element.addEventListener('compositionend', onCompositionEnd);
     element.addEventListener('paste', onPaste);
+    // Content-mutation lane: editors can apply edits WITHOUT firing input events (real x.com's
+    // Draft.js performs selection deletion entirely through its own DOM writes), so the watcher
+    // observes the watched composer's own subtree and runs every content change through the SAME
+    // debounced capture. Extension-owned UI never renders inside the composer, so these
+    // mutations are always the page's; text-preserving re-renders are dropped by the dedupe.
+    contentObserver = new MutationObserver(() => {
+      if (composing) return; // composition updates mutate the DOM; compositionend schedules the capture
+      scheduleCapture();
+    });
+    contentObserver.observe(element, { subtree: true, childList: true, characterData: true });
     emitComposer({ type: 'attached', composer: element });
   }
 
@@ -91,7 +120,10 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
     if (!element) return;
     active = null;
     composing = false;
+    captureForced = false;
     clearCaptureTimer();
+    contentObserver?.disconnect();
+    contentObserver = null;
     element.removeEventListener('input', onInput);
     element.removeEventListener('compositionstart', onCompositionStart);
     element.removeEventListener('compositionupdate', onCompositionUpdate);
@@ -120,13 +152,16 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
   }
 
   // IME-safe input lane: composition events gate the input lane; nothing schedules while
-  // composing, and compositionend schedules exactly one debounced capture.
+  // composing, and compositionend schedules exactly one debounced capture. Every user-edit lane
+  // marks its capture FORCED: it must emit even when the snapshot reads identical to the last one.
   const onInput = (): void => {
     if (composing) return;
+    captureForced = true;
     scheduleCapture();
   };
   const onCompositionStart = (): void => {
     composing = true;
+    captureForced = false;
     clearCaptureTimer(); // a capture scheduled before the composition began must not run
   };
   const onCompositionUpdate = (): void => {
@@ -134,10 +169,12 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
   };
   const onCompositionEnd = (): void => {
     composing = false;
+    captureForced = true;
     scheduleCapture();
   };
   const onPaste = (): void => {
     if (composing) return;
+    captureForced = true;
     scheduleCapture();
   };
 

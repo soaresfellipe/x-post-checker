@@ -7,9 +7,13 @@
  *      live timeline has none, the threshold is lowered through the REAL Options UI — the
  *      contract's "configured threshold" — and the timeline re-gated);
  *   3. typing a synthetic draft shows the score overlay with a local score (NEVER submitted);
- *   4. an extension-owned badge click opens the popover WITHOUT activating/navigating the post;
- *   5. ZERO requests to api.typesafe.ai (fresh profile = no key = AI structurally off);
- *   6. ZERO post-submission requests (CreateTweet/…); the session stays logged in at the end.
+ *   4. clearing the draft (select-all + Backspace) resets the overlay to the empty/hidden state
+ *      within a bounded window (m4-fix-real-site-clear-reset — the real editor performs the
+ *      deletion through its own DOM writes with NO input event, so the watcher must pick the
+ *      reset up from composer content mutations);
+ *   5. an extension-owned badge click opens the popover WITHOUT activating/navigating the post;
+ *   6. ZERO requests to api.typesafe.ai (fresh profile = no key = AI structurally off);
+ *   7. ZERO post-submission requests (CreateTweet/…); the session stays logged in at the end.
  *
  * Read-only guarantees (AGENTS.md boundaries — same discipline as scripts/real-x-inspect.mjs):
  *   - The ONLY page interactions are: navigating, reading the DOM, focusing/clicking the composer
@@ -49,6 +53,13 @@ const FALLBACK_THRESHOLD = 40;
 
 /** Post-creation endpoints: any of these in the capture is a hard failure. */
 const POST_SUBMISSION = /createtweet|createnotetweet|statuses\/update|createpost/i;
+
+/** Evidence stylesheet: page text/images cannot survive it; extension shadow roots are unaffected. */
+const REDACTION_STYLESHEET = `
+  html body, html body *:not(style):not(script) { color: transparent !important; }
+  html img, html video, html svg { visibility: hidden !important; }
+  html [style*="background-image"] { background-image: none !important; }
+`;
 
 function readEnvValues() {
   const raw = readFileSync(join(REPO, '.env.local'), 'utf8');
@@ -273,17 +284,55 @@ async function main() {
       'no key in this profile: the overlay shows the local-only notice (AI structurally off)',
     );
 
-    // Hygiene: clear the typed draft (Ctrl+A inside the focused composer, then Backspace).
+    // Evidence of the analyzed panel BEFORE the clear (redacted), then the clear-and-reset step.
+    await page.addStyleTag({ content: REDACTION_STYLESHEET });
+    await page
+      .locator('#amplifyx-overlay-host')
+      .screenshot({ path: join(EVIDENCE_DIR, 'overlay-analyzed-redacted.png') })
+      .catch(() => {});
+
+    // ---- 4b. Clear-and-reset (m4-fix-real-site-clear-reset): the real editor performs
+    // select-all deletion through its own DOM writes with NO input event (verified live
+    // 2026-10-03: the clear produced childList mutations with the text dropping to empty and
+    // zero beforeinput/input events), so the watcher must pick the reset up from composer
+    // content mutations. The overlay must leave the analyzed state for the empty/hidden state
+    // within a bounded window (~700ms debounce + live-site margin), never stick.
     let draftCleared = false;
+    let overlayReset = false;
+    let resetDetail = '';
     try {
       await composer.focus();
       await page.keyboard.press('Control+a');
       await page.keyboard.press('Backspace');
       draftCleared = await waitFor(async () => ((await composer.innerText()).trim() === '' ? true : null), 5_000, 250) ?? false;
+      if (!draftCleared) {
+        resetDetail = 'composer never confirmed empty — reset not assessable';
+      } else {
+        const clearedAt = Date.now();
+        const reset = await waitFor(async () => {
+          const panel = page.locator('#amplifyx-overlay-host [data-testid="amplifyx-overlay"]');
+          if ((await panel.count()) === 0) return 'hidden'; // overlay unmounted: also a reset
+          const state = await panel.getAttribute('data-state');
+          return state === 'empty' ? 'empty' : null;
+        }, 10_000, 300);
+        overlayReset = reset === 'empty' || reset === 'hidden';
+        resetDetail = overlayReset
+          ? `overlay reset to ${reset} in ${Date.now() - clearedAt}ms (bounded window 10s)`
+          : `overlay stuck at state=${(await page.locator('#amplifyx-overlay-host [data-testid="amplifyx-overlay"]').getAttribute('data-state').catch(() => 'host-gone')) ?? 'n/a'} for the full 10s window`;
+        await page
+          .locator('#amplifyx-overlay-host')
+          .screenshot({ path: join(EVIDENCE_DIR, 'overlay-after-clear-redacted.png') })
+          .catch(() => {});
+      }
     } catch {
       draftCleared = false;
     }
-    record('draft-cleared-after-test', draftCleared, draftCleared ? 'composer restored to empty' : 'best-effort clear did not confirm (nothing was ever submitted; the temp profile is deleted)');
+    record(
+      'draft-cleared-after-test',
+      draftCleared,
+      draftCleared ? 'composer restored to empty' : 'best-effort clear did not confirm (nothing was ever submitted; the temp profile is deleted)',
+    );
+    record('clear-resets-overlay', overlayReset, resetDetail || 'clear not confirmed; overlay reset not assessable');
 
     // ---- 5. Extension-owned badge click -> popover, WITHOUT activating the post ----
     if (badgeCount > 0) {
@@ -315,14 +364,7 @@ async function main() {
     console.log(`      graphql ops observed (read endpoints): ${graphqlOps.join(', ') || '(none)'}`);
 
     // ---- 7. Evidence (captured while the surfaces are still live, structural facts only;
-    // redacted screenshots) ----
-    await page.addStyleTag({
-      content: `
-        html body, html body *:not(style):not(script) { color: transparent !important; }
-        html img, html video, html svg { visibility: hidden !important; }
-        html [style*="background-image"] { background-image: none !important; }
-      `,
-    });
+    // redacted screenshots — the redaction stylesheet was applied before the clear step) ----
     if (panelAppeared) {
       await page.locator('#amplifyx-overlay-host').screenshot({ path: join(EVIDENCE_DIR, 'overlay-redacted.png') }).catch(() => {});
       writeFileSync(

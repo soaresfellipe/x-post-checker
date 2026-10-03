@@ -119,10 +119,13 @@ memory; the temporary profile is deleted when the run ends, pass or fail). It th
 3. typing a synthetic draft shows the overlay with a local score and the "Local signals only"
    notice (the profile has no API key, so the AI half is structurally off); the draft is cleared
    afterwards and never submitted;
-4. clicking an extension-owned badge opens its popover without navigating or activating the post;
-5. the network capture shows **zero** `api.typesafe.ai` requests and **zero** post-submission
+4. clearing the draft resets the overlay to the empty (or hidden) state within a bounded window —
+   the real editor performs select-all deletion through its own DOM writes without firing input
+   events, so the watcher picks the reset up from composer content mutations;
+5. clicking an extension-owned badge opens its popover without navigating or activating the post;
+6. the network capture shows **zero** `api.typesafe.ai` requests and **zero** post-submission
    requests (`CreateTweet`/`CreateNoteTweet`/`statuses/update`/`CreatePost`);
-6. the session is still logged in at the end (no logout side-effects).
+7. the session is still logged in at the end (no logout side-effects).
 
 Evidence (redacted: page text transparent and images hidden in screenshots, only method/host/path
 in the network log, no cookies/keys/headers anywhere) lands in `test-results/real-x-smoke/`
