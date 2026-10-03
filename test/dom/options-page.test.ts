@@ -3,6 +3,7 @@ import { runConnectionTest, type ConnectionTestResult } from '@/core/jev-client'
 import {
   API_KEY_STORAGE_KEY,
   DEFAULT_SETTINGS,
+  KEY_REVISION_STORAGE_KEY,
   createSettingsStore,
   type PageSettingsStore,
   type Settings,
@@ -36,8 +37,10 @@ async function setup(options: { failWrites?: boolean; result?: ConnectionTestRes
   document.body.innerHTML = '<div id="app"></div>';
   teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
     store,
-    // Pages write settings through the background; here the same store stands in for it.
+    // Pages write settings and the key through the background; here the same store stands in for it.
     saveSettings: (update) => store.setSettings(update),
+    saveApiKey: (key) => store.setApiKey(key),
+    removeApiKey: () => store.clearApiKey(),
     testConnection,
   }));
   return { memory, store, testConnection };
@@ -133,7 +136,9 @@ describe('options page', () => {
     const { memory } = await setup({ preset: { [API_KEY_STORAGE_KEY]: KEY } });
     q<HTMLButtonElement>('remove-key').click();
     await flush();
-    expect(memory.data[API_KEY_STORAGE_KEY]).toBeUndefined();
+    // The clear persists the empty string (absent to every reader) in the same write as its
+    // keyRevision — a `remove` + revision `set` pair could not keep presence and revision atomic.
+    expect(memory.data[API_KEY_STORAGE_KEY]).toBe('');
     expect(q('key-status').textContent).toBe(COPY.keyMissing);
   });
 
@@ -207,6 +212,8 @@ describe('options page', () => {
     teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
       store,
       saveSettings: (update) => store.setSettings(update),
+      saveApiKey: (key) => store.setApiKey(key),
+      removeApiKey: () => store.clearApiKey(),
       testConnection: async (attemptId, apiKey) => ({
         attemptId,
         // Mirrors the background handler: a typed key wins, otherwise the saved key is tested.
@@ -240,6 +247,8 @@ describe('options page', () => {
     teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
       store,
       saveSettings: (update) => store.setSettings(update),
+      saveApiKey: (key) => store.setApiKey(key),
+      removeApiKey: () => store.clearApiKey(),
       testConnection: () => new Promise((resolve) => resolvers.push(resolve)),
     }));
     q<HTMLButtonElement>('test-connection').click();
@@ -329,7 +338,13 @@ describe('options page', () => {
       return write;
     });
     document.body.innerHTML = '<div id="app"></div>';
-    teardowns.push(await mountOptionsPage(document.getElementById('app')!, { store, saveSettings, testConnection: stubTestConnection }));
+    teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
+      store,
+      saveSettings,
+      saveApiKey: async () => ({ apiKeyPresent: true, keyRevision: 0 }),
+      removeApiKey: async () => ({ apiKeyPresent: false, keyRevision: 0 }),
+      testConnection: stubTestConnection,
+    }));
 
     // The user unchecks the master preference; the write persists but the reply is still in flight.
     const box = q<HTMLInputElement>('pref-enabled');
@@ -387,7 +402,13 @@ describe('options page', () => {
     };
     document.body.innerHTML = '<div id="app"></div>';
     teardowns.push(
-      await mountOptionsPage(document.getElementById('app')!, { store: storeView, saveSettings, testConnection: stubTestConnection }),
+      await mountOptionsPage(document.getElementById('app')!, {
+        store: storeView,
+        saveSettings,
+        saveApiKey: async () => ({ apiKeyPresent: true, keyRevision: 0 }),
+        removeApiKey: async () => ({ apiKeyPresent: false, keyRevision: 0 }),
+        testConnection: stubTestConnection,
+      }),
     );
     expect(pageReads).toBe(1); // the initial read
     return { writer, releaseReply, armRereadHold: () => (armRereadHold = true), reread, reads: () => pageReads };
@@ -478,7 +499,7 @@ describe('options page', () => {
   // revision gate cannot order key presence against reads. An initial read that captured `absent`
   // and completes after a key-only storage event already applied `present` must not repaint it —
   // no later event is required, so the page would otherwise disagree with storage indefinitely
-  // (VAL-SETUP-015).
+  // (VAL-SETUP-015). The read's fact carries keyRevision 0; the event's fresh fact carries 1.
   it('does not regress key presence when the initial read finishes after a key-only event', async () => {
     const memory = createMemoryBackend();
     const store = createSettingsStore(memory.backend);
@@ -486,13 +507,13 @@ describe('options page', () => {
     const keyReadHold = { release: () => {} };
     const storeView: PageSettingsStore = {
       ...store,
-      async hasApiKey() {
-        const present = await store.hasApiKey();
+      async getApiKeyWithRevision() {
+        const snapshot = await store.getApiKeyWithRevision();
         if (armKeyReadHold) {
           armKeyReadHold = false;
           await new Promise<void>((resolve) => (keyReadHold.release = resolve));
         }
-        return present;
+        return snapshot;
       },
     };
     document.body.innerHTML = '<div id="app"></div>';
@@ -500,21 +521,123 @@ describe('options page', () => {
     const mounted = mountOptionsPage(document.getElementById('app')!, {
       store: storeView,
       saveSettings: (update) => store.setSettings(update),
+      saveApiKey: (key) => store.setApiKey(key),
+      removeApiKey: () => store.clearApiKey(),
       testConnection: stubTestConnection,
     });
-    await flush(); // the initial read captured hasKey === false (no key yet) and is parked
+    await flush(); // the initial read captured absent (no key yet, keyRevision 0) and is parked
 
     // A key-only write from another context lands; the subscription applies presence fresh at
-    // delivery. Key events carry no revision, so the settings gate is not involved.
+    // delivery. Its fact carries keyRevision 1, so the key gate admits it over the parked read.
     await store.setApiKey(KEY);
     await flush();
     expect(q('key-status').dataset.state).toBe('present');
 
-    // The parked initial read (stale `absent`, unchanged revision 0) completes: it must leave the
-    // event-applied key presence alone, ending at storage's truth.
+    // The parked initial read (stale `absent`, keyRevision 0) completes: the key gate rejects it,
+    // ending at storage's truth.
     keyReadHold.release();
     await flush();
     teardowns.push(await mounted);
+    expect(q('key-status').dataset.state).toBe('present');
+    expect(memory.data[API_KEY_STORAGE_KEY]).toBe(KEY);
+  });
+
+  // Regression (scrutiny round 6): two key EVENTS could apply in reverse completion order — the
+  // key-set event's fresh-at-delivery read stalls; the key-clear event's read completes and
+  // paints `absent`; the stalled set-fact then completes LAST and paints `present` over it, with
+  // no further event due, so the page disagrees with storage indefinitely (VAL-SETUP-015). The
+  // keyRevision gate orders the two facts: the clear (revision 2) wins over the parked set
+  // (revision 1), whatever their completion order. The hold intercepts the storage read itself
+  // (the subscription's fresh key read), like a slow storage round-trip.
+  it('ends absent when a delayed key-set event completes after a key-clear event', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend);
+    let holdArmed = false; // parks the NEXT storage read that touches the key, after it captures
+    const keyReadHold = { release: () => {} };
+    const originalGet = memory.backend.area.get.bind(memory.backend);
+    memory.backend.area.get = async (keys) => {
+      const list = Array.isArray(keys) ? keys : [keys];
+      const snapshot = await originalGet(keys);
+      if (holdArmed && list.includes(API_KEY_STORAGE_KEY)) {
+        holdArmed = false;
+        await new Promise<void>((resolve) => (keyReadHold.release = resolve));
+      }
+      return snapshot;
+    };
+    document.body.innerHTML = '<div id="app"></div>';
+    teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
+      store,
+      saveSettings: (update) => store.setSettings(update),
+      saveApiKey: (key) => store.setApiKey(key),
+      removeApiKey: () => store.clearApiKey(),
+      testConnection: stubTestConnection,
+    }));
+    expect(q('key-status').dataset.state).toBe('absent');
+
+    // Event A: a key-set write lands; the subscription's fresh read captures present@1, then the
+    // read parks (in flight).
+    holdArmed = true;
+    await store.setApiKey(KEY);
+    await flush();
+    expect(q('key-status').dataset.state).toBe('absent'); // A's fact is still parked
+
+    // Event B: a key-clear write lands; its fresh read completes and paints absent@2.
+    await store.clearApiKey();
+    await flush();
+    expect(q('key-status').dataset.state).toBe('absent');
+
+    // A completes LAST carrying present@1: the key gate rejects it (1 < 2) — the page ends at
+    // storage's truth, which holds no key.
+    keyReadHold.release();
+    await flush();
+    expect(q('key-status').dataset.state).toBe('absent');
+    expect(memory.data[API_KEY_STORAGE_KEY]).toBe('');
+  });
+
+  // The reverse interleaving of the round-6 defect: the key-clear event's fact is the one that
+  // stalls, and a later key-set event applies `present` first. The parked absent@2 fact must not
+  // repaint over present@3 — the page ends at storage's truth, which holds the key.
+  it('ends present when a delayed key-clear event completes after a key-set event', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend);
+    memory.data[API_KEY_STORAGE_KEY] = KEY;
+    memory.data[KEY_REVISION_STORAGE_KEY] = 1; // the preset key was written with keyRevision 1
+    let holdArmed = false;
+    const keyReadHold = { release: () => {} };
+    const originalGet = memory.backend.area.get.bind(memory.backend);
+    memory.backend.area.get = async (keys) => {
+      const list = Array.isArray(keys) ? keys : [keys];
+      const snapshot = await originalGet(keys);
+      if (holdArmed && list.includes(API_KEY_STORAGE_KEY)) {
+        holdArmed = false;
+        await new Promise<void>((resolve) => (keyReadHold.release = resolve));
+      }
+      return snapshot;
+    };
+    document.body.innerHTML = '<div id="app"></div>';
+    teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
+      store,
+      saveSettings: (update) => store.setSettings(update),
+      saveApiKey: (key) => store.setApiKey(key),
+      removeApiKey: () => store.clearApiKey(),
+      testConnection: stubTestConnection,
+    }));
+    expect(q('key-status').dataset.state).toBe('present');
+
+    // Event B: a key-clear write lands (revision 2); its fresh read captures absent@2, then parks.
+    holdArmed = true;
+    await store.clearApiKey();
+    await flush();
+    expect(q('key-status').dataset.state).toBe('present'); // B's fact is still parked
+
+    // Event A: a key-set write lands (revision 3); its fact applies immediately — present.
+    await store.setApiKey(KEY);
+    await flush();
+    expect(q('key-status').dataset.state).toBe('present');
+
+    // B completes LAST carrying absent@2: rejected (2 < 3); the page stays at storage's truth.
+    keyReadHold.release();
+    await flush();
     expect(q('key-status').dataset.state).toBe('present');
     expect(memory.data[API_KEY_STORAGE_KEY]).toBe(KEY);
   });
@@ -533,6 +656,8 @@ describe('options page', () => {
     teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
       store: createSettingsStore(createMemoryBackend().backend),
       saveSettings,
+      saveApiKey: async () => ({ apiKeyPresent: true, keyRevision: 0 }),
+      removeApiKey: async () => ({ apiKeyPresent: false, keyRevision: 0 }),
       testConnection: stubTestConnection,
     }));
 
@@ -563,6 +688,8 @@ describe('options page', () => {
     teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
       store: createSettingsStore(createMemoryBackend().backend),
       saveSettings,
+      saveApiKey: async () => ({ apiKeyPresent: true, keyRevision: 0 }),
+      removeApiKey: async () => ({ apiKeyPresent: false, keyRevision: 0 }),
       testConnection: stubTestConnection,
     }));
 
@@ -597,6 +724,8 @@ describe('options page', () => {
     teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
       store: createSettingsStore(memory.backend),
       saveSettings,
+      saveApiKey: async () => ({ apiKeyPresent: true, keyRevision: 0 }),
+      removeApiKey: async () => ({ apiKeyPresent: false, keyRevision: 0 }),
       testConnection: stubTestConnection,
     }));
 

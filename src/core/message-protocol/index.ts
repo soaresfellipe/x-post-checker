@@ -3,7 +3,7 @@
  * background. Add a new message by extending `MessageMap`; handlers and clients stay type-checked.
  */
 import type { ConnectionTestResult } from '@/core/jev-client/connection-test';
-import type { Settings, SettingsWriteResult } from '@/core/settings-store/types';
+import type { ApiKeyWriteResult, Settings, SettingsWriteResult } from '@/core/settings-store/types';
 
 export const PROTOCOL_VERSION = 1;
 
@@ -33,6 +33,21 @@ export interface MessageMap {
      */
     response: SettingsWriteResult;
   };
+  /**
+   * The ONLY API-key write paths for pages, mirroring `set-settings`: the background's single
+   * writer serializes key writes and stamps the keyRevision atomically with the key change, so
+   * the key-presence lane has an authoritative ordering token (docs/state-ordering.md lane (b)).
+   */
+  'set-api-key': {
+    /** The new key, as typed; the store trims and validates it. */
+    request: { key: string };
+    /** The produced presence plus the write's keyRevision, for the page's gated apply. */
+    response: ApiKeyWriteResult;
+  };
+  'clear-api-key': {
+    request: Record<string, never>;
+    response: ApiKeyWriteResult;
+  };
 }
 
 export type MessageType = keyof MessageMap;
@@ -51,7 +66,13 @@ export type Handlers = {
   [T in MessageType]: (payload: MessageMap[T]['request']) => MessageMap[T]['response'] | Promise<MessageMap[T]['response']>;
 };
 
-const MESSAGE_TYPES: readonly string[] = ['ping', 'test-connection', 'set-settings'] satisfies MessageType[];
+const MESSAGE_TYPES: readonly string[] = [
+  'ping',
+  'test-connection',
+  'set-settings',
+  'set-api-key',
+  'clear-api-key',
+] satisfies MessageType[];
 
 export function createRequest<T extends MessageType>(type: T, payload: MessageMap[T]['request']): Request<T> {
   return { v: PROTOCOL_VERSION, type, payload };

@@ -35,6 +35,14 @@ export const LAST_ANALYSIS_STORAGE_KEY = 'lastAnalysis';
  */
 export const SETTINGS_REVISION_STORAGE_KEY = 'settingsRevision';
 
+/**
+ * Monotonic counter stamped into every API-key write (same `area.set` call as the key change, so
+ * a presence fact can never disagree with the revision it carries). It orders the key-presence
+ * lane (docs/state-ordering.md lane (b)): pages apply key facts through a strictly-newer gate, so
+ * two events completing out of order cannot regress presence. 0 means "no order information".
+ */
+export const KEY_REVISION_STORAGE_KEY = 'keyRevision';
+
 export type AnalysisOutcome = 'ok' | 'local-only' | 'error';
 
 export interface LastAnalysis {
@@ -64,6 +72,12 @@ export interface SettingsChange {
   apiKeyPresent: boolean;
   /** Revision stamped by the write that fired this change; 0 when the event carries none. */
   revision: number;
+  /**
+   * Key-presence revision observed at delivery by the same fresh read that produced
+   * `apiKeyPresent` (at least as new as the write that fired the event, newer if another key
+   * write landed since). Pages gate key facts on this, never on delivery order.
+   */
+  keyRevision: number;
 }
 
 export type SettingsListener = (change: SettingsChange) => void;
@@ -76,6 +90,16 @@ export type SettingsListener = (change: SettingsChange) => void;
 export interface SettingsWriteResult {
   settings: Settings;
   settingsRevision: number;
+}
+
+/**
+ * Result of an API-key write: the presence it produced plus the keyRevision the write stamped.
+ * Like `SettingsWriteResult`, it lets the requesting page apply its own save/remove feedback
+ * through the strictly-newer key gate instead of repainting unconditionally.
+ */
+export interface ApiKeyWriteResult {
+  apiKeyPresent: boolean;
+  keyRevision: number;
 }
 
 export interface StorageChange {

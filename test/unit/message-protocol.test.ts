@@ -15,6 +15,8 @@ const handlers: Handlers = {
     settings: { ...DEFAULT_SETTINGS, ...update },
     settingsRevision: 1,
   }),
+  'set-api-key': ({ key }) => ({ apiKeyPresent: true, keyRevision: key.length }),
+  'clear-api-key': () => ({ apiKeyPresent: false, keyRevision: 0 }),
 };
 
 describe('message protocol', () => {
@@ -24,10 +26,23 @@ describe('message protocol', () => {
 
   it('recognizes well-formed requests only', () => {
     expect(isRequest(createRequest('ping', {}))).toBe(true);
+    expect(isRequest(createRequest('set-api-key', { key: 'k' }))).toBe(true);
+    expect(isRequest(createRequest('clear-api-key', {}))).toBe(true);
     expect(isRequest(null)).toBe(false);
     expect(isRequest({ type: 'ping' })).toBe(false);
     expect(isRequest({ v: PROTOCOL_VERSION, type: 'nope', payload: {} })).toBe(false);
     expect(isRequest({ v: PROTOCOL_VERSION + 1, type: 'ping', payload: {} })).toBe(false);
+  });
+
+  it('routes the API-key write messages to their handlers', async () => {
+    expect(await handleRequest(createRequest('set-api-key', { key: 'abc' }), handlers)).toEqual({
+      ok: true,
+      data: { apiKeyPresent: true, keyRevision: 3 },
+    });
+    expect(await handleRequest(createRequest('clear-api-key', {}), handlers)).toEqual({
+      ok: true,
+      data: { apiKeyPresent: false, keyRevision: 0 },
+    });
   });
 
   it('accepts test-connection requests and echoes the attempt id', async () => {
@@ -51,6 +66,8 @@ describe('message protocol', () => {
       },
       'test-connection': handlers['test-connection'],
       'set-settings': handlers['set-settings'],
+      'set-api-key': handlers['set-api-key'],
+      'clear-api-key': handlers['clear-api-key'],
     };
     expect(await handleRequest(createRequest('ping', {}), failing)).toEqual({
       ok: false,

@@ -2,9 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { createRequest, handleRequest, type Handlers } from '@/core/message-protocol';
 import { createBackgroundHandlers } from '@/core/message-protocol/handlers';
 import {
+  API_KEY_STORAGE_KEY,
   DEFAULT_SETTINGS,
+  KEY_REVISION_STORAGE_KEY,
   SETTINGS_REVISION_STORAGE_KEY,
   createSettingsStore,
+  type ApiKeyWriteResult,
   type Settings,
 } from '@/core/settings-store';
 import type { ConnectionTestResult } from '@/core/jev-client';
@@ -20,6 +23,25 @@ function makePageContext(handlers: Handlers) {
   return {
     async saveSettings(update: Partial<Settings>) {
       const response = await handleRequest(createRequest('set-settings', { update }), handlers);
+      if (!response.ok) throw new Error(response.error);
+      return response.data;
+    },
+  };
+}
+
+/**
+ * Same shape for API-key writes: they travel through the background's single writer too, so the
+ * stamped keyRevision is authoritative (docs/state-ordering.md lane (b)).
+ */
+function makeKeyPageContext(handlers: Handlers) {
+  return {
+    async saveApiKey(key: string): Promise<ApiKeyWriteResult> {
+      const response = await handleRequest(createRequest('set-api-key', { key }), handlers);
+      if (!response.ok) throw new Error(response.error);
+      return response.data;
+    },
+    async removeApiKey(): Promise<ApiKeyWriteResult> {
+      const response = await handleRequest(createRequest('clear-api-key', {}), handlers);
       if (!response.ok) throw new Error(response.error);
       return response.data;
     },
@@ -148,5 +170,59 @@ describe('background single-writer for settings', () => {
 
     await handleRequest(createRequest('test-connection', { attemptId: 'a2', apiKey: ' typed-key ' }), handlers);
     expect(probe).toHaveBeenCalledWith({ apiKey: 'typed-key' });
+  });
+});
+
+describe('background single-writer for API keys', () => {
+  it('serializes concurrent key writes from two contexts with unique keyRevisions', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend);
+    const handlers = createBackgroundHandlers({ store });
+    const contextA = makeKeyPageContext(handlers);
+    const contextB = makeKeyPageContext(handlers);
+    const revisions: number[] = [];
+    store.subscribe(({ keyRevision }) => void revisions.push(keyRevision));
+
+    const release = memory.holdWrites();
+    const writeA = contextA.saveApiKey('key-a');
+    const writeB = contextB.saveApiKey('key-b');
+    release();
+    const [replyA, replyB] = await Promise.all([writeA, writeB]);
+
+    // Exactly one keyRevision per write, so receiving pages can order the facts they produce.
+    expect(revisions).toEqual([1, 2]);
+    expect([replyA.keyRevision, replyB.keyRevision]).toEqual([1, 2]);
+    expect(memory.data[KEY_REVISION_STORAGE_KEY]).toBe(2);
+  });
+
+  it('stamps set and clear writes on one order, ending at the last write\'s presence', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend);
+    const handlers = createBackgroundHandlers({ store });
+    const contextA = makeKeyPageContext(handlers);
+    const contextB = makeKeyPageContext(handlers);
+
+    const setReply = await contextA.saveApiKey('key-a');
+    const clearReply = await contextB.removeApiKey();
+
+    expect(setReply).toEqual({ apiKeyPresent: true, keyRevision: 1 });
+    expect(clearReply).toEqual({ apiKeyPresent: false, keyRevision: 2 });
+    expect(await store.hasApiKey()).toBe(false);
+    expect(memory.data[KEY_REVISION_STORAGE_KEY]).toBe(2);
+  });
+
+  it('rejects an empty key without touching storage or the counter', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend);
+    const handlers = createBackgroundHandlers({ store });
+    const context = makeKeyPageContext(handlers);
+
+    const response = await handleRequest(createRequest('set-api-key', { key: '   ' }), handlers);
+    expect(response.ok).toBe(false);
+    expect(API_KEY_STORAGE_KEY in memory.data).toBe(false);
+    expect(KEY_REVISION_STORAGE_KEY in memory.data).toBe(false);
+
+    const next = await context.saveApiKey('key-1');
+    expect(next.keyRevision).toBe(1);
   });
 });

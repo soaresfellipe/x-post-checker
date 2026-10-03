@@ -23,8 +23,11 @@ Each page is offered state facts from four sources, in no guaranteed order:
 
 Writes: settings writes stamp a monotonic `settingsRevision` (the background is the single
 settings writer; settings + revision persist in one `area.set`, so revision N's settings are
-always the same snapshot). **API-key writes carry no revision.** Analysis records
-(`lastAnalysis`) carry no revision either.
+always the same snapshot). **API-key writes stamp a monotonic `keyRevision` the same way**: the
+background is the single key writer too (pages send `set-api-key` / `clear-api-key`), and the key
+change + its revision persist in one `area.set` — a clear persists the empty string (absent to
+every reader) rather than removing the key, so presence and revision can never be observed apart.
+Analysis records (`lastAnalysis`) carry no revision either.
 
 ## Lane (a) — settings: strictly-newer revision gate, single apply funnel
 
@@ -47,25 +50,38 @@ Options applies this in `readStoreAndRender` (initial read + resync funnel), `ap
 and the subscription's settings branch. The popup applies it in `refresh` (ticket check, then
 `accept(revision) || revision === revisionGate.lastApplied()`) and the toggle reply.
 
-## Lane (b) — key presence: event-first, never regressed by a delayed read
+## Lane (b) — key presence: strictly-newer keyRevision gate, single apply funnel
 
-**Invariant:** once a storage event has applied a key-presence fact, no later-completing read may
-repaint key presence. Key-only events re-read fresh at delivery, so the lane converges to
-storage's truth and stays there.
+**Invariant:** the page renders the newest key-presence fact it has been offered, and never
+repaints a fact older than one it already applied. At rest the page matches storage (VAL-SETUP-015).
 
-- Key writes advance no revision, so the settings gate cannot order this lane; it keeps its own
-  ordering: a page-level `keyEventApplied` flag (Options).
-- The storage subscription applies every key-touching event's fresh presence fact and sets the
-  flag. Event facts always apply, whatever the settings revision is doing.
-- Reads (initial read, resync rereads) render their key observation only while no key event has
-  applied yet; afterwards they leave the lane untouched — their observation began before the
-  event delivered, so the event's fact is the newer one. A gate-rejected read may still render
-  its key fact (the lanes are independent).
-- The page's own save/remove feedback renders its confirmed outcome directly (the write resolved,
-  so the key IS in that state); the write's own storage event then re-applies the fresh fact.
-- Popup: key presence rides the full `refresh()` (ticket-ordered), so a delayed refresh either
-  still holds the newest available fact (ticket current) or is dropped entirely (ticket stale);
-  same-revision refreshes keep key-only events rendering.
+- Every API-key write stamps a monotonic `keyRevision` in the SAME storage write as the key
+  change; the background's single writer serializes all key writes, so the counter is a total
+  order over them. A fact's presence and revision are captured in ONE storage read, so they never
+  disagree: the presence belongs to the revision.
+- Every key-presence fact — initial read, a storage event's fresh re-read, the page's own
+  save/remove replies, resync rereads — carries the keyRevision of the state it observed and
+  passes through ONE strictly-newer gate per page (`keyGate`, a separate `createRevisionGate`
+  instance from the settings gate). There is no second render path for key presence.
+- Because events AND reads feed the same gate, facts apply in WRITE order whatever their
+  completion order: the round-6 defect (a key-set event's fresh read stalling past a key-clear
+  event's fact, then completing last and repainting `present` over it) is impossible — the stalled
+  fact's revision is older, so the gate rejects it.
+- A gate-rejected fact renders nothing. Convergence is the storage subscription's job: every key
+  write fires an event whose fresh re-read applies through the same funnel.
+- The page's own save/remove replies are gated like any other fact. The write resolved, so its
+  fact is true — but if a newer write's fact already applied, the gate rejects the older reply's
+  render while the attempt's own status feedback still shows.
+- The gate records the first fact it is offered whatever its revision (0 when storage carries no
+  counter yet). External writers that bypass the store and write no `keyRevision` produce
+  revision-0 facts, which the gate correctly treats as older than any stamped write; there are no
+  such writers in the product (all key writes are background-routed).
+
+Options applies this in `readStoreAndRender` (initial read + resync funnel), the key save/remove
+replies, and the subscription's key branch, all through one `applyKeyFact` funnel. The popup
+applies it inside `refresh()`: the refresh ticket orders whole refreshes, and the key gate orders
+the key facts within them (a same-settings-revision refresh still cannot repaint an older key
+fact).
 
 ## Lane (c) — analysis: ticket ordering, no settings interplay
 
@@ -86,6 +102,11 @@ and analysis updates never reorder settings state (nor the reverse).
 - Options: delayed initial key-presence read vs an earlier key-only event → the page ends at
   storage's truth (`test/dom/options-page.test.ts`, "does not regress key presence …").
 - Options: key-only events apply fresh at delivery (`test/dom/options-page.test.ts`).
+- Options: delayed key-set EVENT completing after a key-clear event, and the reverse interleaving
+  → the page ends at storage's truth both ways (round-6 regressions,
+  `test/dom/options-page.test.ts`, "ends absent/present when a delayed key-… event completes …").
+- Popup: the same two key-event interleavings through the refresh path
+  (`test/dom/popup-page.test.ts`, "ends absent/present when the key-… event refresh completes …").
 - Options: resync reread overtaken by a newer write → rejected at completion; resyncs bounded
   (`test/dom/options-page.test.ts`, round-4 regressions).
 - Options/popup: delayed save reply after a newer storage change → no stale repaint (round-3
@@ -94,3 +115,10 @@ and analysis updates never reorder settings state (nor the reverse).
   (`test/dom/popup-page.test.ts`, "drops a delayed subscription refresh …").
 - Popup: failed-toggle same-revision restore (`test/dom/popup-page.test.ts`, "reverts the switch
   and reports an error when the write fails").
+- Store: settings and key writes each stamp strictly increasing persisted revisions, concurrent
+  writes included; a key clear persists the empty string in the SAME write as its revision
+  (`test/unit/settings-store.test.ts`).
+- Background: key writes from independent page contexts serialize through the protocol layer with
+  unique keyRevisions (`test/unit/settings-single-writer.test.ts`).
+- E2E: key save/removal stamp an ordered keyRevision and both pages converge; a delayed key-save
+  reply resolving after a removal repaints nothing stale (`test/e2e/key-writes.spec.ts`).

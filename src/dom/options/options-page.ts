@@ -5,6 +5,7 @@ import {
   DEFAULT_SETTINGS,
   NUMERIC_LIMITS,
   SETTINGS_KEYS,
+  type ApiKeyWriteResult,
   type PageSettingsStore,
   type Settings,
   type SettingsWriteResult,
@@ -12,7 +13,7 @@ import {
 import { OPTIONS_TEMPLATE } from './template';
 
 export interface OptionsPageDeps {
-  /** Read-only view of storage; the settings WRITE path is `saveSettings` (background single writer). */
+  /** Read-only view of storage; ALL writes go through the background single writer. */
   store: PageSettingsStore;
   /**
    * Persists a settings update through the background and resolves with the persisted settings and
@@ -20,6 +21,14 @@ export interface OptionsPageDeps {
    * page already applied (a delayed older reply must never repaint a newer state).
    */
   saveSettings(update: Partial<Settings>): Promise<SettingsWriteResult>;
+  /**
+   * Persists a new API key through the background (which stamps the write's keyRevision) and
+   * resolves with the produced presence plus that revision, so the save feedback applies through
+   * the same strictly-newer key gate as storage-driven facts.
+   */
+  saveApiKey(key: string): Promise<ApiKeyWriteResult>;
+  /** Removes the stored API key through the background. See `saveApiKey`. */
+  removeApiKey(): Promise<ApiKeyWriteResult>;
   /** Runs the connection test in the background; resolves with the result tagged by `attemptId`. */
   testConnection(attemptId: string, apiKey: string | undefined): Promise<{ attemptId: string; result: ConnectionTestResult }>;
 }
@@ -117,26 +126,39 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
   // rendered; the page re-reads the store instead, converging on the newest state.
   const revisionGate = createRevisionGate();
 
-  // Key-presence lane, ordered independently of the settings revision (see docs/state-ordering.md):
-  // API-key writes advance no settingsRevision, so the gate cannot order key facts against reads.
-  // Storage events re-read the presence FRESH at delivery, so once one has applied, its fact is
-  // newer than any read that was still in flight. From then on reads must leave the lane alone —
-  // otherwise a delayed initial read (or resync reread) that captured `absent` would repaint over
-  // an event-applied `present`, and with no further key event the page would disagree with
-  // storage indefinitely. Until the first key event, reads own the lane (the initial render).
-  let keyEventApplied = false;
+  // Key-presence lane, ordered independently of the settings revision (see docs/state-ordering.md
+  // lane (b)): every key write stamps a monotonic keyRevision in the same storage write as the
+  // key change, and EVERY key-presence fact this page is offered — the initial read, a storage
+  // event's fresh re-read, its own save/remove replies, resync rereads — carries the keyRevision
+  // of the state it observed and passes through this gate. A strictly-newer gate orders the facts
+  // by WRITE order, not completion order, so the round-6 defect (a stalled key-set event's fact
+  // completing after a newer key-clear event's fact and repainting `present` over it) cannot
+  // regress presence. The gate instance is separate from `revisionGate`: the two lanes move
+  // independently (key writes move no settingsRevision and vice versa).
+  const keyGate = createRevisionGate();
+
+  /** Single apply funnel for the key lane: renders only facts strictly newer than what applied. */
+  function applyKeyFact(present: boolean, keyRevision: number): void {
+    if (!keyGate.accept(keyRevision)) return;
+    renderKeyPresence(present);
+  }
 
   /**
    * Single read-and-render funnel for both the initial render and the resync after a superseded
    * save reply, gated at COMPLETION (a change landing during the read must win over it):
-   * - key presence is rendered only while the lane is still read-owned (no key event applied);
+   * - key presence is rendered only when its fact's keyRevision is strictly newer than everything
+   *   the key gate applied so far — a stalled read overtaken by an event (or by another read)
+   *   renders nothing;
    * - settings are rendered only when the snapshot's revision is strictly newer than everything
    *   applied so far — a snapshot overtaken by a newer write renders nothing, and convergence to
    *   the newest state is the already-registered subscription's job.
    */
   async function readStoreAndRender(): Promise<void> {
-    const [{ settings, revision }, hasKey] = await Promise.all([store.getSettingsWithRevision(), store.hasApiKey()]);
-    if (!keyEventApplied) renderKeyPresence(hasKey);
+    const [{ settings, revision }, key] = await Promise.all([
+      store.getSettingsWithRevision(),
+      store.getApiKeyWithRevision(),
+    ]);
+    applyKeyFact(key.apiKeyPresent, key.keyRevision);
     if (!revisionGate.accept(revision)) return;
     renderSettings(settings);
   }
@@ -154,16 +176,14 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
 
   // Subscribed before the initial read so a change landing during that read is never lost. The
   // two lanes are ordered independently (see docs/state-ordering.md):
-  // - key presence: the event's fact was re-read fresh at delivery, so it always applies and
-  //   marks the lane event-owned — a later-completing read can no longer regress it;
+  // - key presence: the event's fact (fresh read, self-consistent with its keyRevision) applies
+  //   through the key gate — strictly-newer, so two events completing out of order cannot regress
+  //   presence, and a stalled event fact loses to any newer write's fact;
   // - settings: strictly-newer revision gate — a superseded snapshot renders nothing.
   const unsubscribe = store.subscribe((change) => {
     const touchesKey = change.changedKeys.includes(API_KEY_STORAGE_KEY);
     const touchesSettings = change.changedKeys.some((key) => (SETTINGS_KEYS as readonly string[]).includes(key));
-    if (touchesKey) {
-      keyEventApplied = true;
-      renderKeyPresence(change.apiKeyPresent);
-    }
+    if (touchesKey) applyKeyFact(change.apiKeyPresent, change.keyRevision);
     if (touchesSettings && revisionGate.accept(change.revision)) renderSettings(change.settings);
   });
   await readStoreAndRender();
@@ -179,10 +199,12 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
     saveButton.disabled = true;
     setMessage(saveStatus, COPY.saving, 'pending');
     try {
-      await store.setApiKey(key);
+      const reply = await deps.saveApiKey(key);
       keyInput.value = '';
       setKeyVisible(false);
-      renderKeyPresence(true);
+      // The write resolved, so the key IS present — but a NEWER key fact (a later event's fresh
+      // read) may already have applied; the gate keeps the lane strictly-newer either way.
+      applyKeyFact(reply.apiKeyPresent, reply.keyRevision);
       setMessage(saveStatus, COPY.saved, 'success');
     } catch {
       setMessage(saveStatus, COPY.saveFailed, 'error');
@@ -193,8 +215,8 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
 
   removeButton.addEventListener('click', async () => {
     try {
-      await store.clearApiKey();
-      renderKeyPresence(false);
+      const reply = await deps.removeApiKey();
+      applyKeyFact(reply.apiKeyPresent, reply.keyRevision);
       setMessage(saveStatus, COPY.removed, 'success');
     } catch {
       setMessage(saveStatus, COPY.removeFailed, 'error');

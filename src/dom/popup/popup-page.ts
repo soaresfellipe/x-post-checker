@@ -109,12 +109,20 @@ export async function mountPopupPage(root: HTMLElement, deps: PopupPageDeps): Pr
   // master switch; the page re-reads the store instead, converging on the newest state.
   const revisionGate = createRevisionGate();
 
+  // Key-presence lane (docs/state-ordering.md lane (b)): every key-presence fact this page is
+  // offered carries the keyRevision of the state it observed (the write that produced it, or the
+  // fresh read that observed it), and passes this strictly-newer gate — separate instance from
+  // `revisionGate`, since the two lanes move independently. The refresh ticket orders whole
+  // refreshes; the key gate additionally orders the key facts WITHIN the same-revision refresh
+  // path, so a fact older than an already-applied one can never repaint presence.
+  const keyGate = createRevisionGate();
+
   let latestRefresh = 0;
   async function refresh() {
     const ticket = ++latestRefresh;
-    const [{ settings, revision }, hasKey, last] = await Promise.all([
+    const [{ settings, revision }, key, last] = await Promise.all([
       store.getSettingsWithRevision(),
-      store.hasApiKey(),
+      store.getApiKeyWithRevision(),
       store.getLastAnalysis(),
     ]);
     if (ticket !== latestRefresh) return;
@@ -125,12 +133,15 @@ export async function mountPopupPage(root: HTMLElement, deps: PopupPageDeps): Pr
     // holding an older snapshot. The settings part therefore also passes the revision gate:
     // applied when strictly newer, or when its revision IS the newest applied one (nothing newer
     // has applied — a fresh observation of the current state, e.g. restoring the switch after a
-    // failed toggle, or re-rendering after a key-only event, which moves no revision). An older
-    // snapshot is dropped; convergence is the subscription's next refresh.
+    // failed toggle, or re-rendering after a key-only event, which moves no settings revision).
+    // An older snapshot is dropped; convergence is the subscription's next refresh.
     const current = revisionGate.accept(revision) || revision === revisionGate.lastApplied();
     if (!current) return;
     renderMaster(settings.enabled);
-    renderKey(hasKey);
+    // The key fact is ordered by its own lane: admitted when strictly newer than what the key
+    // gate applied (a key-only event always is; an unchanged keyRevision means the indicator is
+    // already current and must stay untouched).
+    if (keyGate.accept(key.keyRevision)) renderKey(key.apiKeyPresent);
     renderAnalysis(last);
   }
 

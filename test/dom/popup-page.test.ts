@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { API_KEY_STORAGE_KEY, LAST_ANALYSIS_STORAGE_KEY, DEFAULT_SETTINGS, createSettingsStore } from '@/core/settings-store';
+import {
+  API_KEY_STORAGE_KEY,
+  KEY_REVISION_STORAGE_KEY,
+  LAST_ANALYSIS_STORAGE_KEY,
+  DEFAULT_SETTINGS,
+  createSettingsStore,
+} from '@/core/settings-store';
 import type { PageSettingsStore, Settings, SettingsWriteResult } from '@/core/settings-store';
 import { COPY, formatAnalysisTime, mountPopupPage } from '@/dom/popup';
 import { createMemoryBackend } from '../helpers/memory-backend';
@@ -96,6 +102,101 @@ describe('popup page', () => {
     await store.clearApiKey();
     await flush();
     expect(q('key-indicator').dataset.state).toBe('missing');
+  });
+
+  // Regression (scrutiny round 6, popup pin): the validator's inverted key-event completion,
+  // through the popup's refresh path. A key-set event's refresh parks holding present@1; the
+  // key-clear event's refresh applies absent@2; the parked refresh then completes. The refresh
+  // ticket already drops the stale refresh wholesale; the key lane's own gate would reject its
+  // older fact too — the page ends at storage's truth (absent) either way. The hold intercepts
+  // the storage read itself, like a slow storage round-trip.
+  it('ends absent when the key-set event refresh completes after the key-clear event refresh', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend);
+    let holdArmed = false; // parks the NEXT storage read that touches the key, after it captures
+    const keyReadHold = { release: () => {} };
+    const originalGet = memory.backend.area.get.bind(memory.backend);
+    memory.backend.area.get = async (keys) => {
+      const list = Array.isArray(keys) ? keys : [keys];
+      const snapshot = await originalGet(keys);
+      if (holdArmed && list.includes(API_KEY_STORAGE_KEY)) {
+        holdArmed = false;
+        await new Promise<void>((resolve) => (keyReadHold.release = resolve));
+      }
+      return snapshot;
+    };
+    document.body.innerHTML = '<div id="app"></div>';
+    teardowns.push(await mountPopupPage(document.getElementById('app')!, {
+      store,
+      saveSettings: (update) => store.setSettings(update),
+      openOptions: async () => undefined,
+      now: () => NOW,
+    }));
+    expect(q('key-indicator').dataset.state).toBe('missing');
+
+    // Event A (key-set): its refresh's key read captures present@1 and parks.
+    holdArmed = true;
+    await store.setApiKey('abc');
+    await flush();
+    expect(q('key-indicator').dataset.state).toBe('missing'); // A's refresh is parked
+
+    // Event B (key-clear): its refresh applies fresh absent@2.
+    await store.clearApiKey();
+    await flush();
+    expect(q('key-indicator').dataset.state).toBe('missing');
+
+    // A's parked refresh completes LAST: dropped (stale ticket; its fact is older anyway).
+    keyReadHold.release();
+    await flush();
+    expect(q('key-indicator').dataset.state).toBe('missing');
+    expect(memory.data[API_KEY_STORAGE_KEY]).toBe('');
+  });
+
+  // Reverse interleaving of the pin above: the key-clear event's refresh parks, a later key-set
+  // event's refresh applies present@3, and the parked refresh completes last — it must not
+  // regress the indicator behind storage, which holds the key.
+  it('ends present when the key-clear event refresh completes after the key-set event refresh', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend);
+    memory.data[API_KEY_STORAGE_KEY] = 'abc';
+    memory.data[KEY_REVISION_STORAGE_KEY] = 1; // the preset key was written with keyRevision 1
+    let holdArmed = false;
+    const keyReadHold = { release: () => {} };
+    const originalGet = memory.backend.area.get.bind(memory.backend);
+    memory.backend.area.get = async (keys) => {
+      const list = Array.isArray(keys) ? keys : [keys];
+      const snapshot = await originalGet(keys);
+      if (holdArmed && list.includes(API_KEY_STORAGE_KEY)) {
+        holdArmed = false;
+        await new Promise<void>((resolve) => (keyReadHold.release = resolve));
+      }
+      return snapshot;
+    };
+    document.body.innerHTML = '<div id="app"></div>';
+    teardowns.push(await mountPopupPage(document.getElementById('app')!, {
+      store,
+      saveSettings: (update) => store.setSettings(update),
+      openOptions: async () => undefined,
+      now: () => NOW,
+    }));
+    expect(q('key-indicator').dataset.state).toBe('present');
+
+    // Event B (key-clear, revision 2): its refresh's key read captures absent@2 and parks.
+    holdArmed = true;
+    await store.clearApiKey();
+    await flush();
+    expect(q('key-indicator').dataset.state).toBe('present'); // B's refresh is parked
+
+    // Event A (key-set, revision 3): its refresh applies fresh present@3.
+    await store.setApiKey('abc');
+    await flush();
+    expect(q('key-indicator').dataset.state).toBe('present');
+
+    // B's parked refresh completes LAST carrying absent@2: dropped (stale ticket; older fact).
+    keyReadHold.release();
+    await flush();
+    expect(q('key-indicator').dataset.state).toBe('present');
+    expect(memory.data[API_KEY_STORAGE_KEY]).toBe('abc');
   });
 
   it('reverts the switch and reports an error when the write fails', async () => {

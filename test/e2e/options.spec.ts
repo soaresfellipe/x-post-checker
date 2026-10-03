@@ -17,11 +17,25 @@ declare const chrome: {
   >;
 };
 
-async function openOptions(context: BrowserContext): Promise<{ page: Page; logs: string[] }> {
+async function openOptions(context: BrowserContext, options: { failKeySave?: boolean } = {}): Promise<{ page: Page; logs: string[] }> {
   const page = await context.newPage();
   const logs: string[] = [];
   page.on('console', (message) => logs.push(message.text()));
   page.on('pageerror', (error) => logs.push(error.message));
+  if (options.failKeySave) {
+    // Key writes travel through the background (`set-api-key` messages). Rejecting the request
+    // simulates a rejected write (the background's storage.set fails) — the page must report the
+    // error and change nothing, exactly like the direct-write rejection this test used to patch.
+    await page.addInitScript(`
+      (() => {
+        const original = chrome.runtime.sendMessage.bind(chrome.runtime);
+        chrome.runtime.sendMessage = (...args) => {
+          if (args[0] && args[0].type === 'set-api-key') return Promise.reject(new Error('QUOTA_BYTES quota exceeded'));
+          return original(...args);
+        };
+      })();
+    `);
+  }
   await page.goto(await optionsUrl(context));
   await expect(page.getByTestId('key-status')).not.toBeEmpty();
   return { page, logs };
@@ -100,10 +114,7 @@ test.describe('options page: key management', () => {
   });
 
   test('reports an error, not success, when the storage write is rejected', async ({ context }) => {
-    const { page } = await openOptions(context);
-    await page.evaluate(() => {
-      chrome.storage.local.set = () => Promise.reject(new Error('QUOTA_BYTES quota exceeded'));
-    });
+    const { page } = await openOptions(context, { failKeySave: true });
     await page.getByTestId('api-key-input').fill(SYNTHETIC_KEY);
     await page.getByTestId('save-key').click();
 
@@ -111,6 +122,7 @@ test.describe('options page: key management', () => {
     await expect(page.getByTestId('save-status')).toContainText('Could not save');
     await expect(page.getByTestId('save-status')).not.toContainText('API key saved');
     expect((await storageSnapshot(page, 'local')).jevApiKey).toBeUndefined();
+    expect((await storageSnapshot(page, 'local')).keyRevision).toBeUndefined();
     await expect(page.getByTestId('api-key-input')).toHaveValue(SYNTHETIC_KEY);
   });
 });

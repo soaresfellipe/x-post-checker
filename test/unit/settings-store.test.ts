@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   API_KEY_STORAGE_KEY,
   DEFAULT_SETTINGS,
+  KEY_REVISION_STORAGE_KEY,
   SETTINGS_REVISION_STORAGE_KEY,
   createSettingsStore,
 } from '@/core/settings-store';
@@ -70,6 +71,87 @@ describe('settings store', () => {
     expect(await store.hasApiKey()).toBe(true);
     await store.clearApiKey();
     expect(await store.hasApiKey()).toBe(false);
+  });
+
+  // The key lane's ordering token (docs/state-ordering.md lane (b)): every key write stamps a
+  // strictly increasing keyRevision in the SAME storage write as the key change, so presence
+  // facts can be applied in write order whatever their delivery order is.
+  it('stamps each API-key write with a strictly increasing persisted keyRevision', async () => {
+    const { backend, data } = createMemoryBackend();
+    const store = createSettingsStore(backend);
+
+    await store.setApiKey('key-1');
+    expect(data[KEY_REVISION_STORAGE_KEY]).toBe(1);
+    await store.clearApiKey();
+    expect(data[KEY_REVISION_STORAGE_KEY]).toBe(2);
+    await store.setApiKey('key-2');
+    expect(data[KEY_REVISION_STORAGE_KEY]).toBe(3);
+  });
+
+  // A `remove` + revision `set` pair would open a window where a fresh read captures `present`
+  // with the NEW revision, which a strictly-newer gate could never supersede. The clear therefore
+  // persists the empty string (absent to every reader) in the same single `set` as the revision.
+  it('persists the cleared key as the empty string in the SAME storage write as its revision', async () => {
+    const { backend } = createMemoryBackend();
+    const store = createSettingsStore(backend);
+    const sets: Array<Record<string, unknown>> = [];
+    const originalSet = backend.area.set.bind(backend);
+    backend.area.set = async (items) => {
+      sets.push(items);
+      await originalSet(items);
+    };
+
+    await store.setApiKey('key-1');
+    sets.length = 0;
+    await store.clearApiKey();
+
+    expect(sets).toEqual([{ [API_KEY_STORAGE_KEY]: '', [KEY_REVISION_STORAGE_KEY]: 2 }]);
+    expect(await store.getApiKey()).toBeUndefined();
+    expect(await store.hasApiKey()).toBe(false);
+  });
+
+  // The write reply carries presence + the write's keyRevision so pages can gate the save/remove
+  // feedback through the same strictly-newer key gate as storage-driven facts.
+  it('returns the produced presence and the stamped keyRevision from each key write', async () => {
+    const { backend } = createMemoryBackend();
+    const store = createSettingsStore(backend);
+
+    expect(await store.setApiKey('key-1')).toEqual({ apiKeyPresent: true, keyRevision: 1 });
+    expect(await store.clearApiKey()).toEqual({ apiKeyPresent: false, keyRevision: 2 });
+  });
+
+  it('orders concurrent key writes so every write stamps the next revision', async () => {
+    const { backend, data } = createMemoryBackend();
+    const store = createSettingsStore(backend);
+
+    const [first, second, third] = await Promise.all([
+      store.setApiKey('key-a'),
+      store.setApiKey('key-b'),
+      store.clearApiKey(),
+    ]);
+    expect([first, second, third].map((write) => write.keyRevision)).toEqual([1, 2, 3]);
+    expect(await store.hasApiKey()).toBe(false);
+    expect(data[KEY_REVISION_STORAGE_KEY]).toBe(3);
+  });
+
+  it('rejects an empty key through the protocol without consuming a revision', async () => {
+    const { backend, data } = createMemoryBackend();
+    const store = createSettingsStore(backend);
+    await expect(store.setApiKey('   ')).rejects.toThrow(/empty/i);
+    expect(API_KEY_STORAGE_KEY in data).toBe(false);
+    expect(KEY_REVISION_STORAGE_KEY in data).toBe(false);
+    expect(await store.setApiKey('real-key')).toEqual({ apiKeyPresent: true, keyRevision: 1 });
+  });
+
+  it('reads key presence and its revision in one snapshot via getApiKeyWithRevision', async () => {
+    const { backend } = createMemoryBackend();
+    const store = createSettingsStore(backend);
+
+    // Empty storage: absent with keyRevision 0 (no order information).
+    expect(await store.getApiKeyWithRevision()).toEqual({ apiKeyPresent: false, keyRevision: 0 });
+
+    await store.setApiKey('key-1');
+    expect(await store.getApiKeyWithRevision()).toEqual({ apiKeyPresent: true, keyRevision: 1 });
   });
 
   it('rejects an empty API key without writing', async () => {
@@ -193,5 +275,28 @@ describe('settings store', () => {
     await store.setSettings({ minDraftLength: 40 });
     await vi.waitFor(() => expect(listener).toHaveBeenCalledTimes(2));
     expect(listener.mock.calls.map((call) => call[0].revision)).toEqual([1, 2]);
+  });
+
+  // Key events deliver the presence fact WITH its keyRevision, captured fresh at delivery in one
+  // storage read (so the fact is self-consistent: the presence belongs to that revision).
+  it('surfaces the keyRevision of the triggering key write to subscribers', async () => {
+    const { backend } = createMemoryBackend();
+    const store = createSettingsStore(backend);
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    await store.setApiKey('secret-key-abc');
+    await store.clearApiKey();
+    await vi.waitFor(() => expect(listener).toHaveBeenCalledTimes(2));
+    expect(listener.mock.calls[0]?.[0]).toMatchObject({
+      changedKeys: [API_KEY_STORAGE_KEY],
+      apiKeyPresent: true,
+      keyRevision: 1,
+    });
+    expect(listener.mock.calls[1]?.[0]).toMatchObject({
+      changedKeys: [API_KEY_STORAGE_KEY],
+      apiKeyPresent: false,
+      keyRevision: 2,
+    });
   });
 });

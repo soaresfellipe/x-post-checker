@@ -36,5 +36,13 @@ export function createBackgroundHandlers(deps: BackgroundHandlerDeps): Handlers 
       if (typeof update !== 'object' || update === null) throw new Error('Invalid settings update.');
       return store.setSettings(update);
     },
+    // Key writes are serialized through the same single writer, so the stamped keyRevision is a
+    // total order over all key writes; the reply lets the requesting page gate its own
+    // save/remove feedback through the key lane's strictly-newer gate.
+    'set-api-key': async ({ key }) => {
+      if (typeof key !== 'string') throw new Error('Invalid API key.');
+      return store.setApiKey(key);
+    },
+    'clear-api-key': () => store.clearApiKey(),
   };
 }

@@ -85,7 +85,9 @@ test.describe('popup', () => {
     expect((await storageSnapshot(page)).enabled).toBe(false);
     texts.push(await page.locator('body').innerText());
 
-    await page.evaluate(() => chrome.storage.local.set({ jevApiKey: 'k', lastAnalysis: { at: Date.now(), outcome: 'local-only' } }));
+    // Another context wrote the key directly; the write carries its keyRevision (the key lane's
+    // ordering token), so the popup's strictly-newer gate admits it over the absent@0 fact.
+    await page.evaluate(() => chrome.storage.local.set({ jevApiKey: 'k', keyRevision: 1, lastAnalysis: { at: Date.now(), outcome: 'local-only' } }));
     await expect(page.getByTestId('last-analysis')).toHaveAttribute('data-state', 'local-only');
     texts.push(await page.locator('body').innerText());
     await page.evaluate(() => chrome.storage.local.set({ lastAnalysis: { at: Date.now() - 3 * 86_400_000, outcome: 'error' } }));
