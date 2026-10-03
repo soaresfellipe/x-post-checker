@@ -84,6 +84,7 @@ function optimized(draft: DraftSnapshot, variants: readonly HookVariant[] = DEFA
 
 interface Harness {
   overlay: ScoreOverlay;
+  watcher: ReturnType<typeof createComposerWatcher>;
   optimizeRequests: DraftSnapshot[];
   copied: string[];
   setKeyPresent(present: boolean): void;
@@ -92,6 +93,11 @@ interface Harness {
   optimizeFail(draft?: DraftSnapshot): void;
   panel(): HTMLElement;
 }
+
+/** Live harnesses, stopped + destroyed after EVERY test: a leaked MutationObserver survives the
+ * body reset, re-attaches to the next test's composer, and pollutes its dispatches (the m3
+ * scanner-suite lesson from library/environment.md). */
+const harnesses: Harness[] = [];
 
 function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: boolean } = {}): Harness {
   document.body.innerHTML = HOME_HTML;
@@ -123,8 +129,9 @@ function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: bo
   overlay.onSettings(settings, 1);
   watcher.start();
 
-  return {
+  const harness: Harness = {
     overlay,
+    watcher,
     optimizeRequests,
     copied,
     setKeyPresent(present: boolean) {
@@ -149,6 +156,8 @@ function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: bo
       return panel;
     },
   };
+  harnesses.push(harness);
+  return harness;
 }
 
 const find = (root: ParentNode, testid: string): HTMLElement | null =>
@@ -163,6 +172,11 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const harness of harnesses) {
+    harness.watcher.stop();
+    harness.overlay.destroy();
+  }
+  harnesses.length = 0;
   vi.useRealTimers();
   document.body.innerHTML = '';
 });
@@ -324,5 +338,33 @@ describe('Failure and identity (VAL-OPT-009, VAL-OPT-010)', () => {
     const harness = await analyzeHarness({ settings: { jevForDrafts: false } });
     click(find(harness.panel(), 'overlay-optimize')!);
     expect(harness.optimizeRequests).toHaveLength(0);
+  });
+});
+
+describe('English-only optimizer surface (VAL-CROSS-016)', () => {
+  it('renders only English text across idle, no-key, loading, done, and error states', async () => {
+    const english = /^[A-Za-z0-9 .,:;!?%'"()\-–—/+·…#]*$/;
+    const visibleText = (root: ParentNode): string =>
+      [...root.querySelectorAll('*')].map((node) => node.textContent ?? '').join(' ');
+
+    const noKey = await analyzeHarness({ keyPresent: false });
+    expect(visibleText(find(noKey.panel(), 'overlay-optimizer')!)).toMatch(english);
+    // One live harness at a time: the first harness's watcher must be stopped BEFORE the second
+    // harness replaces the body, or its observer re-attaches and its host wins the id race.
+    noKey.watcher.stop();
+    noKey.overlay.destroy();
+
+    const harness = await analyzeHarness();
+    expect(visibleText(find(harness.panel(), 'overlay-optimizer')!)).toMatch(english); // idle
+    click(find(harness.panel(), 'overlay-optimize')!);
+    expect(visibleText(find(harness.panel(), 'overlay-optimizer')!)).toMatch(english); // loading
+    harness.optimizeReply(optimized(harness.optimizeRequests[0]!));
+    expect(visibleText(find(harness.panel(), 'overlay-optimizer')!)).toMatch(english); // done
+
+    typeText(composer(), 'A second draft long enough for the error state sweep here.');
+    await settleCapture();
+    click(find(harness.panel(), 'overlay-optimize')!);
+    harness.optimizeFail();
+    expect(visibleText(find(harness.panel(), 'overlay-optimizer')!)).toMatch(english); // error
   });
 });
