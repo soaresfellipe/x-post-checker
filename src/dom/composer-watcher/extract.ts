@@ -3,7 +3,7 @@
  * plus composer-scoped regions) — never localized label text. Every selector comes from
  * `src/selectors.ts`.
  */
-import { parseHashtags, parseUrls, type DraftSnapshot } from '@/core/draft-snapshot';
+import { parseHashtags, parseUrls, statusRouteHandle, type DraftSnapshot } from '@/core/draft-snapshot';
 import { SELECTORS, findAllCandidates, isInsideComposerContainer } from '@/selectors';
 
 const COMPOSER_INDEX_PATTERN = /tweetTextarea_(\d+)$/;
@@ -140,9 +140,28 @@ export function getComposerText(composer: Element): string {
 }
 
 /**
+ * The composer document's current route pathname (kept fresh by the SPA), or '' when unavailable.
+ */
+function routePathname(composer: Element): string {
+  return composer.ownerDocument?.defaultView?.location?.pathname ?? '';
+}
+
+/**
  * Field-for-field DraftSnapshot from the live composer (VAL-DRAFT-030): text, hashtags, urls
  * (t.co-expanded when the markup exposes the destination), hasMedia, reply context (isReply,
  * replyToHandle) and raw charCount + capturedAt.
+ *
+ * Reply context (M2 scrutiny round 3) comes from the composer's actual context, evaluated at
+ * capture time so SPA route changes re-classify:
+ * - the status-page ROUTE `/<handle>/status/<id>`: the inline "Post your reply" composer under
+ *   the primary post is verified real x.com shape (`tweetTextarea_0`, NO reply chip in its
+ *   region — `library/x-dom.md`) and is a reply to that post;
+ * - a numbered composer (`tweetTextarea_1+`, the reply dialog) or a visible in-region reply
+ *   chip (the dialog/fixture shapes).
+ *
+ * `replyToHandle` is set ONLY from a verifiable visible source — the in-region chip first (the
+ * dialog's reply line is the more specific target on nested replies), else the status route's
+ * handle segment; absent when neither is determinable, never guessed.
  *
  * `replyToFollowedByViewer` is NEVER set here: the real reply composer exposes no marker that
  * the viewer follows the reply target (verified read-only x.com inspection 2026-10-03 — see
@@ -153,7 +172,7 @@ export function getComposerText(composer: Element): string {
 export function extractDraftSnapshot(composer: Element, options: { now?: number } = {}): DraftSnapshot {
   const text = getComposerText(composer);
   const region = findComposerRegion(composer);
-  const replyToHandle = findReplyToHandle(region);
+  const replyToHandle = findReplyToHandle(region) ?? statusRouteHandle(routePathname(composer));
   const index = getComposerTestidIndex(composer);
   const isReply = (index !== null && index >= 1) || replyToHandle !== undefined;
 

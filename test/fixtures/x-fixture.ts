@@ -165,6 +165,10 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
       ]),
     ),
   )};
+  // Rendered primary-post markup by status id, for the REAL status-page view below.
+  var STATUS_POSTS_HTML = ${JSON.stringify(
+    Object.fromEntries(FIXTURE_POSTS.map((post) => [post.id, renderPost(post, now)])),
+  )};
 
   function statusId(path) {
     var match = /\\/status\\/(\\d+)/.exec(path);
@@ -202,6 +206,30 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
     primary.innerHTML = homeHtml;
   }
 
+  /**
+   * The REAL status-page view (library/x-dom.md, verified 2026-10-03): the primary post above an
+   * inline "Post your reply" composer whose testid is tweetTextarea_0 and whose REGION (the plain
+   * div around the RichTextInputContainer) holds ONLY those two testids — NO reply chip, no
+   * follow badge. Reply context on this shape comes from the ROUTE (/<handle>/status/<id>).
+   */
+  function renderStatusPageView(id) {
+    var postHtml = STATUS_POSTS_HTML[id];
+    if (!postHtml) return;
+    primary.innerHTML =
+      '<div data-testid="statusView">' +
+      '<nav><a href="/" role="link" data-testid="navHome"><span>Pagina inicial</span></a></nav>' +
+      postHtml +
+      '<div>' +
+      '<div data-testid="tweetTextarea_0RichTextInputContainer">' +
+      '<div class="DraftEditor-root">' +
+      '<div data-testid="tweetTextarea_0" role="textbox" contenteditable="true" aria-label="Poste sua resposta" spellcheck="true" class="notranslate public-DraftEditor-content"></div>' +
+      '</div>' +
+      '</div>' +
+      '</div>' +
+      '<button type="button" data-testid="tweetButtonInline" aria-disabled="true">Responder</button>' +
+      '</div>';
+  }
+
   var EXPLORE_VIEW_HTML = ${JSON.stringify(renderExploreViewHtml())};
   function renderExploreView() {
     primary.innerHTML = EXPLORE_VIEW_HTML;
@@ -209,6 +237,10 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
 
   // A direct load of /explore starts on the composer-less view (full reloads keep real routes).
   if (location.pathname === '/explore') renderExploreView();
+  // A direct load of a status URL starts on the REAL status-page view (inline "Post your reply"
+  // composer, tweetTextarea_0, NO chip — the verified real shape; home stays captured above).
+  var initialStatusId = statusId(location.pathname);
+  if (initialStatusId) renderStatusPageView(initialStatusId);
 
   function makeAttachments() {
     var wrap = document.createElement('div');
@@ -241,6 +273,12 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
       renderExploreView();
       return;
     }
+    if (target.closest('[data-testid="navHome"]')) {
+      event.preventDefault();
+      history.pushState({}, '', '/');
+      renderHome();
+      return;
+    }
     var statusLink = target.closest('a[href*="/status/"]');
     if (statusLink) {
       event.preventDefault();
@@ -263,7 +301,9 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
       return;
     }
     var id = statusId(location.pathname);
-    if (id) renderReplyView(id);
+    // Back/forward into a status route lands on the REAL status-page shape (like a fresh visit);
+    // status-link CLICKS above still open the reply-DIALOG shape (tweetTextarea_1 + chip).
+    if (id) renderStatusPageView(id);
     else renderHome();
   });
 })();

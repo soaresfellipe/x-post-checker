@@ -37,6 +37,27 @@ const EXPLORE_VIEW_HTML = `
   </div>
 </div>`;
 
+/**
+ * The VERIFIED real status-page view (library/x-dom.md, 2026-10-03): the inline "Post your reply"
+ * composer under the primary post is tweetTextarea_0 and its region holds NO reply chip. Reply
+ * context must flip with the ROUTE, not with the composer markup.
+ */
+const STATUS_PAGE_VIEW_HTML = `
+<div data-testid="primaryColumn">
+  <div data-testid="statusView">
+    <article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/ana_builds" role="link"><span>@ana_builds</span></a></div>
+      <div data-testid="tweetText"><span>Primary post above the inline composer</span></div>
+    </article>
+    <div>
+      <div data-testid="tweetTextarea_0RichTextInputContainer">
+        <div data-testid="tweetTextarea_0" role="textbox" contenteditable="true" class="public-DraftEditor-content"></div>
+      </div>
+    </div>
+    <button type="button" data-testid="tweetButtonInline" aria-disabled="true">Responder</button>
+  </div>
+</div>`;
+
 interface Harness {
   dispatches: AnalysisDispatch[];
   draftEvents: DraftEvent[];
@@ -160,6 +181,38 @@ describe('composer detection', () => {
     document.body.innerHTML = HOME_HTML;
     await vi.advanceTimersByTimeAsync(0);
     expect(harness.composerEvents).toEqual([{ type: 'attached', composer: composer() }]);
+  });
+
+  it('flips reply context BOTH ways across SPA navigation (status route = reply, home = standalone)', async () => {
+    // M2 scrutiny round 3: the real status page's inline "Post your reply" composer is
+    // tweetTextarea_0 with NO chip — only the route (/<handle>/status/<id>) makes it a reply.
+    const { harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    typeText(composer(), 'Draft typed on the home timeline');
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.dispatches[0]!.snapshot.isReply).toBe(false);
+    expect('replyToHandle' in harness.dispatches[0]!.snapshot).toBe(false);
+
+    // SPA navigation home -> status: the inline composer (tweetTextarea_0, no chip) replaces the
+    // home composer, and the route carries the reply context.
+    history.pushState({}, '', '/ana_builds/status/1800000000000000001');
+    document.body.innerHTML = STATUS_PAGE_VIEW_HTML;
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'Draft typed under a status page');
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.dispatches[1]!.snapshot.isReply).toBe(true);
+    expect(harness.dispatches[1]!.snapshot.replyToHandle).toBe('ana_builds');
+    expect('replyToFollowedByViewer' in harness.dispatches[1]!.snapshot).toBe(false);
+
+    // And status -> home flips it back: no stale reply classification survives the route change.
+    history.pushState({}, '', '/home');
+    document.body.innerHTML = HOME_HTML;
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'Draft typed back on the home timeline');
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.dispatches[2]!.snapshot.isReply).toBe(false);
+    expect('replyToHandle' in harness.dispatches[2]!.snapshot).toBe(false);
   });
 
   it('attaches nothing on a composer-less route that contains an unrelated DraftEditor editor', async () => {

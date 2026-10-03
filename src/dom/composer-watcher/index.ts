@@ -1,4 +1,4 @@
-export { DRAFT_DEBOUNCE_MS, isDraftEligible, type AnalysisTrigger, type DraftSnapshot } from '@/core/draft-snapshot';
+export { DRAFT_DEBOUNCE_MS, isDraftEligible, statusRouteHandle, type AnalysisTrigger, type DraftSnapshot } from '@/core/draft-snapshot';
 export {
   extractDraftSnapshot,
   findComposer,

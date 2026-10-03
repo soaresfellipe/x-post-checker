@@ -5,6 +5,8 @@ const MARKER_HOST = '#amplifyx-marker-host';
 const OVERLAY_HOST = '#amplifyx-overlay-host';
 const HOME_COMPOSER = '[data-testid="tweetTextarea_0"]';
 const REPLY_COMPOSER = '[data-testid="tweetTextarea_1"]';
+/** A status URL whose post is NOT the timeline's first (no .first() ambiguity with other specs). */
+const STATUS_URL = `${FIXTURE_URL}joaodev/status/1800000000000000002`;
 
 async function openFixture(context: BrowserContext): Promise<Page> {
   const page = await context.newPage();
@@ -195,4 +197,50 @@ test.describe('composer watcher', () => {
       await expect(row.locator('.points')).toHaveText('0');
     });
   }
+
+  test('classifies the REAL status-page composer (tweetTextarea_0, no chip) as a reply via the route (M2 round 3, VAL-DRAFT-019)', async ({ context }) => {
+    // Direct landing on a status URL is the verified real shape (library/x-dom.md): the inline
+    // "Post your reply" composer is tweetTextarea_0 and its region holds NO reply chip. Only the
+    // /<handle>/status/<id> route carries the reply context — the breakdown must show it.
+    const page = await context.newPage();
+    await page.goto(STATUS_URL, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator(MARKER_HOST)).toHaveAttribute('data-watcher-state', 'watching');
+    await expect(page.locator(MARKER_HOST)).toHaveAttribute('data-watcher-composer', 'tweetTextarea_0');
+    await expect(page.locator('[data-testid="replyComposerContainer"]')).toHaveCount(0); // no dialog chrome
+
+    await page.locator(HOME_COMPOSER).click();
+    await page.keyboard.type('Reply draft typed on a status page, long enough');
+    const signals = page.getByTestId('overlay-signals');
+    await expect(signals).toBeVisible({ timeout: 5_000 });
+    const row = signals.locator('li[data-signal-id="reply-mutual"]');
+    await expect(row).toContainText('reply - follow state not visible');
+    await expect(row).not.toContainText('not a reply');
+    await expect(row.locator('.points')).toHaveText('0');
+  });
+
+  test('SPA navigation flips reply context BOTH ways with the real status-page shape (M2 round 3)', async ({ context }) => {
+    const page = await context.newPage();
+    await page.goto(STATUS_URL, { waitUntil: 'domcontentloaded' });
+    await expect(page.locator(MARKER_HOST)).toHaveAttribute('data-watcher-state', 'watching');
+    const replyRow = page.getByTestId('overlay-signals').locator('li[data-signal-id="reply-mutual"]');
+
+    // On the status route: reply context (route-derived, follow state never visible).
+    await page.locator(HOME_COMPOSER).click();
+    await page.keyboard.type('Reply draft on the status page, long enough');
+    await expect(replyRow).toContainText('reply - follow state not visible', { timeout: 5_000 });
+
+    // Status -> home: the standalone home composer must NOT claim reply context.
+    await page.locator('[data-testid="navHome"]').click();
+    await expect(page.locator('[data-testid="statusView"]')).toHaveCount(0);
+    await page.locator(HOME_COMPOSER).click();
+    await page.keyboard.type('Draft typed back on the home timeline');
+    await expect(replyRow).toContainText('not a reply', { timeout: 5_000 });
+
+    // Home -> status again (browser back through the SPA history): the route flips it back.
+    await page.goBack();
+    await expect(page.locator('[data-testid="statusView"]')).toBeVisible();
+    await page.locator(HOME_COMPOSER).click();
+    await page.keyboard.type('Reply draft on the status page again');
+    await expect(replyRow).toContainText('reply - follow state not visible', { timeout: 5_000 });
+  });
 });

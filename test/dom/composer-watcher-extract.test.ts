@@ -37,6 +37,43 @@ const MAIN_COMPOSER_HTML = `
   </div>
 </div>`;
 
+/**
+ * The VERIFIED real status-page composer shape (library/x-dom.md, 2026-10-03 inspection): the
+ * inline "Post your reply" composer under the primary post is tweetTextarea_0 and its region
+ * (parent of tweetTextarea_0RichTextInputContainer) contains ONLY those two testids — no reply
+ * chip, no follow badge. Reply context must come from the status ROUTE (/<handle>/status/<id>).
+ */
+const STATUS_PAGE_COMPOSER_HTML = `
+<div data-testid="primaryColumn">
+  <div data-testid="statusView">
+    <article data-testid="tweet">
+      <div data-testid="User-Name"><a href="/ana_builds" role="link"><span>@ana_builds</span></a></div>
+      <div data-testid="tweetText"><span>The primary post being viewed lives above the composer</span></div>
+    </article>
+    <div>
+      <div data-testid="tweetTextarea_0RichTextInputContainer">
+        <div data-testid="tweetTextarea_0" role="textbox" contenteditable="true" aria-label="Poste sua resposta" class="public-DraftEditor-content"></div>
+      </div>
+    </div>
+    <button type="button" data-testid="tweetButtonInline" aria-disabled="true">Responder</button>
+  </div>
+</div>`;
+
+/** Sets the SPA route the way x.com does (history API) without reloading the document. */
+function navigateTo(path: string): void {
+  history.pushState({}, '', path);
+}
+
+/** Reply-DIALOG shape: numbered composer WITHOUT a visible reply chip (handle not determinable). */
+const REPLY_DIALOG_HTML = `
+<div data-testid="primaryColumn">
+  <div data-testid="replyComposerContainer">
+    <div data-testid="tweetTextarea_1RichTextInputContainer">
+      <div data-testid="tweetTextarea_1" role="textbox" contenteditable="true" class="public-DraftEditor-content"></div>
+    </div>
+  </div>
+</div>`;
+
 describe('composer extraction (VAL-DRAFT-030)', () => {
   beforeEach(() => {
     document.body.innerHTML = RICH_REPLY_COMPOSER_HTML;
@@ -102,6 +139,58 @@ describe('composer extraction (VAL-DRAFT-030)', () => {
     const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
     expect(snapshot.isReply).toBe(true);
     expect(snapshot.replyToHandle).toBe('old_timer');
+  });
+});
+
+describe('real status-page reply shape (M2 scrutiny round 3, VAL-DRAFT-019)', () => {
+  beforeEach(() => {
+    document.body.innerHTML = STATUS_PAGE_COMPOSER_HTML;
+    history.pushState({}, '', '/');
+  });
+
+  it('classifies the inline status-page composer as a reply from the ROUTE (tweetTextarea_0, no chip)', () => {
+    navigateTo('/ana_builds/status/1800000000000000001');
+    const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
+
+    expect(snapshot.isReply).toBe(true);
+    expect(snapshot.replyToHandle).toBe('ana_builds');
+    expect('replyToFollowedByViewer' in snapshot).toBe(false);
+  });
+
+  it('keeps the same composer standalone on a home route (context follows the route, not the markup)', () => {
+    navigateTo('/home');
+    const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
+
+    expect(snapshot.isReply).toBe(false);
+    expect('replyToHandle' in snapshot).toBe(false);
+    expect('replyToFollowedByViewer' in snapshot).toBe(false);
+  });
+
+  it('never guesses a handle from a reserved non-handle status root (/i/status/...)', () => {
+    navigateTo('/i/status/1800000000000000001');
+    const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
+
+    expect(snapshot.isReply).toBe(false);
+    expect('replyToHandle' in snapshot).toBe(false);
+  });
+
+  it('prefers the visible in-region chip over the route handle (nested-reply dialog shapes)', () => {
+    document.body.innerHTML = RICH_REPLY_COMPOSER_HTML; // chip says @ana_builds, route differs
+    navigateTo('/someone_else/status/1800000000000000099');
+    const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
+
+    expect(snapshot.isReply).toBe(true);
+    expect(snapshot.replyToHandle).toBe('ana_builds');
+  });
+
+  it('yields isReply true with NO handle when the chip is absent and the route is not a status shape', () => {
+    // Dialog shape on a non-status route: reply via the numbered composer, handle not determinable.
+    document.body.innerHTML = REPLY_DIALOG_HTML;
+    navigateTo('/home');
+    const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
+
+    expect(snapshot.isReply).toBe(true);
+    expect('replyToHandle' in snapshot).toBe(false);
   });
 });
 

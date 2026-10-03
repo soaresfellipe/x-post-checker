@@ -14,7 +14,7 @@
  * single allowed retry).
  */
 import { chromium } from '@playwright/test';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -129,82 +129,96 @@ async function main() {
   const ct0 = env.get('X_CT0');
   if (!authToken || !ct0) {
     console.log('RESULT: missing-cookies');
-    process.exit(2);
+    process.exit(2); // before any profile exists: nothing to clean up
   }
 
+  // AGENTS.md: a profile seeded with X session cookies is credential material. This run's OWN
+  // mkdtemp profile is removed in the finally below on BOTH the success and every error path —
+  // deleting nothing else. No process.exit may run before that cleanup, so every early outcome
+  // records its exit code and falls through to the finally instead.
   const profile = mkdtempSync(join(tmpdir(), 'amplifyx-realx-'));
-  const context = await chromium.launchPersistentContext(profile, {
-    channel: 'chromium',
-    headless: true,
-    viewport: { width: 1280, height: 900 },
-  });
-  await context.addCookies([
-    { name: 'auth_token', value: authToken, domain: '.x.com', path: '/', httpOnly: true, secure: true, sameSite: 'Lax' },
-    { name: 'ct0', value: ct0, domain: '.x.com', path: '/', secure: true, sameSite: 'Lax' },
-  ]);
-  const page = await context.newPage();
-  page.setDefaultTimeout(45_000);
+  let context;
+  let exitCode = 0;
+  try {
+    context = await chromium.launchPersistentContext(profile, {
+      channel: 'chromium',
+      headless: true,
+      viewport: { width: 1280, height: 900 },
+    });
+    await context.addCookies([
+      { name: 'auth_token', value: authToken, domain: '.x.com', path: '/', httpOnly: true, secure: true, sameSite: 'Lax' },
+      { name: 'ct0', value: ct0, domain: '.x.com', path: '/', secure: true, sameSite: 'Lax' },
+    ]);
+    const page = await context.newPage();
+    page.setDefaultTimeout(45_000);
 
-  const out = {};
+    const out = {};
 
-  // 1. Session check on home.
-  await page.goto('https://x.com/home', { waitUntil: 'domcontentloaded', timeout: 60_000 });
-  const homeComposer = page.locator('div[data-testid="tweetTextarea_0"][role="textbox"][contenteditable="true"]');
-  const composerAppeared = await homeComposer
-    .waitFor({ state: 'visible', timeout: 30_000 })
-    .then(() => true, () => false);
-  if (!composerAppeared) {
-    console.log('RESULT: session-challenged (no home composer after load)');
-    await context.close();
-    process.exit(3);
-  }
-  out.session = 'ok';
-  out.home = { composer0: true };
+    // 1. Session check on home.
+    await page.goto('https://x.com/home', { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    const homeComposer = page.locator('div[data-testid="tweetTextarea_0"][role="textbox"][contenteditable="true"]');
+    const composerAppeared = await homeComposer
+      .waitFor({ state: 'visible', timeout: 30_000 })
+      .then(() => true, () => false);
+    if (!composerAppeared) {
+      console.log('RESULT: session-challenged (no home composer after load)');
+      exitCode = 3;
+    } else {
+      out.session = 'ok';
+      out.home = { composer0: true };
 
-  // 2. Following tab (in-network reply targets); status links counted, never recorded.
-  await page.goto('https://x.com/home?tab=following', { waitUntil: 'domcontentloaded', timeout: 60_000 });
-  await page.waitForTimeout(4_000);
-  out.followingTab = {
-    statusLinks: await page.evaluate(() => (document.querySelector('a[href*="/status/"]') ? 'found' : 'none')),
-  };
+      // 2. Following tab (in-network reply targets); status links counted, never recorded.
+      await page.goto('https://x.com/home?tab=following', { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      await page.waitForTimeout(4_000);
+      out.followingTab = {
+        statusLinks: await page.evaluate(() => (document.querySelector('a[href*="/status/"]') ? 'found' : 'none')),
+      };
 
-  // 3. Timeline badge vocabulary on the following feed (structural only: testid + word class).
-  out.timelineBadges = await page.evaluate(() => {
-    const classify = (text) => {
-      if (/\b(following|follows you)\b|seguindo|segue você/i.test(text)) return 'follow';
-      if (/\bliked by|curtido por\b/i.test(text)) return 'like';
-      if (/\breposted by|repostado por\b/i.test(text)) return 'repost';
-      return 'other';
-    };
-    const facts = [];
-    for (const badge of document.querySelectorAll('[data-testid="socialContext"], [data-testid="userFollowIndicator"]')) {
-      const text = (badge.textContent ?? '').trim();
-      facts.push({ testid: badge.getAttribute('data-testid'), classification: text ? classify(text) : 'empty' });
-      if (facts.length >= 5) break;
+      // 3. Timeline badge vocabulary on the following feed (structural only: testid + word class).
+      out.timelineBadges = await page.evaluate(() => {
+        const classify = (text) => {
+          if (/\b(following|follows you)\b|seguindo|segue você/i.test(text)) return 'follow';
+          if (/\bliked by|curtido por\b/i.test(text)) return 'like';
+          if (/\breposted by|repostado por\b/i.test(text)) return 'repost';
+          return 'other';
+        };
+        const facts = [];
+        for (const badge of document.querySelectorAll('[data-testid="socialContext"], [data-testid="userFollowIndicator"]')) {
+          const text = (badge.textContent ?? '').trim();
+          facts.push({ testid: badge.getAttribute('data-testid'), classification: text ? classify(text) : 'empty' });
+          if (facts.length >= 5) break;
+        }
+        return facts;
+      });
+
+      // 4. Status page (in-network target): reply composer facts, before and after FOCUS only.
+      const inNetworkHref = await page.evaluate(() => {
+        const link = document.querySelector('a[href*="/status/"]');
+        return link ? link.getAttribute('href') : null;
+      });
+      out.statusInNetwork = await inspectStatusPage(page, inNetworkHref, { focus: true });
+
+      // 5. For You tab (likely out-of-network target): same status-page inspection.
+      await page.goto('https://x.com/home?tab=foryou', { waitUntil: 'domcontentloaded', timeout: 60_000 });
+      await page.waitForTimeout(4_000);
+      const forYouHref = await page.evaluate(() => {
+        const link = document.querySelector('a[href*="/status/"]');
+        return link ? link.getAttribute('href') : null;
+      });
+      out.statusOutOfNetwork = await inspectStatusPage(page, forYouHref, { focus: false });
+
+      console.log('RESULT: ok');
+      console.log(JSON.stringify(out, null, 2));
     }
-    return facts;
-  });
-
-  // 4. Status page (in-network target): reply composer facts, before and after FOCUS only.
-  const inNetworkHref = await page.evaluate(() => {
-    const link = document.querySelector('a[href*="/status/"]');
-    return link ? link.getAttribute('href') : null;
-  });
-  out.statusInNetwork = await inspectStatusPage(page, inNetworkHref, { focus: true });
-
-  // 5. For You tab (likely out-of-network target): same status-page inspection.
-  await page.goto('https://x.com/home?tab=foryou', { waitUntil: 'domcontentloaded', timeout: 60_000 });
-  await page.waitForTimeout(4_000);
-  const forYouHref = await page.evaluate(() => {
-    const link = document.querySelector('a[href*="/status/"]');
-    return link ? link.getAttribute('href') : null;
-  });
-  out.statusOutOfNetwork = await inspectStatusPage(page, forYouHref, { focus: false });
-
-  console.log('RESULT: ok');
-  console.log(JSON.stringify(out, null, 2));
-  await context.close();
-  process.exit(0);
+  } catch (error) {
+    console.log('RESULT: error');
+    console.log(String(error).split('\n').slice(0, 5).join('\n'));
+    exitCode = 1;
+  } finally {
+    if (context) await context.close().catch(() => {});
+    rmSync(profile, { recursive: true, force: true });
+    process.exit(exitCode);
+  }
 }
 
 /** Navigates to a status page (path only, never recorded) and dumps composer-region facts. */

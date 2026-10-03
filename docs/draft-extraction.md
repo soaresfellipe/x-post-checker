@@ -49,8 +49,8 @@ Candidates come only from the registered `composer` chain in `src/selectors.ts`:
 
 1. **Primary testid levels** (`tweetTextarea_0` home, `tweetTextarea_1+` reply dialog) are
    trusted on their own testid. The status-page reply composer is ALSO `tweetTextarea_0`
-   (observed 2026-10-03) — a numbered testid alone does not tell home from reply; the visible
-   reply context does (see §3).
+   (observed 2026-10-03) — a numbered testid alone does not tell home from reply; the route and
+   the visible reply context do (see §3).
 2. **Structural fallback** (`public-DraftEditor-content` textbox) matches ONLY when the editor
    sits inside a recognized composer container (`*RichTextInputContainer` or `toolBar`). An
    unrelated DraftEditor on a composer-less route (e.g. an Explore search box) attracts no
@@ -65,10 +65,24 @@ Candidates come only from the registered `composer` chain in `src/selectors.ts`:
 
 ## 3. Reply context and follow proof
 
-- `isReply` is true when the composer carries a numbered testid (`_1+`) OR a visible reply
-  handle is found in the region; `replyToHandle` is set only from what the DOM actually shows
-  (registered chip testid, or a profile link whose visible text starts with `@` — the `@` glyph
-  is not localized).
+- `isReply` is true when the composer's context is a reply's, by ANY of three shapes:
+  1. **Status-page route** — the document path matches `/<handle>/status/<id>`: the inline
+     "Post your reply" composer under the primary post is a reply to that post. This is the
+     VERIFIED real status-page shape (2026-10-03 inspection: testid `tweetTextarea_0`, NO reply
+     chip in its composer region — `library/x-dom.md`), so route context — not the
+     numbered-composer rule — is what makes the real status page a reply (VAL-DRAFT-019,
+     architecture.md `isReply` = composer context). Reply context is evaluated at CAPTURE time,
+     so an SPA route change re-classifies: the watcher tears the dead composer down and
+     remounts, and the next capture reads the then-current route (home → status flips reply
+     context on, status → home flips it back off).
+  2. **Numbered testid** `tweetTextarea_1+` (the reply dialog).
+  3. **A visible reply handle in the region** (the chip shape).
+- `replyToHandle` is set ONLY from a verifiable visible source, most specific first: the
+  in-region reply chip (registered chip testid, or a profile link whose visible text starts
+  with `@` — the `@` glyph is not localized), otherwise the status route's handle segment
+  (x.com canonicalizes status routes to the primary post author's handle). Reserved non-handle
+  roots (`/i/status/<id>`, `/intent/...`) and non-status routes yield NO handle: when no source
+  is determinable the field stays ABSENT — never guessed.
 - **Follow proof: `replyToFollowedByViewer` is NEVER set from the composer.** Verified absence
   (read-only real-x inspection 2026-10-03, `library/x-dom.md`): the real reply composer region
   exposes no node for viewer-follows-target — no `socialContext`, no `userFollowIndicator`, no

@@ -4,6 +4,7 @@ import {
   isDraftEligible,
   parseHashtags,
   parseUrls,
+  statusRouteHandle,
   type DraftSnapshot,
 } from '../../src/core/draft-snapshot';
 
@@ -75,6 +76,38 @@ describe('isDraftEligible (minDraftLength gate)', () => {
   it('counts spaces and newlines like any other character', () => {
     const snapshot: DraftSnapshot = { ...BASE_SNAPSHOT, text: 'a b c d e ', charCount: 10 };
     expect(isDraftEligible(snapshot, 10)).toBe(true);
+  });
+});
+
+describe('statusRouteHandle (status-page reply context, M2 scrutiny round 3)', () => {
+  it('reads the handle segment from the verified status-page route shape', () => {
+    expect(statusRouteHandle('/ana_builds/status/1800000000000000001')).toBe('ana_builds');
+    expect(statusRouteHandle('/joaodev/status/42')).toBe('joaodev');
+  });
+
+  it('tolerates a trailing slash on the status route', () => {
+    expect(statusRouteHandle('/ana_builds/status/1800000000000000001/')).toBe('ana_builds');
+  });
+
+  it('rejects non-status routes', () => {
+    expect(statusRouteHandle('/home')).toBeUndefined();
+    expect(statusRouteHandle('/ana_builds')).toBeUndefined();
+    expect(statusRouteHandle('/ana_builds/following')).toBeUndefined();
+    expect(statusRouteHandle('/')).toBeUndefined();
+    expect(statusRouteHandle('')).toBeUndefined();
+  });
+
+  it('yields no handle for shapes without a handle segment (never guessed)', () => {
+    expect(statusRouteHandle('/status/123')).toBeUndefined();
+    // X's legacy /i/status/<id> redirect root is NOT a handle.
+    expect(statusRouteHandle('/i/status/123')).toBeUndefined();
+    expect(statusRouteHandle('/intent/status/123')).toBeUndefined();
+  });
+
+  it('rejects malformed handles and non-numeric ids', () => {
+    expect(statusRouteHandle('/bad!handle/status/123')).toBeUndefined();
+    expect(statusRouteHandle('/ana_builds/status/notanumber')).toBeUndefined();
+    expect(statusRouteHandle('/ana_builds/status/')).toBeUndefined();
   });
 });
 

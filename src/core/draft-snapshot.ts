@@ -18,9 +18,17 @@ export interface DraftSnapshot {
   urls: string[];
   /** The composer shows a media chip (photo/video attachment). */
   hasMedia: boolean;
-  /** The draft is a reply (numbered composer or visible reply context). */
+  /**
+   * The draft is a reply. True for a numbered composer (the reply dialog), a visible in-region
+   * reply chip, or a status-page route composer (`/<handle>/status/<id>` — the inline composer
+   * under the primary post; verified real shape has testid `tweetTextarea_0` and NO chip).
+   */
   isReply: boolean;
-  /** Handle being replied to, without the `@`. Only present when visible in the DOM. */
+  /**
+   * Handle being replied to, without the `@`. Only ever set from a VERIFIABLE VISIBLE source —
+   * the in-region reply chip or the status route's handle segment — and absent when neither is
+   * determinable (never guessed).
+   */
   replyToHandle?: string;
   /**
    * Follow state between the viewer and `replyToHandle` — NEVER set by composer extraction: the
@@ -57,6 +65,29 @@ const URL_PATTERN = /\b(?:https?:\/\/|www\.)[^\s<>"'`]+/gi;
 
 /** Trailing punctuation that belongs to the sentence, not the URL. */
 const URL_TRAILING_PUNCTUATION = /[.,;:!?"'»›)\]}]+$/;
+
+/**
+ * The status-page route shape (verified 2026-10-03: x.com canonicalizes status URLs to
+ * `/<handle>/status/<id>`). The inline "Post your reply" composer on that page — testid
+ * `tweetTextarea_0` with NO visible reply chip — is a reply to that primary post.
+ */
+const STATUS_ROUTE_PATTERN = /^\/([A-Za-z0-9_]{1,20})\/status\/\d+\/?$/;
+
+/** X top-level paths that can never be a handle (e.g. the legacy `/i/status/<id>` redirect root). */
+const RESERVED_ROUTE_ROOTS = new Set(['i', 'intent']);
+
+/**
+ * The handle segment of a status-page route (`/<handle>/status/<id>`), or undefined. This is a
+ * VERIFIABLE VISIBLE reply-context source: the route is the page's own address, and its handle
+ * segment is the canonical primary post author's — exactly the post the inline composer replies
+ * to. Anything else (non-status routes, reserved roots like `/i/status/...`, malformed handles or
+ * ids) yields undefined — never guessed; the reply handle stays absent when not determinable.
+ */
+export function statusRouteHandle(pathname: string): string | undefined {
+  const handle = STATUS_ROUTE_PATTERN.exec(pathname)?.[1];
+  if (handle === undefined || RESERVED_ROUTE_ROOTS.has(handle.toLowerCase())) return undefined;
+  return handle;
+}
 
 export function parseHashtags(text: string): string[] {
   const tags: string[] = [];
