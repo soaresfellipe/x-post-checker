@@ -17,10 +17,12 @@ export interface FixturePost {
   likes: number;
   photo?: boolean;
   replyingTo?: string;
+  /** Viewer follows this author: renders the follow-state badge in the reply composer view. */
+  followsViewer?: boolean;
 }
 
 export const FIXTURE_POSTS: readonly FixturePost[] = [
-  { id: '1800000000000000001', handle: 'ana_builds', displayName: 'Ana Builds', verified: true, text: 'What is the one tool you stopped using this year, and why?', ageMinutes: 120, timeLabel: '2 h', replies: 45, reposts: 12, likes: 310 },
+  { id: '1800000000000000001', handle: 'ana_builds', displayName: 'Ana Builds', verified: true, text: 'What is the one tool you stopped using this year, and why?', ageMinutes: 120, timeLabel: '2 h', replies: 45, reposts: 12, likes: 310, followsViewer: true },
   { id: '1800000000000000002', handle: 'joaodev', displayName: 'João Dev', text: 'Shipped the new onboarding flow today. Feels good.', ageMinutes: 30, timeLabel: '30 min', replies: 2, reposts: 0, likes: 14 },
   { id: '1800000000000000003', handle: 'marina_design', displayName: 'Marina Design', text: 'Redesigned our pricing page. Before and after below.', ageMinutes: 300, timeLabel: '5 h', replies: 88, reposts: 140, likes: 1200, photo: true },
   { id: '1800000000000000004', handle: 'old_timer', displayName: 'Old Timer', text: 'A take from a few days ago that nobody replied to.', ageMinutes: 3600, timeLabel: '28 de set.', replies: 1, reposts: 0, likes: 3 },
@@ -99,19 +101,86 @@ export function renderFixtureHtml(now: number = Date.now()): string {
 <div id="react-root">
 <main role="main">
   <div data-testid="primaryColumn">
-    <div data-testid="tweetTextarea_0RichTextInputContainer">
-      <div class="DraftEditor-root">
-        <div data-testid="tweetTextarea_0" role="textbox" contenteditable="true" aria-label="Texto do post" aria-multiline="true" spellcheck="true" class="notranslate public-DraftEditor-content"></div>
+    <div data-testid="toolBar">
+      <div data-testid="tweetTextarea_0RichTextInputContainer">
+        <div class="DraftEditor-root">
+          <div data-testid="tweetTextarea_0" role="textbox" contenteditable="true" aria-label="Texto do post" aria-multiline="true" spellcheck="true" class="notranslate public-DraftEditor-content"></div>
+        </div>
+        <label data-testid="tweetTextarea_0_label">O que está acontecendo?</label>
       </div>
-      <label data-testid="tweetTextarea_0_label">O que está acontecendo?</label>
+      <button type="button" data-testid="tweetButtonInline" aria-disabled="true">Postar</button>
     </div>
-    <button type="button" data-testid="tweetButtonInline" aria-disabled="true">Postar</button>
     <div aria-label="Timeline: Sua Página Inicial">
 ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
     </div>
   </div>
 </main>
 </div>
+<script>
+(function () {
+  'use strict';
+  var primary = document.querySelector('[data-testid="primaryColumn"]');
+  if (!primary) return;
+  var homeHtml = primary.innerHTML;
+  var POSTS_BY_ID = ${JSON.stringify(
+    Object.fromEntries(
+      FIXTURE_POSTS.map((post) => [post.id, { handle: post.handle, followsViewer: post.followsViewer === true }]),
+    ),
+  )};
+
+  function statusId(path) {
+    var match = /\\/status\\/(\\d+)/.exec(path);
+    return match ? match[1] : null;
+  }
+
+  function renderReplyView(id) {
+    var post = POSTS_BY_ID[id];
+    if (!post) return;
+    var followBadge = post.followsViewer ? '<span data-testid="socialContext">Seguindo</span>' : '';
+    primary.innerHTML =
+      '<div data-testid="statusView">' +
+      '<div data-testid="app-bar-close" role="button" tabindex="0">Voltar</div>' +
+      '<div data-testid="replyComposerContainer">' +
+      '<div dir="ltr"><span>Respondendo a </span><a href="/' + post.handle + '" role="link">@' + post.handle + '</a></div>' +
+      followBadge +
+      '<div data-testid="tweetTextarea_1RichTextInputContainer">' +
+      '<div data-testid="tweetTextarea_1" role="textbox" contenteditable="true" aria-label="Texto do seu post" class="public-DraftEditor-content"></div>' +
+      '</div>' +
+      '<button type="button" data-testid="tweetButton" aria-disabled="false">Responder</button>' +
+      '</div>' +
+      '</div>';
+  }
+
+  function renderHome() {
+    primary.innerHTML = homeHtml;
+  }
+
+  document.addEventListener('click', function (event) {
+    var target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    var statusLink = target.closest('a[href*="/status/"]');
+    if (statusLink) {
+      event.preventDefault();
+      var href = statusLink.getAttribute('href') || '';
+      var id = statusId(href);
+      if (id && POSTS_BY_ID[id]) {
+        history.pushState({}, '', href);
+        renderReplyView(id);
+      }
+      return;
+    }
+    if (target.closest('[data-testid="app-bar-close"]')) {
+      history.back();
+    }
+  });
+
+  window.addEventListener('popstate', function () {
+    var id = statusId(location.pathname);
+    if (id) renderReplyView(id);
+    else renderHome();
+  });
+})();
+</script>
 </body>
 </html>
 `;

@@ -44,5 +44,14 @@ export function createBackgroundHandlers(deps: BackgroundHandlerDeps): Handlers 
       return store.setApiKey(key);
     },
     'clear-api-key': () => store.clearApiKey(),
+    // Honest placeholder until the analyzer pipeline (heuristic engine + Jev client) lands: the
+    // draft IS captured and validated, but nothing scores it yet. Callers must not render a
+    // score from this reply — the watcher treats any reply as fire-and-forget.
+    'analyze-draft': ({ draft }) => {
+      if (typeof draft !== 'object' || draft === null || typeof (draft as { text?: unknown }).text !== 'string') {
+        throw new Error('Invalid draft snapshot.');
+      }
+      return { accepted: false, reason: 'analyzer-unavailable' };
+    },
   };
 }

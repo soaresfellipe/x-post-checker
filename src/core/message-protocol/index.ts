@@ -2,6 +2,7 @@
  * Versioned request/response contract between content scripts (and extension pages) and the
  * background. Add a new message by extending `MessageMap`; handlers and clients stay type-checked.
  */
+import type { AnalysisTrigger, DraftSnapshot } from '@/core/draft-snapshot';
 import type { ConnectionTestResult } from '@/core/jev-client/connection-test';
 import type { ApiKeyWriteResult, Settings, SettingsWriteResult } from '@/core/settings-store/types';
 
@@ -48,6 +49,16 @@ export interface MessageMap {
     request: Record<string, never>;
     response: ApiKeyWriteResult;
   };
+  /**
+   * A captured draft, sent by the content script's composer watcher (automatic debounced path or
+   * the overlay's explicit "Analyze" action). The analyzer pipeline (m2 heuristic engine + Jev
+   * client) turns this into scored results; until it lands the background answers honestly that
+   * no analyzer is available, and callers treat that as "captured, not analyzed".
+   */
+  'analyze-draft': {
+    request: { draft: DraftSnapshot; trigger: AnalysisTrigger };
+    response: { accepted: boolean; reason?: 'analyzer-unavailable' };
+  };
 }
 
 export type MessageType = keyof MessageMap;
@@ -72,6 +83,7 @@ const MESSAGE_TYPES: readonly string[] = [
   'set-settings',
   'set-api-key',
   'clear-api-key',
+  'analyze-draft',
 ] satisfies MessageType[];
 
 export function createRequest<T extends MessageType>(type: T, payload: MessageMap[T]['request']): Request<T> {

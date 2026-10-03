@@ -17,6 +17,7 @@ const handlers: Handlers = {
   }),
   'set-api-key': ({ key }) => ({ apiKeyPresent: true, keyRevision: key.length }),
   'clear-api-key': () => ({ apiKeyPresent: false, keyRevision: 0 }),
+  'analyze-draft': ({ draft }) => ({ accepted: typeof draft.text === 'string', reason: 'analyzer-unavailable' as const }),
 };
 
 describe('message protocol', () => {
@@ -68,6 +69,9 @@ describe('message protocol', () => {
       'set-settings': handlers['set-settings'],
       'set-api-key': handlers['set-api-key'],
       'clear-api-key': handlers['clear-api-key'],
+      'analyze-draft': () => {
+        throw new Error('boom');
+      },
     };
     expect(await handleRequest(createRequest('ping', {}), failing)).toEqual({
       ok: false,

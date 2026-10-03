@@ -11,6 +11,18 @@ export const SELECTORS = {
     'div[data-testid^="tweetTextarea_"][role="textbox"][contenteditable="true"]',
     'div.public-DraftEditor-content[role="textbox"][contenteditable="true"]',
   ],
+  /** Media chips attached to a composer; always queried scoped to the composer region. */
+  composerMedia: [
+    '[data-testid="attachments"] [data-testid="tweetPhoto"]',
+    '[data-testid="attachments"] [data-testid="videoPlayer"]',
+    '[data-testid="attachments"] img',
+    '[data-testid="tweetPhoto"]',
+    '[data-testid="videoPlayer"]',
+  ],
+  /** Primary "replying to" handle chip in a composer region (structural fallback is scan-based). */
+  replyToHandle: ['[data-testid="replyToHandle"]'],
+  /** Follow-state badge (x.com social context); presence only — its text is localized. */
+  followIndicator: ['[data-testid="socialContext"]', '[data-testid="userFollowIndicator"]'],
   article: ['article[data-testid="tweet"]', 'article[role="article"]'],
   tweetText: ['[data-testid="tweetText"]'],
   userName: ['[data-testid="User-Name"]'],
@@ -41,4 +53,21 @@ export function findAll(root: ParentNode, key: SelectorKey): Element[] {
     if (matches.length > 0) return [...matches];
   }
   return [];
+}
+
+/**
+ * Candidates across ALL chain levels (deduped, highest-priority level first): detection that must
+ * rank alternatives (e.g. main vs. numbered reply composer) rather than take the first match.
+ */
+export function findAllCandidates(root: ParentNode, key: SelectorKey): Element[] {
+  const seen = new Set<Element>();
+  const candidates: Element[] = [];
+  for (const selector of SELECTORS[key]) {
+    for (const match of root.querySelectorAll(selector)) {
+      if (seen.has(match)) continue;
+      seen.add(match);
+      candidates.push(match);
+    }
+  }
+  return candidates;
 }
