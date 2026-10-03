@@ -7,6 +7,21 @@ import { FIXTURE_PORT } from '../../scripts/build-variants';
 export const TEST_EXTENSION_DIR = path.resolve('.output/chrome-mv3-e2e');
 export const FIXTURE_URL = `http://localhost:${FIXTURE_PORT}/`;
 
+export async function launchExtensionContext(profileDir: string): Promise<BrowserContext> {
+  return chromium.launchPersistentContext(profileDir, {
+    channel: 'chromium',
+    headless: true,
+    args: [`--disable-extensions-except=${TEST_EXTENSION_DIR}`, `--load-extension=${TEST_EXTENSION_DIR}`],
+    timeout: 45_000,
+  });
+}
+
+/** Resolves the extension id from its background worker, then the Options page URL. */
+export async function optionsUrl(context: BrowserContext): Promise<string> {
+  const worker = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker', { timeout: 10_000 }));
+  return `chrome-extension://${new URL(worker.url()).host}/options.html`;
+}
+
 /**
  * Extensions only load in full Chromium (`channel: 'chromium'`), not the default headless shell.
  * The context is persistent because Chromium requires a user-data dir to load extensions.
@@ -15,12 +30,7 @@ export const test = base.extend<{ context: BrowserContext }>({
   // eslint-disable-next-line no-empty-pattern
   context: async ({}, use) => {
     const profileDir = await mkdtemp(path.join(tmpdir(), 'amplifyx-e2e-'));
-    const context = await chromium.launchPersistentContext(profileDir, {
-      channel: 'chromium',
-      headless: true,
-      args: [`--disable-extensions-except=${TEST_EXTENSION_DIR}`, `--load-extension=${TEST_EXTENSION_DIR}`],
-      timeout: 45_000,
-    });
+    const context = await launchExtensionContext(profileDir);
     await use(context);
     await context.close();
     await rm(profileDir, { recursive: true, force: true });

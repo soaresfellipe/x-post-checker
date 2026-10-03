@@ -1,0 +1,16 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; }
+.page { max-width: 640px; margin: 0 auto; padding: 24px 16px 48px; }
+section { border: 1px solid #8884; border-radius: 8px; padding: 12px 16px; margin: 16px 0; }
+h1 { font-size: 1.4rem; }
+h2 { font-size: 1.1rem; margin-top: 0; }
+label { display: block; margin: 12px 0 4px; font-weight: 600; }
+label.check { font-weight: 400; display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+input[type='text'], input[type='password'], input[type='number'] { padding: 6px 8px; font: inherit; }
+#api-key { flex: 1; min-width: 0; }
+.row { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+button { padding: 6px 12px; font: inherit; cursor: pointer; }
+.hint { font-size: 0.9rem; opacity: 0.8; }
+[role='status'] { min-height: 1.2em; margin: 6px 0; }
+[data-state='success'] { color: #1a7f37; }
+[data-state='error'], [data-state='invalid-key'], [data-state='network'], [data-state='no-key'] { color: #cf222e; }

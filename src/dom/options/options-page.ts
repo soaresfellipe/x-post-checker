@@ -1,0 +1,205 @@
+import type { ConnectionTestResult } from '@/core/jev-client';
+import { NUMERIC_LIMITS, type Settings, type SettingsStore } from '@/core/settings-store';
+import { OPTIONS_TEMPLATE } from './template';
+
+export interface OptionsPageDeps {
+  store: SettingsStore;
+  /** Runs the connection test in the background; resolves with the result tagged by `attemptId`. */
+  testConnection(attemptId: string, apiKey: string | undefined): Promise<{ attemptId: string; result: ConnectionTestResult }>;
+}
+
+const BOOLEAN_PREFS = ['enabled', 'autoAnalyze', 'jevForDrafts', 'jevForTargets'] as const;
+const NUMERIC_PREFS = ['minDraftLength', 'targetThreshold'] as const;
+
+export const COPY = {
+  keyMissing: 'No API key saved.',
+  keyPresent: 'API key saved. It stays hidden here; paste a new key to replace it.',
+  keyPlaceholderSaved: 'Saved key hidden. Paste a new key to replace it.',
+  keyPlaceholderEmpty: 'Paste your Jev API key',
+  emptyKey: 'Enter an API key before saving.',
+  saving: 'Saving…',
+  saved: 'API key saved.',
+  saveFailed: 'Could not save the API key. Nothing was changed. Try again.',
+  removed: 'API key removed.',
+  removeFailed: 'Could not remove the API key. Try again.',
+  testing: 'Testing connection…',
+  noKey: 'No API key to test. Enter or save a key first.',
+  invalidKey: (status?: number) =>
+    `Invalid API key. Jev rejected the key${status ? ` (HTTP ${status})` : ''}. Check the key and try again. Your saved key was not changed.`,
+  networkUnreachable: 'Network error. Could not reach api.typesafe.ai. Check your connection and try again. Your saved key was not changed.',
+  networkTimeout: 'Network error. The request to api.typesafe.ai timed out. Check your connection and try again. Your saved key was not changed.',
+  unexpected: (status: number) => `Jev returned an unexpected response (HTTP ${status}). Try again later. Your saved key was not changed.`,
+  testUnavailable: 'The connection test could not run. Reload the extension and try again.',
+  connected: (model: string, latencyMs: number) => `Connected. Model: ${model}. Latency: ${latencyMs} ms.`,
+  prefsSaved: 'Preferences saved.',
+  prefsFailed: 'Could not save preferences. Try again.',
+  prefsInvalid: (key: (typeof NUMERIC_PREFS)[number]) =>
+    `Enter a whole number from ${NUMERIC_LIMITS[key].min} to ${NUMERIC_LIMITS[key].max}.`,
+} as const;
+
+function byId<T extends HTMLElement>(root: ParentNode, id: string): T {
+  const found = root.querySelector<T>(`#${id}`);
+  if (!found) throw new Error(`Options page template is missing #${id}`);
+  return found;
+}
+
+/** Renders the Options page into `root` and wires it to the store. Returns a teardown function. */
+export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps): Promise<() => void> {
+  const parsed = new DOMParser().parseFromString(OPTIONS_TEMPLATE, 'text/html');
+  root.replaceChildren(...Array.from(parsed.body.childNodes, (node) => root.ownerDocument.importNode(node, true)));
+  const { store } = deps;
+
+  const keyInput = byId<HTMLInputElement>(root, 'api-key');
+  const toggleButton = byId<HTMLButtonElement>(root, 'toggle-key');
+  const saveButton = byId<HTMLButtonElement>(root, 'save-key');
+  const testButton = byId<HTMLButtonElement>(root, 'test-connection');
+  const removeButton = byId<HTMLButtonElement>(root, 'remove-key');
+  const keyStatus = byId<HTMLElement>(root, 'key-status');
+  const saveStatus = byId<HTMLElement>(root, 'save-status');
+  const testResult = byId<HTMLElement>(root, 'test-result');
+  const prefsStatus = byId<HTMLElement>(root, 'prefs-status');
+  const booleanInputs = Object.fromEntries(
+    BOOLEAN_PREFS.map((key) => [key, byId<HTMLInputElement>(root, `pref-${key}`)]),
+  ) as Record<(typeof BOOLEAN_PREFS)[number], HTMLInputElement>;
+  const numberInputs = Object.fromEntries(
+    NUMERIC_PREFS.map((key) => [key, byId<HTMLInputElement>(root, `pref-${key}`)]),
+  ) as Record<(typeof NUMERIC_PREFS)[number], HTMLInputElement>;
+
+  function setMessage(target: HTMLElement, text: string, state: string): void {
+    target.textContent = text;
+    target.dataset.state = state;
+  }
+
+  function renderKeyPresence(present: boolean): void {
+    setMessage(keyStatus, present ? COPY.keyPresent : COPY.keyMissing, present ? 'present' : 'absent');
+    keyInput.placeholder = present ? COPY.keyPlaceholderSaved : COPY.keyPlaceholderEmpty;
+    removeButton.disabled = !present;
+  }
+
+  function renderSettings(settings: Settings): void {
+    for (const key of BOOLEAN_PREFS) booleanInputs[key].checked = settings[key];
+    for (const key of NUMERIC_PREFS) numberInputs[key].value = String(settings[key]);
+  }
+
+  function setKeyVisible(visible: boolean): void {
+    keyInput.type = visible ? 'text' : 'password';
+    toggleButton.textContent = visible ? 'Hide' : 'Show';
+    toggleButton.setAttribute('aria-pressed', String(visible));
+    toggleButton.setAttribute('aria-label', visible ? 'Hide API key' : 'Show API key');
+  }
+
+  renderSettings(await store.getSettings());
+  renderKeyPresence(await store.hasApiKey());
+
+  toggleButton.addEventListener('click', () => setKeyVisible(keyInput.type === 'password'));
+
+  saveButton.addEventListener('click', async () => {
+    const key = keyInput.value.trim();
+    if (!key) {
+      setMessage(saveStatus, COPY.emptyKey, 'error');
+      return;
+    }
+    saveButton.disabled = true;
+    setMessage(saveStatus, COPY.saving, 'pending');
+    try {
+      await store.setApiKey(key);
+      keyInput.value = '';
+      setKeyVisible(false);
+      renderKeyPresence(true);
+      setMessage(saveStatus, COPY.saved, 'success');
+    } catch {
+      setMessage(saveStatus, COPY.saveFailed, 'error');
+    } finally {
+      saveButton.disabled = false;
+    }
+  });
+
+  removeButton.addEventListener('click', async () => {
+    try {
+      await store.clearApiKey();
+      renderKeyPresence(false);
+      setMessage(saveStatus, COPY.removed, 'success');
+    } catch {
+      setMessage(saveStatus, COPY.removeFailed, 'error');
+    }
+  });
+
+  let latestAttempt = 0;
+  testButton.addEventListener('click', async () => {
+    const attempt = ++latestAttempt;
+    const attemptId = `attempt-${attempt}`;
+    testButton.disabled = true;
+    setMessage(testResult, COPY.testing, 'pending');
+    let message: string;
+    let state: string;
+    try {
+      const typed = keyInput.value.trim();
+      const reply = await deps.testConnection(attemptId, typed || undefined);
+      if (reply.attemptId !== attemptId || attempt !== latestAttempt) return;
+      ({ message, state } = describeResult(reply.result));
+    } catch {
+      if (attempt !== latestAttempt) return;
+      message = COPY.testUnavailable;
+      state = 'error';
+    } finally {
+      if (attempt === latestAttempt) testButton.disabled = false;
+    }
+    setMessage(testResult, message, state);
+  });
+
+  async function savePrefs(update: Partial<Settings>): Promise<void> {
+    try {
+      renderSettings(await store.setSettings(update));
+      setMessage(prefsStatus, COPY.prefsSaved, 'success');
+    } catch {
+      renderSettings(await store.getSettings());
+      setMessage(prefsStatus, COPY.prefsFailed, 'error');
+    }
+  }
+
+  for (const key of BOOLEAN_PREFS) {
+    booleanInputs[key].addEventListener('change', () => void savePrefs({ [key]: booleanInputs[key].checked }));
+  }
+  for (const key of NUMERIC_PREFS) {
+    numberInputs[key].addEventListener('change', async () => {
+      const raw = numberInputs[key].value.trim();
+      const value = Number(raw);
+      const { min, max } = NUMERIC_LIMITS[key];
+      if (raw === '' || !Number.isInteger(value) || value < min || value > max) {
+        renderSettings(await store.getSettings());
+        setMessage(prefsStatus, COPY.prefsInvalid(key), 'error');
+        return;
+      }
+      await savePrefs({ [key]: value });
+    });
+  }
+
+  // Keeps this page in step with changes made elsewhere (popup toggle, another Options tab).
+  const unsubscribe = store.subscribe(({ settings, apiKeyPresent }) => {
+    renderSettings(settings);
+    renderKeyPresence(apiKeyPresent);
+  });
+
+  return () => {
+    unsubscribe();
+    root.replaceChildren();
+  };
+}
+
+function describeResult(result: ConnectionTestResult): { message: string; state: string } {
+  switch (result.status) {
+    case 'ok':
+      return { message: COPY.connected(result.model, result.latencyMs), state: 'success' };
+    case 'invalid-key':
+      return { message: COPY.invalidKey(result.httpStatus), state: 'invalid-key' };
+    case 'network':
+      return {
+        message: result.reason === 'timeout' ? COPY.networkTimeout : COPY.networkUnreachable,
+        state: 'network',
+      };
+    case 'error':
+      return { message: COPY.unexpected(result.httpStatus), state: 'error' };
+    case 'no-key':
+      return { message: COPY.noKey, state: 'no-key' };
+  }
+}

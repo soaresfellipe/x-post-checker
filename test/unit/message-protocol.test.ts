@@ -9,6 +9,7 @@ import {
 
 const handlers: Handlers = {
   ping: () => ({ pong: true, protocolVersion: PROTOCOL_VERSION }),
+  'test-connection': ({ attemptId }) => ({ attemptId, result: { status: 'no-key' } }),
 };
 
 describe('message protocol', () => {
@@ -24,6 +25,15 @@ describe('message protocol', () => {
     expect(isRequest({ v: PROTOCOL_VERSION + 1, type: 'ping', payload: {} })).toBe(false);
   });
 
+  it('accepts test-connection requests and echoes the attempt id', async () => {
+    const request = createRequest('test-connection', { attemptId: 'a1' });
+    expect(isRequest(request)).toBe(true);
+    expect(await handleRequest(request, handlers)).toEqual({
+      ok: true,
+      data: { attemptId: 'a1', result: { status: 'no-key' } },
+    });
+  });
+
   it('routes a ping to its handler and wraps the result', async () => {
     const response = await handleRequest(createRequest('ping', {}), handlers);
     expect(response).toEqual({ ok: true, data: { pong: true, protocolVersion: PROTOCOL_VERSION } });
@@ -34,6 +44,7 @@ describe('message protocol', () => {
       ping: () => {
         throw new Error('boom');
       },
+      'test-connection': handlers['test-connection'],
     };
     expect(await handleRequest(createRequest('ping', {}), failing)).toEqual({
       ok: false,
