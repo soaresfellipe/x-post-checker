@@ -4,5 +4,7 @@
  */
 export * from './config';
 export { scoreDraft } from './engine';
+export { classifyLink } from './links';
 export { JEV_BAND_LABELS, composeHeadline, mapJevBand, toJevVerdict } from './headline';
 export type * from './types';
+export type { LinkDestination } from './links';

@@ -47,6 +47,8 @@ export const HEURISTIC_CONFIG = {
     /**
      * Architecture decision: open-link is +0.2 in the public weights, but external links
      * historically reduce reply/share rates, so a draft link is a MINOR negative for engagement.
+     * Off-platform destinations ONLY (scrutiny round-1 fix): links to x.com/twitter.com and
+     * unexpanded t.co wrappers take no penalty (classification in ./links).
      */
     externalLink: -2,
     /** Media flag: small positive (photo-expand/video-open are +0.05/+0.07; no large media bonus is public). */
@@ -110,6 +112,17 @@ export const HEURISTIC_CONFIG = {
   detection: {
     /** Line-start bullets needed before a draft counts as a list. */
     minListItems: 2,
+  },
+
+  /**
+   * Link-classification hosts for the draft link signal (classification in ./links): on-platform
+   * destinations take NO external-link penalty, shortener wrappers without a visible expansion
+   * stay unknown (destination never guessed). Exact host or subdomain matches — www.x.com and
+   * mobile.twitter.com count as on-platform, lookalikes like xcompany.com do not.
+   */
+  linkHosts: {
+    onPlatform: ['x.com', 'twitter.com'],
+    shortener: ['t.co'],
   },
 
   /**

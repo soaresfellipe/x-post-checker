@@ -13,6 +13,7 @@ import {
   SHAREABLE_FORMATS,
   STRONG_CLAIM_PATTERNS,
 } from './config';
+import { classifyLink, linkHost } from './links';
 import type { LocalScore, SignalEntry } from './types';
 
 /** Stable breakdown order: scoring floor, content signals, context, penalties. */
@@ -23,7 +24,9 @@ const SIGNAL_IDS = {
   dmShare: 'share-dm',
   length: 'length',
   hashtags: 'hashtags',
-  externalLink: 'external-link',
+  // Machine id kept as `external-link` (DOM/E2E suites and VAL-DRAFT-007 grouping pin it); the
+  // label and value carry the destination truth: only off-platform links are called external.
+  links: 'external-link',
   media: 'media',
   replyMutual: 'reply-mutual',
   engagementBait: 'engagement-bait',
@@ -38,7 +41,7 @@ const SIGNAL_LABELS: Readonly<Record<keyof typeof SIGNAL_IDS, string>> = {
   dmShare: 'DM-worthy',
   length: 'Length',
   hashtags: 'Hashtags',
-  externalLink: 'External links',
+  links: 'Links',
   media: 'Media',
   replyMutual: 'Reply context',
   engagementBait: 'Engagement bait',
@@ -62,7 +65,7 @@ export function scoreDraft(snapshot: DraftSnapshot): LocalScore {
     dmShareSignal(contentText),
     lengthSignal(snapshot.charCount),
     hashtagSignal(snapshot.hashtags.length),
-    externalLinkSignal(snapshot.urls.length),
+    linkSignal(snapshot.urls),
     mediaSignal(snapshot.hasMedia),
     replyMutualSignal(snapshot),
     baitSignal(contentText),
@@ -153,14 +156,45 @@ function hashtagSignal(count: number): SignalEntry {
   return entry('hashtags', `${count} ${noun} - ${band.note}`, band.points);
 }
 
-function externalLinkSignal(linkCount: number): SignalEntry {
-  if (linkCount === 0) return entry('externalLink', 'none', 0);
-  const noun = linkCount === 1 ? 'link' : 'links';
-  return entry(
-    'externalLink',
-    `${linkCount} external ${noun} (may reduce reply/share rates)`,
-    HEURISTIC_CONFIG.weights.externalLink,
-  );
+/**
+ * The draft link signal (M2 scrutiny round-1 fix): the external-link penalty is a minor negative
+ * for OFF-platform destinations ONLY. Links to x.com/twitter.com and their subdomains (status/
+ * profile/permalink destinations) keep the viewer on X — no penalty, never labeled external. An
+ * unexpanded t.co wrapper exposes no destination, so nothing is guessed: no penalty, and the
+ * short URL stands as the value (same never-guess rule as the follow-state signal).
+ */
+function linkSignal(urls: readonly string[]): SignalEntry {
+  if (urls.length === 0) return entry('links', 'none', 0);
+
+  const classified = urls.map((url) => ({ url, destination: classifyLink(url) }));
+  const external = classified.filter((link) => link.destination === 'off-platform');
+  const onPlatform = classified.filter((link) => link.destination === 'on-platform');
+  const unknown = classified.filter((link) => link.destination === 'unknown');
+
+  const parts: string[] = [];
+  if (external.length > 0) {
+    parts.push(`${external.length} external ${pluralLinks(external.length)} (may reduce reply/share rates)`);
+  }
+  if (onPlatform.length > 0) {
+    parts.push(`${onPlatform.length} on-platform ${pluralLinks(onPlatform.length)} (${onPlatformHosts(onPlatform)})`);
+  }
+  for (const link of unknown) parts.push(`${link.url} (destination not visible - never guessed)`);
+
+  // One flat minor negative per draft while any off-platform link is present (config comment).
+  return entry('links', parts.join('; '), external.length > 0 ? HEURISTIC_CONFIG.weights.externalLink : 0);
+}
+
+function pluralLinks(count: number): string {
+  return count === 1 ? 'link' : 'links';
+}
+
+function onPlatformHosts(links: readonly { url: string }[]): string {
+  const hosts = new Set<string>();
+  for (const link of links) {
+    const host = linkHost(link.url);
+    if (host !== null) hosts.add(host);
+  }
+  return [...hosts].sort().join(', ');
 }
 
 function mediaSignal(hasMedia: boolean): SignalEntry {

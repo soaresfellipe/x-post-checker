@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { parseHashtags, parseUrls, type DraftSnapshot } from '../../src/core/draft-snapshot';
 import {
+  classifyLink,
   composeHeadline,
   HEURISTIC_CONFIG,
   JEV_BAND_LABELS,
@@ -320,6 +321,120 @@ describe('reply-draft mutual signal (VAL-DRAFT-028)', () => {
     const original = scoreDraft(snapshot({ text }));
     expect(byId(reply, 'reply-mutual').value).toContain('reply');
     expect(byId(original, 'reply-mutual').value).toContain('not a reply');
+  });
+});
+
+describe('link classification by expanded destination (scrutiny round-1 fix)', () => {
+  // Filler text free of every other signal (no digits, '?', '#', bait/claim/DM/quotable/save
+  // words), so the url list below is the ONLY varying input of each pair.
+  const linkText = padTo('Read the whole breakdown of how this launch came together and what the team learned building it');
+  const INTERNAL_URL = 'https://x.com/someone/status/456';
+  const EXTERNAL_URL = 'https://example.com/full-analysis';
+  const SHORT_URL = 'https://t.co/abc123';
+
+  function linkEntry(urls: string[]): SignalEntry {
+    return byId(scoreDraft(snapshot({ text: linkText, urls })), 'external-link');
+  }
+
+  it('an internal x.com status link takes no external-link penalty and is never labeled external', () => {
+    const entry = linkEntry([INTERNAL_URL]);
+    expect(entry.points).toBe(0);
+    expect(entry.applied).toBe(false);
+    expect(entry.direction).toBe('neutral');
+    expect(entry.label.toLowerCase()).not.toContain('external');
+    expect(entry.value.toLowerCase()).not.toContain('external');
+    expect(entry.value).toContain('on-platform');
+    expect(entry.value).toContain('x.com');
+  });
+
+  it('an internal link scores exactly like its link-free twin', () => {
+    const internal = scoreDraft(snapshot({ text: linkText, urls: [INTERNAL_URL] }));
+    const linkFree = scoreDraft(snapshot({ text: linkText }));
+    expect(internal.headline).toBe(linkFree.headline);
+    expect(internal.totalPoints).toBe(linkFree.totalPoints);
+  });
+
+  it.each([
+    ['status permalink', 'https://x.com/someone/status/456'],
+    ['twitter.com status permalink', 'https://twitter.com/someone/status/456'],
+    ['www subdomain', 'https://www.x.com/someone/status/456'],
+    ['mobile subdomain', 'https://mobile.twitter.com/someone/status/456'],
+    ['profile destination', 'https://x.com/someone'],
+    ['case-insensitive host', 'https://X.com/someone/status/456'],
+  ])('on-platform destinations go unpenalized (%s)', (_label, url) => {
+    const entry = linkEntry([url]);
+    expect(entry.points, url).toBe(0);
+    expect(entry.applied, url).toBe(false);
+    expect(entry.value.toLowerCase(), url).not.toContain('external');
+  });
+
+  it('an off-platform link keeps the configured minor negative', () => {
+    const entry = linkEntry([EXTERNAL_URL]);
+    expect(entry.points).toBe(HEURISTIC_CONFIG.weights.externalLink);
+    expect(entry.direction).toBe('negative');
+    expect(entry.applied).toBe(true);
+    expect(entry.value).toContain('external');
+    expect(scoreDraft(snapshot({ text: linkText, urls: [EXTERNAL_URL] })).headline).toBeLessThan(
+      scoreDraft(snapshot({ text: linkText })).headline,
+    );
+  });
+
+  it('lookalike hosts do not pass as on-platform', () => {
+    for (const url of ['https://xcompany.com/page', 'https://x.com.evil.io/page']) {
+      const entry = linkEntry([url]);
+      expect(entry.points, url).toBe(HEURISTIC_CONFIG.weights.externalLink);
+      expect(entry.direction, url).toBe('negative');
+    }
+  });
+
+  it('an unexpandable t.co link gets no penalty and shows the short URL - destination never guessed', () => {
+    const entry = linkEntry([SHORT_URL]);
+    expect(entry.points).toBe(0);
+    expect(entry.applied).toBe(false);
+    expect(entry.direction).toBe('neutral');
+    expect(entry.value).toContain(SHORT_URL);
+    expect(entry.value).toContain('never guessed');
+    expect(entry.value.toLowerCase()).not.toContain('external');
+    expect(scoreDraft(snapshot({ text: linkText, urls: [SHORT_URL] })).headline).toBe(
+      scoreDraft(snapshot({ text: linkText })).headline,
+    );
+  });
+
+  it('a mixed draft penalizes only the off-platform link', () => {
+    const mixed = linkEntry([INTERNAL_URL, EXTERNAL_URL]);
+    expect(mixed.points).toBe(HEURISTIC_CONFIG.weights.externalLink);
+    expect(mixed.value).toContain('on-platform');
+    expect(mixed.value).toContain('external');
+    // The internal link adds nothing on top of the off-platform one (one flat penalty per draft).
+    expect(scoreDraft(snapshot({ text: linkText, urls: [INTERNAL_URL, EXTERNAL_URL] })).headline).toBe(
+      scoreDraft(snapshot({ text: linkText, urls: [EXTERNAL_URL] })).headline,
+    );
+  });
+
+  it('expanded upstream: text keeps the short form while urls carry the real destination', () => {
+    // m2-fix-composer-extraction shape: `text` holds t.co as typed, snapshot.urls the destination.
+    const expanded = scoreDraft(snapshot({ text: `${linkText} ${SHORT_URL}`, urls: [EXTERNAL_URL] }));
+    expect(byId(expanded, 'external-link').points).toBe(HEURISTIC_CONFIG.weights.externalLink);
+    expect(byId(expanded, 'reply-magnet').value).toContain('none'); // the URL fakes no content signal
+    expect(byId(expanded, 'copy-link').points).toBe(0);
+  });
+
+  it('classifyLink pins the destination table for defensive reuse', () => {
+    const onPlatform = [
+      INTERNAL_URL,
+      'https://twitter.com/someone',
+      'https://www.x.com/i/web/status/1',
+      'https://mobile.twitter.com/home',
+      'www.x.com/status/1',
+    ];
+    for (const url of onPlatform) expect(classifyLink(url), url).toBe('on-platform');
+    expect(classifyLink(SHORT_URL)).toBe('unknown');
+    expect(classifyLink('https://www.t.co/abc123')).toBe('unknown');
+    expect(classifyLink('not-a-url')).toBe('unknown');
+    expect(classifyLink('definitely not a url')).toBe('unknown');
+    for (const url of [EXTERNAL_URL, 'https://xcompany.com/page', 'https://x.com.evil.io/page']) {
+      expect(classifyLink(url), url).toBe('off-platform');
+    }
   });
 });
 
