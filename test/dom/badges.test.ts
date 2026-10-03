@@ -16,7 +16,7 @@ import {
 } from '../../src/dom/badges';
 import { badgeReason, isBadgeEligible } from '../../src/dom/badges/view-model';
 import { extractPostSnapshot } from '../../src/dom/timeline-scanner';
-import { FIXTURE_POSTS, renderFixtureHtml, renderPost } from '../fixtures/x-fixture';
+import { FIXTURE_POSTS, renderFixtureHtml, renderPost, type FixturePost } from '../fixtures/x-fixture';
 
 const NOW = Date.parse('2026-10-03T12:00:00Z');
 const THROTTLE_MS = 25;
@@ -28,10 +28,19 @@ interface HarnessOptions {
   settings?: Partial<Settings>;
   keyPresent?: boolean;
   deepAnalysis?: (post: { id: string }) => Promise<TargetAnalysisResult>;
+  /** Custom fixture HTML (default: the full home fixture rendered at the clock's time). */
+  fixtureHtml?: string;
+  /**
+   * The shared evaluation clock — extraction, scoring, AND the controller's cache-hit age
+   * re-check. Tests mutate `clock.now` to walk posts across the 48h boundary deterministically.
+   */
+  clock?: { now: number };
 }
 
 interface Harness {
   scanner: TimelineScanner;
+  /** The harness clock box: assign `harness.clock.now` to move every evaluation instant. */
+  clock: { now: number };
   scoreCalls: { id: string }[];
   settings: Settings;
   setSettings(update: Partial<Settings>): void;
@@ -54,7 +63,8 @@ function badgeInShadow(host: Element, id?: string): HTMLElement | null {
 }
 
 function startHarness(options: HarnessOptions = {}): Harness {
-  document.body.innerHTML = renderFixtureHtml(NOW);
+  const clock = options.clock ?? { now: NOW };
+  document.body.innerHTML = options.fixtureHtml ?? renderFixtureHtml(clock.now);
   const marker = document.createElement('div');
   marker.id = MARKER_HOST_ID;
   document.body.append(marker);
@@ -72,6 +82,7 @@ function startHarness(options: HarnessOptions = {}): Harness {
   const scoreCalls: { id: string }[] = [];
   const harness: Harness = {
     scanner: null as unknown as TimelineScanner, // assigned right after the scanner is created
+    clock,
     scoreCalls,
     settings: { ...DEFAULT_SETTINGS, ...options.settings },
     setSettings(update) {
@@ -109,17 +120,18 @@ function startHarness(options: HarnessOptions = {}): Harness {
   const scanner = createTimelineScanner({
     doc: document,
     throttleMs: THROTTLE_MS,
-    now: () => NOW,
+    now: () => clock.now, // the extraction clock walks with the harness clock
     // The harness stacks the fixture vertically; viewport visibility is E2E territory (like the
     // scanner's own DOM harness, all articles count as visible here).
     isArticleVisible: () => true,
   });
   const badges = createTargetBadges({
+    now: () => clock.now, // the cache-hit age re-check shares the same clock
     getSettings: () => harness.settings,
     getKeyPresence: () => options.keyPresent ?? false,
     scoreTarget: (post: PostSnapshot) => {
       scoreCalls.push({ id: post.id });
-      return scoreTarget(post, NOW); // deterministic clock for the exact 48h gate
+      return scoreTarget(post, clock.now); // deterministic clock for the exact 48h gate
     },
     requestDeepAnalysis: (post) => {
       harness.deepAnalysisCalls.push({ id: post.id });
@@ -589,6 +601,53 @@ describe('in-place metric change rescoring (VAL-TARGET-004, observer-driven)', (
     expect(badgeScore).not.toBe(scoreBefore); // the badge reflects the new metrics
     await waitThrottle();
     expect(callsFor()).toBe(2); // the settle pass stays quiet
+    harness.teardown();
+  });
+});
+
+describe('cache-hit age re-check at the 48h boundary (VAL-TARGET-010, integrated)', () => {
+  it('a cached ELIGIBLE score is re-gated on the current time: a post scanned at 48h-1s loses its badge at 48h+1s with unchanged metrics and ZERO rescore', async () => {
+    // The round-2 blocker scenario: the boundary post is 1 second INSIDE the 48h window at the
+    // first scan, and the rescan happens 2 seconds later — 1 second PAST it. ageMinutes rounds
+    // to 2880 at BOTH instants, so the captured-metrics signature (the cache key) is IDENTICAL
+    // across the boundary; only the exact publishedAt against the current clock knows better.
+    const T0 = NOW;
+    const boundary: FixturePost = {
+      id: '1800000000000000099',
+      handle: 'boundary_case',
+      displayName: 'Boundary Case',
+      verified: true,
+      text: 'What is the one tool you stopped using this year, and why?',
+      ageMinutes: (48 * 60 * 60 - 1) / 60, // 48h - 1s when rendered at T0
+      timeLabel: '2 d',
+      replies: 45,
+      reposts: 12,
+      likes: 310,
+      followsViewer: true,
+    };
+    const clock = { now: T0 };
+    const harness = startHarness({
+      clock,
+      fixtureHtml: renderPost(boundary, T0) + renderPost(FIXTURE_POSTS[0]!, T0),
+    });
+    await waitThrottle();
+
+    // Scan 1 (48h-1s): a fresh eligible score above the threshold, badge painted, scored once.
+    expect(harness.badgeOf(boundary.id)).not.toBeNull();
+    const boundaryCalls = (): number => harness.scoreCalls.filter((call) => call.id === boundary.id).length;
+    expect(boundaryCalls()).toBe(1);
+
+    // Rescan at 48h+1s: the extraction clock advanced too, yet ageMinutes STILL rounds to 2880 —
+    // the signature is unchanged, so exclusion must come from the cache-hit re-check alone.
+    clock.now = T0 + 2_000;
+    harness.scanner.rescan();
+
+    expect(harness.badgeOf(boundary.id)).toBeNull(); // past the strict >48h gate: badge removed
+    expect(boundaryCalls()).toBe(1); // excluded WITHOUT another scorer invocation
+
+    // The still-eligible post beside it keeps its cached score: zero extra scorer calls, badge intact.
+    expect(harness.badgeOf(POST_ID(0))).not.toBeNull();
+    expect(harness.scoreCalls.filter((call) => call.id === POST_ID(0)).length).toBe(1);
     harness.teardown();
   });
 });

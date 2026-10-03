@@ -4,7 +4,7 @@
  */
 export * from './config';
 export { scoreDraft } from './engine';
-export { scoreTarget } from './target-scorer';
+export { scoreTarget, isTargetStale, staleTargetScore } from './target-scorer';
 export { classifyLink } from './links';
 export { JEV_BAND_LABELS, composeHeadline, mapJevBand, toJevVerdict } from './headline';
 export type * from './types';

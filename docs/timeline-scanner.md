@@ -56,13 +56,18 @@ in-network, age, counts, url) against the last signature stored for that id:
 - **Who actually scores: the badge controller, memoized.** The controller scores through an
   injectable `scoreTarget` memoized by post id + `postMetricsSignature(post)`: a cache hit
   (same id, same signature) reuses the stored `TargetScore`; a miss invokes the scorer EXACTLY
-  once and stores the result. Consequently `'unchanged'` events (which fire on every pass so
-  rendering can re-sync) cost ZERO scoring invocations — threshold changes and recycled hosts
-  repaint from the cached score, never by rescoring. The cache is bounded (oldest evicted
-  beyond 2000 ids; an evicted id is scored once again, same documented cost as the diff state)
-  and survives `stop()`/`start()` like the diff state, so a master-switch re-enable does not
-  rescore. Conformance is asserted against ACTUAL scorer invocations (injected counting
-  wrapper), never against the scanner's dispatch counter alone.
+  once and stores the result. A hit is NOT unconditional reuse: the EXACT age gate (section 4)
+  is re-evaluated from `publishedAt` against the CURRENT time on EVERY hit — the signature's
+  rounded `ageMinutes` can stand still across the 48h boundary (48h±1s both round to 2880) — and
+  a post now past the gate is excluded with the typed stale score at ZERO additional scorer
+  invocations; still-eligible hits keep serving the cached score unchanged. Consequently
+  `'unchanged'` events (which fire on every pass so rendering can re-sync) cost ZERO scoring
+  invocations — threshold changes and recycled hosts repaint from the cached score, never by
+  rescoring. The cache is bounded (oldest evicted beyond 2000 ids; an evicted id is scored once
+  again, same documented cost as the diff state) and survives `stop()`/`start()` like the diff
+  state, so a master-switch re-enable does not rescore. Conformance is asserted against ACTUAL
+  scorer invocations (injected counting wrapper), never against the scanner's dispatch counter
+  alone.
 - At most ONE badge host per article: the host (`data-amplifyx-host="badge"`, created inert with
   `pointer-events: none`) is found before it is created; scans are idempotent (VAL-TARGET-004).
 - The diff state is bounded: beyond `MAX_TRACKED_POSTS` (2000) ids, the oldest are evicted; a
@@ -117,9 +122,12 @@ in-network, age, counts, url) against the last signature stored for that id:
   whole-minute rounding admits posts up to 30 seconds past the boundary (48h+1s rounds to 2880
   and would pass a `> 2880` gate). The scorer's clock is injectable; live scoring uses the
   scan-time clock.
-- **Display rounding may stay.** `ageMinutes` remains the captured age for the breakdown text
-  ("eligible: 2h old"), for engagement-velocity math, and as the capture signature's age
-  granularity — the signature intentionally flips when the whole-minute capture ticks, which
-  bounds staleness: a post crossing 48h on screen is rescored on the next minute tick and its
-  badge clears via the exact gate. Snapshots without `publishedAt` (legacy captures) fall back
+- **Display rounding may stay — but never delays exclusion.** `ageMinutes` remains the captured
+  age for the breakdown text ("eligible: 2h old"), for engagement-velocity math, and as the
+  capture signature's age granularity; the signature flipping on a whole-minute tick still
+  triggers a fresh rescore. Exclusion does NOT wait for that tick: on every score-cache hit the
+  controller re-evaluates this exact gate from `publishedAt` against the current time (the
+  rescoring policy, section 2), so a rescan just past 48h — where the rounded capture and the
+  metrics signature stand still — drops the post from eligibility and clears its badge with zero
+  additional scorer invocations. Snapshots without `publishedAt` (legacy captures) fall back
   to the whole-minute gate rather than guessing an instant.

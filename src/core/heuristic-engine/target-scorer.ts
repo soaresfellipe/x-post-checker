@@ -47,15 +47,7 @@ const SIGNAL_LABELS: Readonly<Record<keyof typeof SIGNAL_IDS, string>> = {
  */
 export function scoreTarget(post: PostSnapshot, now: number = Date.now()): TargetScore {
   const ineligibleReason = ineligibilityOf(post, now);
-  if (ineligibleReason !== null) {
-    return {
-      headline: 0,
-      totalPoints: 0,
-      eligible: false,
-      ineligibleReason,
-      signals: [eligibilityEntry(ineligibleReason, post)],
-    };
-  }
+  if (ineligibleReason !== null) return ineligibleTargetScore(post, ineligibleReason);
 
   // Pattern checks run on the text WITHOUT URLs so a "?utm=..." query parameter cannot fake a
   // question and a link slug cannot fake bait phrasing.
@@ -83,19 +75,47 @@ function clampHeadline(totalPoints: number): number {
 }
 
 /**
+ * The EXACT 48h age gate (VAL-TARGET-010, `docs/timeline-scanner.md` section 4): a post is stale
+ * iff `now - post.publishedAt > 48h` — strict, ms granularity, so a post captured at exactly 48
+ * hours is still eligible and one at 48h+1s is not (the rounded whole-minute capture would admit
+ * posts up to 30 seconds past the boundary). Snapshots without `publishedAt` (legacy captures)
+ * fall back to the whole-minute gate rather than guessing an instant. Exported because the gate
+ * is re-applied on EVERY badge-controller score-cache hit against the CURRENT time: the cache
+ * key's rounded `ageMinutes` can stand still across the boundary, so the memoized eligibility of
+ * a fresh capture must never outlive this check.
+ */
+export function isTargetStale(post: PostSnapshot, now: number): boolean {
+  if (post.publishedAt !== undefined) return now - post.publishedAt > TARGET_CONFIG.recency.maxAgeMs;
+  return post.ageMinutes > TARGET_CONFIG.recency.maxAgeMinutes;
+}
+
+/**
+ * The ineligible score for a post the EXACT age gate excludes at evaluation time — the same shape
+ * fresh `scoreTarget` produces for `stale-over-48h`, exported so the badge controller's cache-hit
+ * re-check returns the very exclusion a fresh rescore would (without re-invoking the scorer).
+ */
+export function staleTargetScore(post: PostSnapshot): TargetScore {
+  return ineligibleTargetScore(post, 'stale-over-48h');
+}
+
+/** The ineligible shape: headline 0, one explanatory breakdown entry, no content signals at all. */
+function ineligibleTargetScore(post: PostSnapshot, reason: TargetIneligibilityReason): TargetScore {
+  return {
+    headline: 0,
+    totalPoints: 0,
+    eligible: false,
+    ineligibleReason: reason,
+    signals: [eligibilityEntry(reason, post)],
+  };
+}
+
+/**
  * The eligibility gates, in x-algorithm filter order: AgeFilter first, OONRetweetReplyFilter
  * second. `inNetwork: false` on a reply is the honest no-visible-marker extraction, which the
  * source filter treats the same way (replies with missing ancestry data are also removed).
  */
 function ineligibilityOf(post: PostSnapshot, now: number): TargetIneligibilityReason | null {
-  // AgeFilter on the EXACT publication instant: strict >48h exclusion at ms granularity, so a
-  // post 48h+1s old (which rounds to 2880 whole minutes) is still excluded. Snapshots without
-  // `publishedAt` (legacy captures) fall back to the whole-minute gate.
-  if (post.publishedAt !== undefined) {
-    if (now - post.publishedAt > TARGET_CONFIG.recency.maxAgeMs) return 'stale-over-48h';
-  } else if (post.ageMinutes > TARGET_CONFIG.recency.maxAgeMinutes) {
-    return 'stale-over-48h';
-  }
+  if (isTargetStale(post, now)) return 'stale-over-48h';
   if (post.isReply && !post.inNetwork) return 'out-of-network-reply';
   return null;
 }

@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { HEURISTIC_CONFIG, TARGET_CONFIG, scoreTarget, type SignalEntry, type TargetScore } from '../../src/core/heuristic-engine';
+import {
+  HEURISTIC_CONFIG,
+  TARGET_CONFIG,
+  isTargetStale,
+  scoreTarget,
+  staleTargetScore,
+  type SignalEntry,
+  type TargetScore,
+} from '../../src/core/heuristic-engine';
 import type { PostSnapshot } from '../../src/core/post-snapshot';
 
 /**
@@ -169,6 +177,41 @@ describe('48-hour recency filter (VAL-TARGET-010)', () => {
     expect(entry.direction).toBe('negative');
     expect(entry.value).toContain('48h');
     expect(entry.value).toContain('72h');
+  });
+});
+
+describe('cache-hit age re-check helpers (VAL-TARGET-010, docs section 4)', () => {
+  const NOW = Date.parse('2026-10-03T12:00:00Z');
+  const maxAgeMs = TARGET_CONFIG.recency.maxAgeMinutes * 60_000;
+
+  it('isTargetStale is the exact-instant gate the scorer itself applies', () => {
+    // The rounding-window cases the cache hit could hide: 48h+1s and +29s still round to 2880
+    // whole minutes, yet the exact gate excludes them.
+    expect(isTargetStale(snapshot({ publishedAt: NOW - maxAgeMs + 1_000, ageMinutes: 2880 }), NOW)).toBe(false);
+    expect(isTargetStale(snapshot({ publishedAt: NOW - maxAgeMs, ageMinutes: 2880 }), NOW)).toBe(false);
+    expect(isTargetStale(snapshot({ publishedAt: NOW - maxAgeMs - 1_000, ageMinutes: 2880 }), NOW)).toBe(true);
+    expect(isTargetStale(snapshot({ publishedAt: NOW - maxAgeMs - 29_000, ageMinutes: 2880 }), NOW)).toBe(true);
+  });
+
+  it('isTargetStale keeps the whole-minute fallback for legacy snapshots without an instant', () => {
+    expect(isTargetStale(snapshot({ ageMinutes: TARGET_CONFIG.recency.maxAgeMinutes }), NOW)).toBe(false);
+    expect(isTargetStale(snapshot({ ageMinutes: TARGET_CONFIG.recency.maxAgeMinutes + 1 }), NOW)).toBe(true);
+  });
+
+  it('staleTargetScore mirrors the fresh scorer exclusion shape for the same capture', () => {
+    const post = snapshot({
+      publishedAt: NOW - maxAgeMs - 1_000,
+      ageMinutes: 2880,
+      likeCount: 5_000,
+      replyCount: 900,
+      repostCount: 300,
+    });
+    const excluded = staleTargetScore(post);
+    expect(excluded).toEqual(scoreTarget(post, NOW)); // one shape, one source of truth
+    expect(excluded.eligible).toBe(false);
+    expect(excluded.ineligibleReason).toBe('stale-over-48h');
+    expect(excluded.headline).toBe(0);
+    expect(excluded.signals).toHaveLength(1);
   });
 });
 

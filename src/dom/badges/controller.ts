@@ -19,7 +19,7 @@
  * event's data alone, so a recycled host (x.com reusing an article node for another post) can
  * never show a stale badge.
  */
-import { scoreTarget, type TargetScore } from '@/core/heuristic-engine';
+import { isTargetStale, scoreTarget, staleTargetScore, type TargetScore } from '@/core/heuristic-engine';
 import { postMetricsSignature, type PostSnapshot } from '@/core/post-snapshot';
 import type { Settings } from '@/core/settings-store';
 import type { TargetAnalysisResult } from '@/core/target-analysis';
@@ -46,6 +46,11 @@ export interface TargetBadgesOptions {
    * are unchanged across scans is never scored again — its ScanEvent repaints from the cache.
    */
   scoreTarget?: (post: PostSnapshot) => TargetScore;
+  /**
+   * The evaluation clock for the cache-hit age re-check (defaults to `Date.now`). Injectable so
+   * DOM tests can walk a post across the 48h boundary deterministically.
+   */
+  now?: () => number;
 }
 
 /** Score-cache bound (oldest evicted beyond this), mirroring the scanner's diff-state bound. */
@@ -74,6 +79,8 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
   );
 
   const scoreOf = options.scoreTarget ?? scoreTarget;
+  /** The clock the cache-hit age re-check evaluates against (defaults to the real time). */
+  const evaluateNow = options.now ?? Date.now;
   /**
    * id -> { signature, score } of the last scored capture. The rescoring policy's other half:
    * the scanner's diff decides WHICH events carry a scoring dispatch; this cache makes the
@@ -143,7 +150,16 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
   function scoreFor(post: PostSnapshot): TargetScore {
     const signature = postMetricsSignature(post);
     const cached = scoreCache.get(post.id);
-    if (cached && cached.signature === signature) return cached.score;
+    if (cached && cached.signature === signature) {
+      // VAL-TARGET-010 cache-hit age re-check: a memoized score is only as fresh as its CAPTURED
+      // metrics — time moves independently of the signature (48h±1s both round to 2880
+      // ageMinutes), so the exact 48h gate is re-evaluated from `publishedAt` against the CURRENT
+      // time on EVERY hit. A post now past the window is excluded — the same typed stale
+      // exclusion a fresh rescore would produce — at zero scorer cost; a still-eligible hit keeps
+      // serving its cached score unchanged (docs/timeline-scanner.md sections 2 and 4).
+      if (cached.score.eligible && isTargetStale(post, evaluateNow())) return staleTargetScore(post);
+      return cached.score;
+    }
     const score = scoreOf(post);
     scoreCache.set(post.id, { signature, score });
     const excess = scoreCache.size - MAX_CACHED_SCORES;
