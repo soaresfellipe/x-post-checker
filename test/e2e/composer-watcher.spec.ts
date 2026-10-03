@@ -179,7 +179,7 @@ test.describe('composer watcher', () => {
       await expect(signals).toBeVisible({ timeout: 5_000 });
       const row = signals.locator('li[data-signal-id="reply-mutual"]');
       if (badgeCase.expectBoost) {
-        await expect(row).toContainText('follows the viewer (visible)');
+        await expect(row).toContainText('the viewer follows (visible)');
         await expect(row.locator('.points')).toHaveText('+5');
       } else {
         await expect(row).toContainText('not visible, boost not applied');

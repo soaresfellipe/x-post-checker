@@ -76,10 +76,19 @@ export interface ScoreOverlay {
   onComposerChange(event: ComposerChangeEvent): void;
   /** An analyze-draft dispatch left the tab: the Jev half is now in flight for this draft. */
   onAnalysisDispatched(snapshot: DraftSnapshot): void;
-  /** A settled analyze-draft reply (discarded unless it matches the current draft's hash). */
-  onAnalysisResult(result: DraftAnalysisResult): void;
-  /** The analyze-draft transport failed for the oldest in-flight dispatch. */
-  onAnalysisFailed(): void;
+  /**
+   * A settled analyze-draft reply (discarded unless it matches the current draft's hash). Honest
+   * refusals may carry the dispatch's snapshot so ITS pending entry settles — never the oldest
+   * one's (VAL-DRAFT-018).
+   */
+  onAnalysisResult(result: DraftAnalysisResult, dispatched?: DraftSnapshot): void;
+  /**
+   * The analyze-draft transport failed for THIS draft's dispatch: the failure carries the failing
+   * draft's snapshot (the same identity successes use), so only that dispatch settles and its
+   * local score shows with an explicit transport error instead of an endless spinner
+   * (VAL-DRAFT-018). Unrelated in-flight dispatches stay pending.
+   */
+  onAnalysisFailed(snapshot: DraftSnapshot): void;
   /** Removes the host and every listener (test teardown). */
   destroy(): void;
 }

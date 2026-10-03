@@ -60,7 +60,8 @@ export const HEURISTIC_CONFIG = {
      */
     engagementBait: -50,
     /**
-     * Reply drafts replying to an account that visibly follows the viewer. Grounded in
+     * Reply drafts replying to an account the VIEWER visibly follows (`replyToFollowedByViewer`:
+     * the viewer follows the reply target — never the reverse). Grounded in
      * BidirectionalFollowReplyWeightBoost (+15 added to the reply coefficient); per the validation
      * contract the source's +15 is NOT reused as a literal extension score.
      */

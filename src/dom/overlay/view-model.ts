@@ -42,9 +42,12 @@ export function failureReason(failure: JevAnalysisFailure): string {
 }
 
 /**
- * Derives the Jev-half section for the current draft. A settled reply wins over the pending
- * state (a re-dispatch of an identical draft returns an identical result, so flipping back to a
- * spinner would only be noise); the optimistic phase decides from settings + key presence.
+ * Derives the Jev-half section for the current draft. LIVE SETTINGS TAKE PRECEDENCE (VAL-DRAFT-021):
+ * when `jevForDrafts` is off, the off state wins over anything a settled reply carried — a verdict
+ * analyzed while the setting was on must vanish the moment it flips, and a late-arriving result
+ * must not re-introduce it. Otherwise a settled reply wins over the pending state (a re-dispatch
+ * of an identical draft returns an identical result, so flipping back to a spinner would only be
+ * noise); the optimistic phase decides from settings + key presence.
  */
 function deriveJevSection(
   settings: Settings,
@@ -52,6 +55,7 @@ function deriveJevSection(
   reply: DraftAnalysis | null,
   transportFailed: boolean,
 ): JevSection {
+  if (!settings.jevForDrafts) return { state: 'off' };
   if (reply) {
     const { jevStatus, jevFailure } = reply.meta;
     if ((jevStatus === 'ok' || jevStatus === 'cached') && reply.jev) {
@@ -75,7 +79,6 @@ function deriveJevSection(
     }
   }
   if (transportFailed) return { state: 'error', reason: OVERLAY_COPY.errorReasons.transport };
-  if (!settings.jevForDrafts) return { state: 'off' };
   if (!keyPresent) return { state: 'no-key' };
   return { state: 'pending' };
 }
@@ -92,8 +95,10 @@ export function deriveOverlayView(inputs: OverlayViewInputs): OverlayView {
     (pending.get(hash) ?? 0) > 0 || matchingReply !== null || transportFailure?.hash === hash;
   if (!hasAnalysis) return { phase: 'ready' };
 
+  // Live-setting precedence again (VAL-DRAFT-021): with jevForDrafts off the panel is local-only —
+  // the verdict and the analyzer's hybrid headline are suppressed no matter what settled.
+  const verdict = settings.jevForDrafts ? matchingReply?.jev : undefined;
   const local = matchingReply?.local ?? scoreDraft(capture);
-  const verdict = matchingReply?.jev;
   const jev = deriveJevSection(
     settings,
     keyPresent,
@@ -103,7 +108,11 @@ export function deriveOverlayView(inputs: OverlayViewInputs): OverlayView {
   return {
     phase: 'analyzed',
     local,
-    headline: matchingReply ? matchingReply.meta.headline : composeHeadline(local.headline, verdict?.ordinal),
+    headline: matchingReply
+      ? settings.jevForDrafts
+        ? matchingReply.meta.headline
+        : local.headline
+      : composeHeadline(local.headline, verdict?.ordinal),
     headlineSource: verdict ? 'hybrid' : 'local',
     jev,
   };

@@ -76,9 +76,9 @@ interface Harness {
   optionsOpened: number;
   setKeyPresent(present: boolean): void;
   pushSettings(partial: Partial<Settings>, revision?: number): Promise<void>;
-  reply(result: DraftAnalysisResult): void;
+  reply(result: DraftAnalysisResult, request?: AnalysisDispatch): void;
   replyFor(request: AnalysisDispatch, overrides?: ReplyOverrides): void;
-  failTransport(): void;
+  failTransport(request?: AnalysisDispatch): void;
   panel(): HTMLElement;
   host(): HTMLElement | null;
 }
@@ -146,8 +146,9 @@ function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: bo
         await vi.advanceTimersByTimeAsync(1);
       }
     },
-    reply(result: DraftAnalysisResult) {
-      overlay.onAnalysisResult(result);
+    reply(result: DraftAnalysisResult, request?: AnalysisDispatch) {
+      if (request) overlay.onAnalysisResult(result, request.snapshot);
+      else overlay.onAnalysisResult(result);
     },
     replyFor(request: AnalysisDispatch, overrides: ReplyOverrides = {}) {
       const local = scoreDraft(request.snapshot);
@@ -175,8 +176,10 @@ function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: bo
         },
       });
     },
-    failTransport() {
-      overlay.onAnalysisFailed();
+    failTransport(request?: AnalysisDispatch) {
+      // Mirrors the content script: the failing dispatch carries its own snapshot identity.
+      const target = request ?? requests.at(-1)!;
+      overlay.onAnalysisFailed(target.snapshot);
     },
     panel(): HTMLElement {
       const panel = document
@@ -601,6 +604,57 @@ describe('jevForDrafts off (VAL-DRAFT-021)', () => {
     expect(jev.dataset.jevState).toBe('off');
     expect(find(panel, 'overlay-gauge')).not.toBeNull(); // local scoring stays available
   });
+
+  it('reverts a visible verdict to local-only the moment jevForDrafts turns off (live settings precedence)', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft analyzed and answered while AI for drafts is on');
+    await settleCapture();
+    harness.replyFor(harness.requests[0]!);
+    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('verdict');
+    expect(find(harness.panel(), 'overlay-gauge')!.dataset.headlineSource).toBe('hybrid');
+
+    await harness.pushSettings({ jevForDrafts: false }, 2);
+
+    const panel = harness.panel();
+    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('off'); // the off state, not the verdict
+    expect(find(panel, 'overlay-jev-notice')!.textContent).toContain('AI analysis is off');
+    expect(find(panel, 'overlay-jev-band')).toBeNull(); // the AI verdict left the panel
+    expect(find(panel, 'overlay-gauge')!.dataset.headlineSource).toBe('local'); // headline reverted
+    const local = scoreDraft(harness.requests[0]!.snapshot);
+    expect(find(panel, 'overlay-headline')!.textContent).toBe(String(local.headline));
+    expect(find(panel, 'overlay-signals')).not.toBeNull(); // local scoring stays available
+  });
+
+  it('a late reply cannot re-introduce the verdict once jevForDrafts is off', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'Draft typed while AI for drafts is enabled');
+    await settleCapture();
+    const request = harness.requests[0]!;
+
+    await harness.pushSettings({ jevForDrafts: false }, 2); // the user disables AI mid-flight
+    harness.replyFor(request); // the verdict lands AFTER the setting flipped
+
+    const panel = harness.panel();
+    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('off');
+    expect(find(panel, 'overlay-jev-band')).toBeNull();
+    expect(find(panel, 'overlay-gauge')!.dataset.headlineSource).toBe('local');
+    expect(find(panel, 'overlay-headline')!.textContent).toBe(String(scoreDraft(request.snapshot).headline));
+  });
+
+  it('restores the settled verdict when the setting is turned back on in the same session', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft whose settled verdict survives the setting round-trip');
+    await settleCapture();
+    harness.replyFor(harness.requests[0]!);
+    await harness.pushSettings({ jevForDrafts: false }, 2);
+    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('off');
+
+    await harness.pushSettings({ jevForDrafts: true }, 3);
+    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('verdict'); // no re-request needed
+  });
 });
 
 describe('Jev failure degradation (VAL-DRAFT-018)', () => {
@@ -660,6 +714,72 @@ describe('Jev failure degradation (VAL-DRAFT-018)', () => {
     expect(find(panel, 'overlay-gauge')).not.toBeNull(); // the local score stays usable
     expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('error');
     expect(find(panel, 'overlay-jev')!.textContent).toContain('AI judgment unavailable');
+  });
+});
+
+describe('transport-failure identity: out-of-order dispatches (VAL-DRAFT-018)', () => {
+  it('settles the failing dispatch: the newest draft shows its transport error while the older stays pending', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'Draft A: what is your favorite database and why does it matter?');
+    await settleCapture();
+    typeText(composer(), 'Draft B: the one habit that made my writing stick was reading aloud #writing');
+    await settleCapture();
+    const requestA = harness.requests[0]!;
+    const requestB = harness.requests.at(-1)!;
+
+    // B's transport fails while A's analysis is STILL in flight.
+    harness.failTransport(requestB);
+
+    // B (the current draft) reaches a terminal render: local score + explicit transport error.
+    const panel = harness.panel();
+    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('error'); // never an infinite spinner
+    expect(find(panel, 'overlay-jev')!.textContent).toContain('did not respond');
+    expect(find(panel, 'overlay-gauge')).not.toBeNull();
+    expect(find(panel, 'overlay-gauge')!.dataset.headlineSource).toBe('local');
+
+    // A's late success is unrelated to B: it neither repaints B nor lifts B's error.
+    harness.replyFor(requestA, { jev: undefined, jevStatus: 'skipped-no-key' });
+    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('error');
+    expect(find(harness.panel(), 'overlay-headline')!.textContent).toBe(
+      String(scoreDraft(requestB.snapshot).headline),
+    );
+  });
+
+  it('failing the older dispatch leaves the newer draft pending; that draft still settles on its own failure', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'Draft A: what is your favorite database and why does it matter?');
+    await settleCapture();
+    typeText(composer(), 'Draft B: the one habit that made my writing stick was reading aloud #writing');
+    await settleCapture();
+    const requestA = harness.requests[0]!;
+    const requestB = harness.requests.at(-1)!;
+
+    harness.failTransport(requestA); // only the OLDEST dispatch fails
+    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('pending'); // B unaffected
+    expect(find(harness.panel(), 'overlay-jev-band')).toBeNull(); // no error is shown for B either
+
+    harness.failTransport(requestB); // B's own transport failure settles B
+    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('error');
+  });
+
+  it('an honest refusal settles its own dispatch, not the oldest one', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'Draft A: what is your favorite database and why does it matter?');
+    await settleCapture();
+    typeText(composer(), 'Draft B: the one habit that made my writing stick was reading aloud #writing');
+    await settleCapture();
+    const requestB = harness.requests.at(-1)!;
+
+    // B is refused (e.g. the min-length gate moved mid-flight) while A is still in flight.
+    harness.reply({ kind: 'below-min-length', minDraftLength: 400 }, requestB);
+
+    // B's pending state cleared, so with nothing in flight the overlay leaves the analyzed spin
+    // for its now-unowned capture: the ready state with the explicit Analyze affordance.
+    expect(harness.panel().dataset.state).toBe('ready');
+    expect(find(harness.panel(), 'overlay-analyze')).not.toBeNull();
   });
 });
 
@@ -764,6 +884,31 @@ describe('repositioning (VAL-DRAFT-023)', () => {
     expect(document.querySelectorAll(HOST_SELECTOR)).toHaveLength(1);
   });
 
+  it('caps the panel to the viewport with internal scrolling when the window is too short (VAL-DRAFT-023)', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft that is analyzed before the viewport shrinks');
+    await settleCapture();
+    harness.replyFor(harness.requests[0]!);
+    expect(find(harness.panel(), 'overlay-gauge')).not.toBeNull();
+    expect(harness.panel().style.maxHeight).toBe(''); // no cap at full height
+
+    // happy-dom reports no layout: the panel measures at its 240px design fallback, which no
+    // longer fits a 120px viewport. The cap must clamp the panel INSIDE the viewport.
+    window.innerHeight = 120;
+    window.dispatchEvent(new Event('resize'));
+    await vi.advanceTimersByTimeAsync(16);
+
+    expect(harness.panel().style.maxHeight).toBe('104px'); // 120 - 2*8 margin - 8 gap
+    expect(harness.host()!.style.top).toBe('8px'); // still anchored below the region
+    expect(document.querySelectorAll(HOST_SELECTOR)).toHaveLength(1); // never a second host
+
+    window.innerHeight = 700;
+    window.dispatchEvent(new Event('resize'));
+    await vi.advanceTimersByTimeAsync(16);
+    expect(harness.panel().style.maxHeight).toBe(''); // the cap releases when space returns
+  });
+
   it('stops listening after destroy()', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
@@ -784,25 +929,44 @@ describe('computeAnchorPosition (pure placement math)', () => {
   };
 
   it('anchors below the region, aligned with its left edge, in document coordinates', () => {
-    expect(computeAnchorPosition(base)).toEqual({ top: 208, left: 40 });
+    expect(computeAnchorPosition(base)).toEqual({ top: 208, left: 40, maxHeight: null });
   });
 
   it('folds above the region when there is no room below', () => {
     const position = computeAnchorPosition({ ...base, regionRect: { top: 600, bottom: 700, left: 40 } });
-    expect(position).toEqual({ top: 352, left: 40 }); // 600 - 8 - 240
+    expect(position).toEqual({ top: 352, left: 40, maxHeight: null }); // 600 - 8 - 240
   });
 
-  it('stays below the composer when neither side fully fits, even past the viewport bottom', () => {
+  it('caps the panel to the available space when neither side fully fits (VAL-DRAFT-023)', () => {
     const position = computeAnchorPosition({
       regionRect: { top: 300, bottom: 400, left: 40 },
       overlaySize: { width: 340, height: 600 },
       viewport: { width: 1280, height: 500 },
       scroll: { x: 0, y: 0 },
     });
-    // Below (408) overflows a 500px viewport and the panel cannot fit above the region either;
-    // the anchor stays below anyway so the composer keeps its space (VAL-DRAFT-022).
-    expect(position.top).toBe(408);
-    expect(position.left).toBe(40);
+    // Neither side fits 600px. The panel must stay INSIDE the viewport (no more offscreen
+    // overflow): it caps to the roomier space — above offers 284px vs 84px below — and folds
+    // above the region, whose top (300) is never covered.
+    expect(position).toEqual({ top: 8, left: 40, maxHeight: 284 });
+  });
+
+  it('caps below the region first when that side offers at least as much room (VAL-DRAFT-022/023)', () => {
+    const position = computeAnchorPosition({
+      regionRect: { top: 10, bottom: 120, left: 40 },
+      overlaySize: { width: 340, height: 600 },
+      viewport: { width: 1280, height: 500 },
+      scroll: { x: 0, y: 0 },
+    });
+    // Below space = 492 - 128 = 364; above space is zero. Below-first precedence holds and the
+    // capped panel ends exactly at the viewport's bottom margin.
+    expect(position).toEqual({ top: 128, left: 40, maxHeight: 364 });
+  });
+
+  it('leaves the natural size uncapped whenever the panel fits one side whole', () => {
+    const fitsBelow = computeAnchorPosition(base);
+    const foldsAbove = computeAnchorPosition({ ...base, regionRect: { top: 600, bottom: 700, left: 40 } });
+    expect(fitsBelow.maxHeight).toBeNull();
+    expect(foldsAbove.maxHeight).toBeNull();
   });
 
   it('clamps horizontally on narrow viewports', () => {
@@ -812,7 +976,7 @@ describe('computeAnchorPosition (pure placement math)', () => {
 
   it('adds scroll offsets so the panel stays anchored while the page scrolls', () => {
     const position = computeAnchorPosition({ ...base, scroll: { x: 12, y: 3000 } });
-    expect(position).toEqual({ top: 3208, left: 52 });
+    expect(position).toEqual({ top: 3208, left: 52, maxHeight: null });
   });
 
   it('keeps the panel inside the scrolled viewport when below does not fit', () => {

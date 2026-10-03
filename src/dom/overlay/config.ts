@@ -35,6 +35,8 @@ export const OVERLAY_PLACEMENT = Object.freeze({
   /** Measurement fallbacks for engines without layout (happy-dom): the panel's design size. */
   fallbackWidth: 340,
   fallbackHeight: 240,
+  /** Approximate px per wheel LINE unit (Firefox line-mode deltas) for capped-panel scrolling. */
+  wheelLineHeight: 19,
 });
 
 /** Headline color tiers for the gauge number (display only; scoring lives in the engine config). */

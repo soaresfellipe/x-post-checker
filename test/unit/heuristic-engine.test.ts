@@ -307,6 +307,16 @@ describe('reply-draft mutual signal (VAL-DRAFT-028)', () => {
     expect(entry.applied).toBe(false);
     expect(entry.points).toBe(0);
   });
+  it('the visible-true label states the VIEWER follows the reply target (direction pinned)', () => {
+    // VAL-DRAFT-019 copy contract: replyToFollowedByViewer means the viewer follows the reply
+    // target — the label must never invert it to "an account that follows the viewer".
+    const entry = byId(scoreDraft(snapshot({ text, ...replyBase, replyToFollowedByViewer: true })), 'reply-mutual');
+    expect(entry.value).toBe('reply to an account the viewer follows (visible)');
+  });
+  it('the visible-false label states the viewer does NOT follow the reply target (direction pinned)', () => {
+    const entry = byId(scoreDraft(snapshot({ text, ...replyBase, replyToFollowedByViewer: false })), 'reply-mutual');
+    expect(entry.value).toBe('reply to an account the viewer does not follow (visible)');
+  });
 
   it('never applies the boost to a non-reply draft', () => {
     const original = scoreDraft(snapshot({ text }));

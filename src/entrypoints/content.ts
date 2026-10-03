@@ -63,17 +63,19 @@ export default defineContentScript({
       stamp();
       // The overlay's optimistic local half renders from the capture alone; the reply is the
       // AUTHORITATIVE render (hybrid headline, verdict, failure notices), matched to the current
-      // draft by meta.draftHash so stale replies never repaint a newer draft.
+      // draft by meta.draftHash so stale replies never repaint a newer draft. Refusals and
+      // transport failures carry the dispatch's snapshot so the overlay settles THAT dispatch by
+      // identity — never the oldest one (VAL-DRAFT-018).
       overlay.onAnalysisDispatched(dispatch.snapshot);
       void sendMessage('analyze-draft', { draft: dispatch.snapshot, trigger: dispatch.trigger })
         .then((response) => {
           if (!response.ok) {
-            overlay.onAnalysisFailed();
+            overlay.onAnalysisFailed(dispatch.snapshot);
             return;
           }
-          overlay.onAnalysisResult(response.data);
+          overlay.onAnalysisResult(response.data, dispatch.snapshot);
         })
-        .catch(() => overlay.onAnalysisFailed());
+        .catch(() => overlay.onAnalysisFailed(dispatch.snapshot));
     };
 
     function startWatcher(): void {

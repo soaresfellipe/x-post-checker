@@ -350,6 +350,45 @@ test.describe('score overlay states', () => {
     expect(errors).toEqual([]);
   });
 
+  test('turning jevForDrafts off reverts an analyzed tab to local-only and late results stay suppressed (VAL-DRAFT-021)', async ({ context }) => {
+    const draftA = 'Toggle-off draft one: what made you finally switch editors for good?';
+    const draftB = 'Toggle-off draft two: the one habit that made my writing stick was reading aloud';
+    const { calls, parked } = await interceptJev(context, ({ state }) => {
+      if (state.startsWith(draftB)) {
+        return { action: 'park', body: jevResponse({ ordinal: 4.5, confidence: 0.8, weakness: 'no_major_weakness' }) };
+      }
+      return { action: 'fulfill', body: jevResponse({ ordinal: 3 }) };
+    });
+    const options = await saveKeyViaOptions(context);
+    const page = await openFixture(context);
+    const errors = collectErrors(page);
+
+    // Phase 1: the tab shows a settled AI verdict for draft A.
+    await typeDraft(page, draftA);
+    await expect.poll(() => calls.length, { timeout: 10_000 }).toBe(1);
+    await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'verdict');
+    await expect(page.getByTestId('overlay-gauge')).toHaveAttribute('data-headline-source', 'hybrid');
+
+    // Phase 2: draft B is dispatched and PARKED; while it is in flight the user turns AI off.
+    await typeDraft(page, draftB);
+    await expect.poll(() => calls.length, { timeout: 10_000 }).toBe(2);
+    await options.getByTestId('pref-jevForDrafts').uncheck();
+    await expect(options.getByTestId('prefs-status')).toHaveAttribute('data-state', 'success');
+
+    // The open tab reverts BEFORE B's result lands: off state, local headline, no band.
+    await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'off', { timeout: 5_000 });
+    await expect(page.getByTestId('overlay-gauge')).toHaveAttribute('data-headline-source', 'local');
+    await expect(page.getByTestId('overlay-jev-band')).toHaveCount(0);
+
+    // Phase 3: B's late result arrives — it must NOT re-introduce the verdict.
+    parked[0]!.release();
+    await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'off', { timeout: 5_000 });
+    await expect(page.getByTestId('overlay-gauge')).toHaveAttribute('data-headline-source', 'local');
+    await expect(page.getByTestId('overlay-jev-band')).toHaveCount(0);
+    expect(calls).toHaveLength(2); // no NEW AI request ran once the setting was off
+    expect(errors).toEqual([]);
+  });
+
   test('manual Analyze only: no automatic analysis UI or request while autoAnalyze is off (VAL-SETUP-010)', async ({ context }) => {
     const { calls } = await interceptJev(context, () => ({ action: 'fulfill', body: jevResponse({ ordinal: 3.44, confidence: 0.65 }) }));
     const options = await saveKeyViaOptions(context);
@@ -452,6 +491,59 @@ test.describe('overlay coexistence and lifecycle', () => {
     // Still exactly one overlay host, still usable (the panel keeps its content).
     await expect(page.locator(OVERLAY_HOST)).toHaveCount(1);
     await expect(page.getByTestId('overlay-gauge')).toBeVisible();
+  });
+
+  test('a panel taller than the viewport caps to the available space with internal scrolling (VAL-DRAFT-023)', async ({ context }) => {
+    await interceptJev(context, () => ({ action: 'fulfill', body: jevResponse({ ordinal: 3 }) }));
+    await saveKeyViaOptions(context);
+    const page = await openFixture(context);
+    await typeDraft(page, 'A draft whose analyzed panel is taller than a short viewport allows');
+    await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'verdict', { timeout: 10_000 });
+
+    // The review's scenario: a fully analyzed panel in a ~500px-tall window — far more panel
+    // than viewport. The overlay must cap to the available space instead of running offscreen.
+    await page.setViewportSize({ width: 900, height: 500 });
+    const withinViewport = async (): Promise<boolean> => {
+      const box = await page.locator(OVERLAY_HOST).boundingBox();
+      if (!box) return false;
+      const { width, height } = page.viewportSize()!;
+      return box.x >= 0 && box.y >= 0 && box.x + box.width <= width && box.y + box.height <= height;
+    };
+    await expect.poll(withinViewport, { timeout: 5_000 }).toBe(true);
+
+    // The cap engages internal scrolling: the content exceeds the capped box.
+    const scrollState = await page.evaluate(() => {
+      const panel = document
+        .querySelector('#amplifyx-overlay-host')
+        ?.shadowRoot?.querySelector('[data-testid="amplifyx-overlay"]');
+      if (!panel) return null;
+      return {
+        clientHeight: panel.clientHeight,
+        scrollHeight: panel.scrollHeight,
+        overflowY: getComputedStyle(panel).overflowY,
+      };
+    });
+    expect(scrollState).not.toBeNull();
+    expect(scrollState!.overflowY).toBe('auto');
+    expect(scrollState!.scrollHeight).toBeGreaterThan(scrollState!.clientHeight);
+
+    // Still anchored to the composer: never over the Post button, never duplicated.
+    await expect(page.locator(OVERLAY_HOST)).toHaveCount(1);
+    await expect(page.getByTestId('overlay-gauge')).toBeVisible();
+    const postBox = await page.locator(POST_BUTTON).boundingBox();
+    const overlayBox = await page.locator(OVERLAY_HOST).boundingBox();
+    expect(postBox).not.toBeNull();
+    const overlaps =
+      overlayBox!.x < postBox!.x + postBox!.width &&
+      postBox!.x < overlayBox!.x + overlayBox!.width &&
+      overlayBox!.y < postBox!.y + postBox!.height &&
+      postBox!.y < overlayBox!.y + overlayBox!.height;
+    expect(overlaps).toBe(false);
+
+    // Restoring the height releases the cap.
+    await page.setViewportSize({ width: 900, height: 900 });
+    await expect.poll(withinViewport, { timeout: 5_000 }).toBe(true);
+    await expect(page.locator(OVERLAY_HOST)).toHaveCount(1);
   });
 
   test('the popup master switch removes and restores the overlay in the open tab without a reload (VAL-SETUP-016)', async ({ context }) => {

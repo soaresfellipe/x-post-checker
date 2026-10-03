@@ -205,17 +205,19 @@ function mediaSignal(hasMedia: boolean): SignalEntry {
 
 /**
  * The mutual/followed signal for reply drafts. Applied ONLY when `replyToFollowedByViewer` is
- * present in the snapshot (the DOM showed the follow badge) — absent means unknown, never guessed.
+ * present in the snapshot — the field means the VIEWER follows the reply target (the DOM showed
+ * the follow state) — absent means unknown, never guessed. The labels must state the direction
+ * exactly (VAL-DRAFT-019): the overlay renders them verbatim in the breakdown.
  */
 function replyMutualSignal(snapshot: DraftSnapshot): SignalEntry {
   if (!snapshot.isReply) return entry('replyMutual', 'not a reply', 0);
 
   const followed = snapshot.replyToFollowedByViewer;
   if (followed === true) {
-    return entry('replyMutual', 'reply to an account that follows the viewer (visible)', HEURISTIC_CONFIG.weights.replyMutualBoost);
+    return entry('replyMutual', 'reply to an account the viewer follows (visible)', HEURISTIC_CONFIG.weights.replyMutualBoost);
   }
   if (followed === false) {
-    return entry('replyMutual', 'reply target does not follow the viewer (visible)', 0);
+    return entry('replyMutual', 'reply to an account the viewer does not follow (visible)', 0);
   }
   return entry('replyMutual', 'reply - follow state not visible, boost not applied (never guessed)', 0);
 }

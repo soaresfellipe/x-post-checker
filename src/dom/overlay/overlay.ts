@@ -37,6 +37,8 @@ const STYLE = `
   .panel {
     box-sizing: border-box;
     width: min(340px, calc(100vw - 16px));
+    max-height: none;
+    overflow-y: auto;
     padding: 12px;
     border: 1px solid #cfd9de; border-radius: 12px;
     background: #ffffff; color: #0f1419;
@@ -298,6 +300,10 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
 
   // ---- placement ----
 
+  function panelElement(): HTMLElement | null {
+    return hostElement()?.shadowRoot?.querySelector<HTMLElement>('.panel') ?? null;
+  }
+
   function reposition(): void {
     const host = hostElement();
     if (!host || !composer) return;
@@ -306,6 +312,10 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       region instanceof Element
         ? region.getBoundingClientRect()
         : { top: 0, bottom: 0, left: 0, width: 0, height: 0 };
+    const panel = panelElement();
+    // Measure the panel's NATURAL height: measuring a stale cap would shrink the decision input
+    // and let the cap oscillate off on the next reposition (VAL-DRAFT-023).
+    panel?.style.removeProperty('max-height');
     const hostBox = host.getBoundingClientRect();
     const position = computeAnchorPosition({
       regionRect: { top: regionBox.top, bottom: regionBox.bottom, left: regionBox.left },
@@ -319,6 +329,10 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     host.style.position = 'absolute';
     host.style.top = `${position.top}px`;
     host.style.left = `${position.left}px`;
+    // The height cap (null = natural size): the panel scrolls internally while capped, so the
+    // overlay stays inside the viewport at short-window geometry.
+    if (position.maxHeight === null) panel?.style.removeProperty('max-height');
+    else panel?.style.setProperty('max-height', `${position.maxHeight}px`);
   }
 
   /** Coalesces mutation/resize-driven repositions into one rAF callback (idempotent placement). */
@@ -336,6 +350,33 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
   const onResize = (): void => scheduleReposition();
   win.addEventListener('resize', onResize);
 
+  /**
+   * Internal scrolling for a capped panel (VAL-DRAFT-023) without breaking the zero-interference
+   * rule: the host and panel stay pointer-events:none, so a wheel over the panel targets the PAGE
+   * underneath. This listener redirects a wheel over a SCROLLABLE capped panel into the panel
+   * itself and leaves every other wheel (and every click) with the page's default behavior.
+   */
+  const onWheel = (event: WheelEvent): void => {
+    const panel = panelElement();
+    if (!panel || panel.scrollHeight <= panel.clientHeight) return; // nothing to scroll (common case)
+    const box = panel.getBoundingClientRect();
+    const withinPanel =
+      event.clientX >= box.left && event.clientX <= box.right &&
+      event.clientY >= box.top && event.clientY <= box.bottom;
+    if (!withinPanel) return;
+    // Firefox emits line-mode deltas; scrollTop is px (the line height lives in the config).
+    const delta =
+      event.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? event.deltaY * OVERLAY_PLACEMENT.wheelLineHeight
+        : event.deltaY;
+    const atTop = panel.scrollTop <= 0;
+    const atBottom = panel.scrollTop + panel.clientHeight >= panel.scrollHeight;
+    if (delta < 0 ? atTop : atBottom) return; // at the edge: the page keeps the scroll
+    panel.scrollTop += delta;
+    event.preventDefault();
+  };
+  doc.addEventListener('wheel', onWheel, { passive: false });
+
   // ---- state updates ----
 
   function clearAnalysisState(): void {
@@ -343,6 +384,10 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     pending.clear();
     reply = null;
     transportFailure = null;
+  }
+
+  function pendingCount(hash: string): number {
+    return pending.get(hash) ?? 0;
   }
 
   function oldestPendingHash(): string | null {
@@ -399,11 +444,17 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       pending.set(hash, (pending.get(hash) ?? 0) + 1);
       render();
     },
-    onAnalysisResult(result: DraftAnalysisResult) {
+    onAnalysisResult(result: DraftAnalysisResult, dispatched?: DraftSnapshot) {
       if (result.kind !== 'analyzed') {
-        // Honest refusals settle the dispatch without any result to render; a moved minDraftLength
-        // gate still deserves a re-render from the current capture.
-        settleOldestPending();
+        // Honest refusals settle the dispatch they BELONG to when the caller carries its identity
+        // (VAL-DRAFT-018: never the oldest one — an unrelated in-flight dispatch must stay
+        // pending); the identity-less fallback keeps the pre-identity contract working.
+        if (dispatched) {
+          const dispatchedHash = draftIdentity(dispatched);
+          if (pendingCount(dispatchedHash) > 0) settlePending(dispatchedHash);
+        } else {
+          settleOldestPending();
+        }
         if (result.kind === 'below-min-length') render();
         return;
       }
@@ -416,17 +467,21 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
         render();
       }
     },
-    onAnalysisFailed() {
-      const oldest = oldestPendingHash();
-      settleOldestPending();
-      if (oldest !== null) {
-        transportFailure = { hash: oldest };
-        render();
-      }
+    onAnalysisFailed(snapshot: DraftSnapshot) {
+      // The transport failure carries the failing draft's identity — the same identity successes
+      // use — so ONLY that dispatch settles (VAL-DRAFT-018): an older in-flight analysis stays
+      // pending, and the failing draft's local score shows with an explicit transport error
+      // instead of spinning forever.
+      const hash = draftIdentity(snapshot);
+      if (pendingCount(hash) <= 0) return; // unknown or already-settled dispatch: nothing to settle
+      settlePending(hash);
+      transportFailure = { hash };
+      render();
     },
     destroy() {
       destroyed = true;
       win.removeEventListener('resize', onResize);
+      doc.removeEventListener('wheel', onWheel);
       unmountHost();
       clearAnalysisState();
     },
