@@ -19,7 +19,12 @@ export default defineBackground(() => {
   // identical draft later in the session is served from cache, not paid for again.
   const jevClient = createJevClient({ cache: createStorageVerdictCache(browser.storage.local) });
   const analyzer = createAnalyzerService({ store, jev: jevClient });
-  const handlers = createBackgroundHandlers({ store, analyzer });
+  const handlers = createBackgroundHandlers({
+    store,
+    analyzer,
+    // Content scripts cannot call runtime.openOptionsPage; their "Connect Jev" prompt routes here.
+    openOptionsPage: () => browser.runtime.openOptionsPage(),
+  });
 
   browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
     if (!isRequest(message)) return false;

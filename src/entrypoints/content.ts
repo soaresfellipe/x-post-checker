@@ -1,8 +1,10 @@
 import { onSettingsBroadcast, sendMessage } from '@/core/message-protocol/client';
+import { createRevisionGate } from '@/core/message-protocol/broadcast';
 import { createSettingsSync } from '@/core/message-protocol/settings-sync';
 import { createLocalSettingsStore, DEFAULT_SETTINGS, type Settings } from '@/core/settings-store';
 import { stampMarkerRevision } from '@/dom/marker';
 import { applyEnabled } from '@/dom/marker/lifecycle';
+import { createScoreOverlay } from '@/dom/overlay';
 import {
   createComposerWatcher,
   describeComposer,
@@ -29,6 +31,12 @@ export default defineContentScript({
     let dispatchCount = 0;
     let current: Settings = DEFAULT_SETTINGS;
 
+    // The overlay's key-presence lane: presence only (never the key value — the key must not
+    // reach the content script), ordered by the keyRevision token through the same strictly-newer
+    // gate pattern the popup and Options use for key facts.
+    let keyPresent = false;
+    const keyGate = createRevisionGate();
+
     function stamp(): void {
       const composer = watcher?.getActiveComposer() ?? null;
       stampWatcherDiagnostics(document, {
@@ -38,14 +46,34 @@ export default defineContentScript({
       });
     }
 
+    // The score overlay: its own Shadow-DOM host on document.body, driven by the watcher's
+    // captures and the analyze-draft replies. It follows the same enable lifecycle as the marker
+    // (mounted only while the master switch is on) and reads live settings + key presence so the
+    // panel reflects preference changes without a tab reload.
+    const overlay = createScoreOverlay({
+      getKeyPresence: () => keyPresent,
+      requestAnalysis: () => watcher?.requestAnalysis() ?? false,
+      openOptions: () => {
+        void sendMessage('open-options-page', {}).catch(() => undefined);
+      },
+    });
+
     const dispatchAnalysis: ComposerWatcherOptions['dispatchAnalysis'] = (dispatch) => {
       dispatchCount += 1;
       stamp();
-      // Fire-and-forget: the reply belongs to the analysis pipeline (overlay rendering); a
-      // missing or failing analyzer must never surface here or break the page.
-      void sendMessage('analyze-draft', { draft: dispatch.snapshot, trigger: dispatch.trigger }).catch(
-        () => undefined,
-      );
+      // The overlay's optimistic local half renders from the capture alone; the reply is the
+      // AUTHORITATIVE render (hybrid headline, verdict, failure notices), matched to the current
+      // draft by meta.draftHash so stale replies never repaint a newer draft.
+      overlay.onAnalysisDispatched(dispatch.snapshot);
+      void sendMessage('analyze-draft', { draft: dispatch.snapshot, trigger: dispatch.trigger })
+        .then((response) => {
+          if (!response.ok) {
+            overlay.onAnalysisFailed();
+            return;
+          }
+          overlay.onAnalysisResult(response.data);
+        })
+        .catch(() => overlay.onAnalysisFailed());
     };
 
     function startWatcher(): void {
@@ -55,7 +83,11 @@ export default defineContentScript({
         getAutoAnalyze: () => current.autoAnalyze,
         dispatchAnalysis,
       });
-      watcher.onComposerChange(() => stamp());
+      watcher.onDraft((event) => overlay.onDraftCaptured(event));
+      watcher.onComposerChange((event) => {
+        overlay.onComposerChange(event);
+        stamp();
+      });
       watcher.start();
       stamp();
     }
@@ -72,6 +104,7 @@ export default defineContentScript({
     // newer than what this tab already applied, whatever order the events arrive in.
     const sync = createSettingsSync((settings, revision) => {
       current = settings;
+      overlay.onSettings(settings, revision);
       if (settings.enabled) startWatcher();
       else stopWatcher();
       applyEnabled(settings.enabled, onMounted);
@@ -81,7 +114,11 @@ export default defineContentScript({
 
     const store = createLocalSettingsStore();
     onSettingsBroadcast((broadcast) => void sync.accept(broadcast));
-    store.subscribe((change) => void sync.accept(change));
+    store.subscribe((change) => {
+      // Key-presence facts ride the same storage events (presence only, gated on keyRevision).
+      if (keyGate.accept(change.keyRevision)) keyPresent = change.apiKeyPresent;
+      void sync.accept(change);
+    });
 
     // Initial state for tabs opened before any change; skipped when a change already applied
     // (its state is at least as fresh as this read's). The read returns the FULL settings, so the
@@ -89,9 +126,16 @@ export default defineContentScript({
     void store.getSettings().then((settings) => {
       if (sync.hasAppliedAny()) return;
       current = settings;
+      overlay.onSettings(settings);
       if (settings.enabled) startWatcher();
       else stopWatcher();
       applyEnabled(settings.enabled, onMounted);
+    });
+
+    // Initial key-presence fact (presence only). The gate drops it when a storage event already
+    // delivered a presence fact at this or a newer keyRevision.
+    void store.getApiKeyWithRevision().then(({ apiKeyPresent, keyRevision }) => {
+      if (keyGate.accept(keyRevision)) keyPresent = apiKeyPresent;
     });
   },
 });

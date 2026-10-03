@@ -20,6 +20,12 @@ export interface BackgroundHandlerDeps {
   runConnectionTest?: ConnectionTester;
   /** The analysis pipeline (heuristic engine + Jev client); injectable for unit tests. */
   analyzer: AnalyzerService;
+  /**
+   * Opens the Options page (`browser.runtime.openOptionsPage`); injectable for unit tests. The
+   * background always wires it; when absent the handler answers with an explicit protocol error
+   * instead of pretending the page opened.
+   */
+  openOptionsPage?: () => Promise<void>;
 }
 
 const TRIGGERS: readonly AnalysisTrigger[] = ['auto', 'manual'];
@@ -57,6 +63,13 @@ export function createBackgroundHandlers(deps: BackgroundHandlerDeps): Handlers 
       if (!isDraftSnapshot(draft)) throw new Error('Invalid draft snapshot.');
       if (!TRIGGERS.includes(trigger)) throw new Error('Invalid analysis trigger.');
       return analyzer.analyzeDraft(draft, trigger);
+    },
+    // Content scripts cannot call runtime.openOptionsPage (extension pages only), so the overlay's
+    // "Connect Jev" prompt asks the background to open it.
+    'open-options-page': async () => {
+      if (!deps.openOptionsPage) throw new Error('Options page opening is not available.');
+      await deps.openOptionsPage();
+      return { opened: true };
     },
   };
 }

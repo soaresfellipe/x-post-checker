@@ -33,6 +33,7 @@ const handlers: Handlers = {
   'clear-api-key': () => ({ apiKeyPresent: false, keyRevision: 0 }),
   'analyze-draft': ({ draft }) =>
     typeof draft.text === 'string' ? analysisResult : { kind: 'below-min-length', minDraftLength: 10 },
+  'open-options-page': () => ({ opened: true }),
 };
 
 describe('message protocol', () => {
@@ -61,6 +62,10 @@ describe('message protocol', () => {
     });
   });
 
+  it('recognizes the open-options-page request content scripts send', () => {
+    expect(isRequest(createRequest('open-options-page', {}))).toBe(true);
+  });
+
   it('accepts test-connection requests and echoes the attempt id', async () => {
     const request = createRequest('test-connection', { attemptId: 'a1' });
     expect(isRequest(request)).toBe(true);
@@ -85,6 +90,9 @@ describe('message protocol', () => {
       'set-api-key': handlers['set-api-key'],
       'clear-api-key': handlers['clear-api-key'],
       'analyze-draft': () => {
+        throw new Error('boom');
+      },
+      'open-options-page': () => {
         throw new Error('boom');
       },
     };

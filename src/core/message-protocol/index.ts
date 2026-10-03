@@ -61,6 +61,14 @@ export interface MessageMap {
     request: { draft: DraftSnapshot; trigger: AnalysisTrigger };
     response: DraftAnalysisResult;
   };
+  /**
+   * Opens the extension's Options page — content scripts cannot call `runtime.openOptionsPage`
+   * themselves, so the overlay's "Connect Jev" prompt routes through the background.
+   */
+  'open-options-page': {
+    request: Record<string, never>;
+    response: { opened: true };
+  };
 }
 
 export type MessageType = keyof MessageMap;
@@ -86,6 +94,7 @@ const MESSAGE_TYPES: readonly string[] = [
   'set-api-key',
   'clear-api-key',
   'analyze-draft',
+  'open-options-page',
 ] satisfies MessageType[];
 
 export function createRequest<T extends MessageType>(type: T, payload: MessageMap[T]['request']): Request<T> {

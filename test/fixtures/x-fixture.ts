@@ -108,6 +108,7 @@ export function renderFixtureHtml(now: number = Date.now()): string {
         </div>
         <label data-testid="tweetTextarea_0_label">O que está acontecendo?</label>
       </div>
+      <button type="button" data-testid="addMedia" aria-label="Adicionar midia"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M0 0h24v24H0z" fill="none"/></svg></button>
       <button type="button" data-testid="tweetButtonInline" aria-disabled="true">Postar</button>
     </div>
     <div aria-label="Timeline: Sua Página Inicial">
@@ -146,6 +147,7 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
       '<div data-testid="tweetTextarea_1RichTextInputContainer">' +
       '<div data-testid="tweetTextarea_1" role="textbox" contenteditable="true" aria-label="Texto do seu post" class="public-DraftEditor-content"></div>' +
       '</div>' +
+      '<button type="button" data-testid="addMedia" aria-label="Adicionar midia"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M0 0h24v24H0z" fill="none"/></svg></button>' +
       '<button type="button" data-testid="tweetButton" aria-disabled="false">Responder</button>' +
       '</div>' +
       '</div>';
@@ -155,9 +157,31 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
     primary.innerHTML = homeHtml;
   }
 
+  function makeAttachments() {
+    var wrap = document.createElement('div');
+    wrap.setAttribute('data-testid', 'attachments');
+    var photo = document.createElement('div');
+    photo.setAttribute('data-testid', 'tweetPhoto');
+    var img = document.createElement('img');
+    img.setAttribute('alt', 'Imagem anexada');
+    img.setAttribute('src', 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==');
+    img.setAttribute('width', '64');
+    img.setAttribute('height', '64');
+    photo.appendChild(img);
+    wrap.appendChild(photo);
+    return wrap;
+  }
+
   document.addEventListener('click', function (event) {
     var target = event.target instanceof Element ? event.target : null;
     if (!target) return;
+    if (target.closest('[data-testid="addMedia"]')) {
+      var region = target.closest('[data-testid="toolBar"], [data-testid="replyComposerContainer"]');
+      if (region && !region.querySelector('[data-testid="attachments"]')) {
+        region.appendChild(makeAttachments());
+      }
+      return;
+    }
     var statusLink = target.closest('a[href*="/status/"]');
     if (statusLink) {
       event.preventDefault();
