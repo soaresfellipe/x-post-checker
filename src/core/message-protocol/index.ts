@@ -3,7 +3,7 @@
  * background. Add a new message by extending `MessageMap`; handlers and clients stay type-checked.
  */
 import type { ConnectionTestResult } from '@/core/jev-client/connection-test';
-import type { Settings } from '@/core/settings-store/types';
+import type { Settings, SettingsWriteResult } from '@/core/settings-store/types';
 
 export const PROTOCOL_VERSION = 1;
 
@@ -26,8 +26,12 @@ export interface MessageMap {
   'set-settings': {
     /** Partial update; values are sanitized and clamped by the store before persisting. */
     request: { update: Partial<Settings> };
-    /** The persisted settings after the write, for immediate feedback in the requesting page. */
-    response: { settings: Settings };
+    /**
+     * The persisted settings after the write, for immediate feedback in the requesting page, plus
+     * the revision of the write: a page applies the snapshot only when strictly newer than the
+     * last revision it applied, so a delayed older reply never repaints a newer state.
+     */
+    response: SettingsWriteResult;
   };
 }
 

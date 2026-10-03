@@ -68,6 +68,16 @@ export interface SettingsChange {
 
 export type SettingsListener = (change: SettingsChange) => void;
 
+/**
+ * Result of a settings write: the persisted settings plus the revision the write stamped. Replies
+ * carry the revision so requesting pages can order the snapshot against storage-driven updates and
+ * never repaint a state older than what they already applied.
+ */
+export interface SettingsWriteResult {
+  settings: Settings;
+  settingsRevision: number;
+}
+
 export interface StorageChange {
   oldValue?: unknown;
   newValue?: unknown;

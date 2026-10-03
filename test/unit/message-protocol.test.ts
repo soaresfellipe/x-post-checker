@@ -11,7 +11,10 @@ import { DEFAULT_SETTINGS } from '../../src/core/settings-store';
 const handlers: Handlers = {
   ping: () => ({ pong: true, protocolVersion: PROTOCOL_VERSION }),
   'test-connection': ({ attemptId }) => ({ attemptId, result: { status: 'no-key' } }),
-  'set-settings': ({ update }) => ({ settings: { ...DEFAULT_SETTINGS, ...update } }),
+  'set-settings': ({ update }) => ({
+    settings: { ...DEFAULT_SETTINGS, ...update },
+    settingsRevision: 1,
+  }),
 };
 
 describe('message protocol', () => {

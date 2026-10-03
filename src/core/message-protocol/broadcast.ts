@@ -40,18 +40,34 @@ export function isSettingsBroadcast(value: unknown): value is SettingsBroadcast 
 }
 
 /**
+ * The strictly-newer revision gate shared by every settings receiver: tracks the highest revision
+ * applied so far and accepts only strictly newer ones, whatever order the transport delivers in.
+ * The broadcast receiver gates tab envelopes with it, and the popup/Options pages gate every
+ * settings snapshot they are offered (initial read, storage subscriptions, save replies).
+ */
+export function createRevisionGate() {
+  let lastAppliedRevision: number | undefined;
+  return {
+    /** True when `revision` is strictly newer than everything applied so far (and records it). */
+    accept(revision: number): boolean {
+      if (lastAppliedRevision !== undefined && revision <= lastAppliedRevision) return false;
+      lastAppliedRevision = revision;
+      return true;
+    },
+  };
+}
+
+/**
  * Receiver-side guard against out-of-order delivery: a delayed "off" broadcast (from a rapid off/on
  * toggle) must never overwrite the newer "on" a tab already applied. Tracks the highest applied
  * revision and accepts only strictly newer envelopes, whatever order the transport delivers in.
  */
 export function createSettingsBroadcastReceiver() {
-  let lastAppliedRevision: number | undefined;
+  const gate = createRevisionGate();
   return {
     /** True when `broadcast` is newer than everything applied so far (and records it). */
     accept(broadcast: SettingsBroadcast): boolean {
-      if (lastAppliedRevision !== undefined && broadcast.revision <= lastAppliedRevision) return false;
-      lastAppliedRevision = broadcast.revision;
-      return true;
+      return gate.accept(broadcast.revision);
     },
   };
 }

@@ -148,9 +148,39 @@ describe('settings store', () => {
       store.setSettings({ enabled: true }),
     ]);
     // Each write reads what the previous one persisted, so the returned snapshots chain up.
-    expect([first, second, third].map((settings) => settings.enabled)).toEqual([false, false, true]);
+    expect([first, second, third].map((write) => write.settings.enabled)).toEqual([false, false, true]);
+    expect([first, second, third].map((write) => write.settingsRevision)).toEqual([1, 2, 3]);
     expect(await store.getSettings()).toEqual({ ...DEFAULT_SETTINGS, enabled: true, minDraftLength: 40 });
     expect(data[SETTINGS_REVISION_STORAGE_KEY]).toBe(3);
+  });
+
+  // The set-settings reply carries the write's revision so pages can gate repaints on strictly
+  // newer revisions (a delayed older reply must never overwrite a newer applied state).
+  it('returns the persisted settings and the stamped revision from each write', async () => {
+    const { backend } = createMemoryBackend();
+    const store = createSettingsStore(backend);
+
+    const first = await store.setSettings({ enabled: false });
+    expect(first).toEqual({ settings: { ...DEFAULT_SETTINGS, enabled: false }, settingsRevision: 1 });
+    const second = await store.setSettings({ minDraftLength: 40 });
+    expect(second).toEqual({
+      settings: { ...DEFAULT_SETTINGS, enabled: false, minDraftLength: 40 },
+      settingsRevision: 2,
+    });
+  });
+
+  it('reads the settings and their revision in one snapshot via getSettingsWithRevision', async () => {
+    const { backend } = createMemoryBackend();
+    const store = createSettingsStore(backend);
+
+    // Empty storage: defaults with revision 0 (no order information).
+    expect(await store.getSettingsWithRevision()).toEqual({ settings: DEFAULT_SETTINGS, revision: 0 });
+
+    await store.setSettings({ enabled: false });
+    expect(await store.getSettingsWithRevision()).toEqual({
+      settings: { ...DEFAULT_SETTINGS, enabled: false },
+      revision: 1,
+    });
   });
 
   it('surfaces the revision of the triggering write to subscribers', async () => {

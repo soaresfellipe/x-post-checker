@@ -13,14 +13,15 @@ import { createMemoryBackend } from '../helpers/memory-backend';
 /**
  * Mimics an extension page context (popup / Options): its own store instance for reads over the
  * shared storage backend, plus a writer that travels through the real protocol layer
- * (createRequest -> handleRequest) to the background, never touching storage directly.
+ * (createRequest -> handleRequest) to the background, never touching storage directly. Resolves
+ * with the full write reply (settings + the write's revision), as the pages now receive it.
  */
 function makePageContext(handlers: Handlers) {
   return {
-    async saveSettings(update: Partial<Settings>): Promise<Settings> {
+    async saveSettings(update: Partial<Settings>) {
       const response = await handleRequest(createRequest('set-settings', { update }), handlers);
       if (!response.ok) throw new Error(response.error);
-      return response.data.settings;
+      return response.data;
     },
   };
 }
@@ -41,10 +42,12 @@ describe('background single-writer for settings', () => {
     const writeA = contextA.saveSettings({ enabled: false });
     const writeB = contextB.saveSettings({ minDraftLength: 40 });
     release();
-    await Promise.all([writeA, writeB]);
+    const [replyA, replyB] = await Promise.all([writeA, writeB]);
 
-    // Exactly one revision per write: no two writes ever shared one.
+    // Exactly one revision per write: no two writes ever shared one. Each reply carries its
+    // write's revision so the requesting page can order it against storage-driven updates.
     expect(revisions).toEqual([1, 2]);
+    expect([replyA.settingsRevision, replyB.settingsRevision]).toEqual([1, 2]);
     expect(memory.data[SETTINGS_REVISION_STORAGE_KEY]).toBe(2);
   });
 
@@ -59,11 +62,11 @@ describe('background single-writer for settings', () => {
     const writeA = contextA.saveSettings({ enabled: false });
     const writeB = contextB.saveSettings({ minDraftLength: 40 });
     release();
-    const [settingsA, settingsB] = await Promise.all([writeA, writeB]);
+    const [replyA, replyB] = await Promise.all([writeA, writeB]);
 
     // Writer B observed writer A's persisted state instead of the stale pre-A snapshot.
-    expect(settingsA).toEqual({ ...DEFAULT_SETTINGS, enabled: false });
-    expect(settingsB).toEqual({ ...DEFAULT_SETTINGS, enabled: false, minDraftLength: 40 });
+    expect(replyA.settings).toEqual({ ...DEFAULT_SETTINGS, enabled: false });
+    expect(replyB.settings).toEqual({ ...DEFAULT_SETTINGS, enabled: false, minDraftLength: 40 });
     expect(await store.getSettings()).toEqual({ ...DEFAULT_SETTINGS, enabled: false, minDraftLength: 40 });
   });
 

@@ -1,11 +1,17 @@
 import type { LastAnalysis, PageSettingsStore, Settings } from '@/core/settings-store';
+import type { SettingsWriteResult } from '@/core/settings-store/types';
+import { createRevisionGate } from '@/core/message-protocol/broadcast';
 import { POPUP_TEMPLATE } from './template';
 
 export interface PopupPageDeps {
   /** Read-only view of storage; the settings WRITE path is `saveSettings` (background single writer). */
   store: PageSettingsStore;
-  /** Persists a settings update through the background and resolves with the stored settings. */
-  saveSettings(update: Partial<Settings>): Promise<Settings>;
+  /**
+   * Persists a settings update through the background and resolves with the persisted settings and
+   * the revision of the write, so the snapshot is applied only when strictly newer than what this
+   * page already applied (a delayed older reply must never repaint a newer state).
+   */
+  saveSettings(update: Partial<Settings>): Promise<SettingsWriteResult>;
   /** Opens the extension Options page in a browser tab. */
   openOptions(): Promise<void>;
   now?: () => number;
@@ -97,11 +103,24 @@ export async function mountPopupPage(root: HTMLElement, deps: PopupPageDeps): Pr
     lastAnalysis.textContent = describeAnalysis(last, now());
   }
 
+  // Strictly-newer revision gate over the settings snapshots this page is offered: reads,
+  // storage changes made elsewhere, and its own save replies. A delayed older snapshot (e.g. a
+  // save reply that resolves after a newer write from another context landed) never repaints the
+  // master switch; the page re-reads the store instead, converging on the newest state.
+  const revisionGate = createRevisionGate();
+
   let latestRefresh = 0;
   async function refresh() {
     const ticket = ++latestRefresh;
-    const [settings, hasKey, last] = await Promise.all([store.getSettings(), store.hasApiKey(), store.getLastAnalysis()]);
+    const [{ settings, revision }, hasKey, last] = await Promise.all([
+      store.getSettingsWithRevision(),
+      store.hasApiKey(),
+      store.getLastAnalysis(),
+    ]);
     if (ticket !== latestRefresh) return;
+    // The read is fresh (never older than the store), so it renders unconditionally; its revision
+    // still feeds the gate that orders save replies against what this page has applied.
+    revisionGate.accept(revision);
     renderMaster(settings.enabled);
     renderKey(hasKey);
     renderAnalysis(last);
@@ -113,14 +132,28 @@ export async function mountPopupPage(root: HTMLElement, deps: PopupPageDeps): Pr
 
   await refresh();
 
+  // Save feedback stays tied to its own request attempt (same pattern as the connection test):
+  // when replies race, only the latest attempt owns the switch and the error line; superseded
+  // attempts are dropped. The switch state itself is revision-gated against the store.
+  let latestToggle = 0;
   toggle.addEventListener('change', async () => {
+    const attempt = ++latestToggle;
     const requested = toggle.checked;
     toggleError.textContent = '';
     try {
-      renderMaster((await deps.saveSettings({ enabled: requested })).enabled);
+      const reply = await deps.saveSettings({ enabled: requested });
+      if (attempt !== latestToggle) return;
+      if (revisionGate.accept(reply.settingsRevision)) {
+        renderMaster(reply.settings.enabled);
+      } else {
+        // A newer state was already applied (initial read, subscription, or a newer reply):
+        // converge on the store instead of repainting this reply's older snapshot.
+        await refresh();
+      }
     } catch {
+      if (attempt !== latestToggle) return;
       toggleError.textContent = COPY.toggleFailed;
-      renderMaster((await store.getSettings()).enabled);
+      await refresh();
     }
   });
 

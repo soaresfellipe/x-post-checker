@@ -9,6 +9,7 @@ import {
   type Settings,
   type SettingsBackend,
   type SettingsListener,
+  type SettingsWriteResult,
   type StorageChange,
 } from './types';
 
@@ -49,8 +50,14 @@ function sanitize(raw: Record<string, unknown>): Settings {
 }
 
 export function createSettingsStore(backend: SettingsBackend) {
+  /** One storage read returns the settings and their revision together (a consistent snapshot). */
+  async function getSettingsWithRevision(): Promise<{ settings: Settings; revision: number }> {
+    const stored = await backend.area.get([...SETTINGS_KEYS, SETTINGS_REVISION_STORAGE_KEY]);
+    return { settings: sanitize(stored), revision: toRevision(stored[SETTINGS_REVISION_STORAGE_KEY]) };
+  }
+
   async function getSettings(): Promise<Settings> {
-    return sanitize(await backend.area.get([...SETTINGS_KEYS]));
+    return (await getSettingsWithRevision()).settings;
   }
 
   async function getApiKey(): Promise<string | undefined> {
@@ -60,21 +67,23 @@ export function createSettingsStore(backend: SettingsBackend) {
 
   return {
     getSettings,
+    getSettingsWithRevision,
     getApiKey,
 
     async hasApiKey(): Promise<boolean> {
       return (await getApiKey()) !== undefined;
     },
 
-    setSettings(update: Partial<Settings>): Promise<Settings> {
+    setSettings(update: Partial<Settings>): Promise<SettingsWriteResult> {
       const write = settingsWrites.then(async () => {
         const stored = await backend.area.get([...SETTINGS_KEYS, SETTINGS_REVISION_STORAGE_KEY]);
         const next = sanitize({ ...stored, ...update });
+        const settingsRevision = toRevision(stored[SETTINGS_REVISION_STORAGE_KEY]) + 1;
         const written = Object.fromEntries(
           SETTINGS_KEYS.filter((key) => key in update).map((key) => [key, next[key]]),
         );
-        await backend.area.set({ ...written, [SETTINGS_REVISION_STORAGE_KEY]: toRevision(stored[SETTINGS_REVISION_STORAGE_KEY]) + 1 });
-        return next;
+        await backend.area.set({ ...written, [SETTINGS_REVISION_STORAGE_KEY]: settingsRevision });
+        return { settings: next, settingsRevision };
       });
       // A failed write must not poison later ones; its own caller still sees the rejection.
       settingsWrites = write.catch(() => undefined);

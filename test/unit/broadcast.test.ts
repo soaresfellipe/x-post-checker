@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_VERSION, isRequest } from '../../src/core/message-protocol';
 import {
   broadcastToTabs,
+  createRevisionGate,
   createSettingsBroadcast,
   createSettingsBroadcastReceiver,
   isSettingsBroadcast,
@@ -44,6 +45,27 @@ describe('settings broadcast', () => {
     expect(await broadcastToTabs(tabs, message)).toBe(2);
     expect(sendMessage.mock.calls.map(([tabId]) => tabId)).toEqual([1, 2, 3]);
     expect(sendMessage).toHaveBeenCalledWith(1, message);
+  });
+});
+
+describe('revision gate (shared strictly-newer guard)', () => {
+  it('accepts the first revision and then only strictly newer ones, in any order', () => {
+    const gate = createRevisionGate();
+    expect(gate.accept(5)).toBe(true);
+    expect(gate.accept(5)).toBe(false);
+    expect(gate.accept(4)).toBe(false);
+    expect(gate.accept(6)).toBe(true);
+    expect(gate.accept(1)).toBe(false);
+  });
+
+  // Pages feed the gate from every snapshot source (initial read, storage subscriptions, save
+  // replies); a delayed older source must never repaint over a newer applied state.
+  it('gates a delayed save reply after a newer storage change was recorded', () => {
+    const gate = createRevisionGate();
+    expect(gate.accept(1)).toBe(true); // initial read
+    expect(gate.accept(3)).toBe(true); // storage change from another context
+    expect(gate.accept(2)).toBe(false); // the page's own save reply, older than what it applied
+    expect(gate.accept(4)).toBe(true);
   });
 });
 
@@ -95,6 +117,8 @@ describe('settings broadcast receiver (out-of-order delivery)', () => {
 
     await store.setSettings({ enabled: false });
     await store.setSettings({ enabled: true });
+    // Subscription deliveries are asynchronous (each re-reads storage); wait for both to land.
+    await vi.waitFor(() => expect(events).toHaveLength(2));
 
     expect(events.map((event) => [event.revision, event.enabled])).toEqual([[1, false], [2, true]]);
     expect(memory.data[SETTINGS_REVISION_STORAGE_KEY]).toBe(2);

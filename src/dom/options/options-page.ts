@@ -1,12 +1,23 @@
 import type { ConnectionTestResult } from '@/core/jev-client';
-import { NUMERIC_LIMITS, type PageSettingsStore, type Settings } from '@/core/settings-store';
+import { createRevisionGate } from '@/core/message-protocol/broadcast';
+import {
+  NUMERIC_LIMITS,
+  SETTINGS_KEYS,
+  type PageSettingsStore,
+  type Settings,
+  type SettingsWriteResult,
+} from '@/core/settings-store';
 import { OPTIONS_TEMPLATE } from './template';
 
 export interface OptionsPageDeps {
   /** Read-only view of storage; the settings WRITE path is `saveSettings` (background single writer). */
   store: PageSettingsStore;
-  /** Persists a settings update through the background and resolves with the stored settings. */
-  saveSettings(update: Partial<Settings>): Promise<Settings>;
+  /**
+   * Persists a settings update through the background and resolves with the persisted settings and
+   * the revision of the write, so the snapshot is applied only when strictly newer than what this
+   * page already applied (a delayed older reply must never repaint a newer state).
+   */
+  saveSettings(update: Partial<Settings>): Promise<SettingsWriteResult>;
   /** Runs the connection test in the background; resolves with the result tagged by `attemptId`. */
   testConnection(attemptId: string, apiKey: string | undefined): Promise<{ attemptId: string; result: ConnectionTestResult }>;
 }
@@ -91,8 +102,55 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
     toggleButton.setAttribute('aria-label', visible ? 'Hide API key' : 'Show API key');
   }
 
-  renderSettings(await store.getSettings());
-  renderKeyPresence(await store.hasApiKey());
+  // Strictly-newer revision gate over every settings snapshot this page is offered: the initial
+  // read, storage changes made elsewhere, and its own save replies. A delayed older snapshot
+  // (e.g. a save reply that resolves after a newer write from another context landed) is never
+  // rendered; the page re-reads the store instead, converging on the newest state.
+  const revisionGate = createRevisionGate();
+
+  /**
+   * Initial render from the store, gated: a change whose storage event already applied during the
+   * read must not be regressed by this older snapshot.
+   */
+  async function renderInitialFromStore(): Promise<void> {
+    const [{ settings, revision }, hasKey] = await Promise.all([store.getSettingsWithRevision(), store.hasApiKey()]);
+    renderKeyPresence(hasKey);
+    if (revisionGate.accept(revision)) renderSettings(settings);
+  }
+
+  /**
+   * Resync from the store after a failed save or a superseded reply: renders the store's current
+   * state unconditionally — this is a fresh read, and any write that lands afterwards delivers its
+   * own storage event, so the page always converges on the store.
+   */
+  async function resyncFromStore(): Promise<void> {
+    const [{ settings, revision }, hasKey] = await Promise.all([store.getSettingsWithRevision(), store.hasApiKey()]);
+    renderKeyPresence(hasKey);
+    revisionGate.accept(revision);
+    renderSettings(settings);
+  }
+
+  /** Applies a save-reply snapshot only when strictly newer than everything applied so far. */
+  function applySaveReply(reply: SettingsWriteResult): void {
+    if (revisionGate.accept(reply.settingsRevision)) {
+      renderSettings(reply.settings);
+    } else {
+      // A newer state was already applied (initial read, subscription, or a newer reply):
+      // converge on the store instead of repainting this reply's older snapshot.
+      void resyncFromStore();
+    }
+  }
+
+  // Subscribed before the initial read so a change landing during that read is applied by the
+  // event and the (older) read snapshot is then rejected by the revision gate, never repainting
+  // stale settings over a newer state.
+  const unsubscribe = store.subscribe((change) => {
+    const touchesSettings = change.changedKeys.some((key) => (SETTINGS_KEYS as readonly string[]).includes(key));
+    if (touchesSettings && !revisionGate.accept(change.revision)) return; // superseded settings state
+    renderKeyPresence(change.apiKeyPresent);
+    if (touchesSettings) renderSettings(change.settings);
+  });
+  await renderInitialFromStore();
 
   toggleButton.addEventListener('click', () => setKeyVisible(keyInput.type === 'password'));
 
@@ -150,12 +208,20 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
     setMessage(testResult, message, state);
   });
 
+  // Save feedback stays tied to its own request attempt (same pattern as the connection test):
+  // when replies race, only the latest attempt owns the status line; superseded attempts are
+  // dropped without touching the controls. The settings render itself is revision-gated.
+  let latestPrefsSave = 0;
   async function savePrefs(update: Partial<Settings>): Promise<void> {
+    const attempt = ++latestPrefsSave;
     try {
-      renderSettings(await deps.saveSettings(update));
+      const reply = await deps.saveSettings(update);
+      if (attempt !== latestPrefsSave) return;
+      applySaveReply(reply);
       setMessage(prefsStatus, COPY.prefsSaved, 'success');
     } catch {
-      renderSettings(await store.getSettings());
+      if (attempt !== latestPrefsSave) return;
+      await resyncFromStore();
       setMessage(prefsStatus, COPY.prefsFailed, 'error');
     }
   }
@@ -169,19 +235,13 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
       const value = Number(raw);
       const { min, max } = NUMERIC_LIMITS[key];
       if (raw === '' || !Number.isInteger(value) || value < min || value > max) {
-        renderSettings(await store.getSettings());
+        await resyncFromStore();
         setMessage(prefsStatus, COPY.prefsInvalid(key), 'error');
         return;
       }
       await savePrefs({ [key]: value });
     });
   }
-
-  // Keeps this page in step with changes made elsewhere (popup toggle, another Options tab).
-  const unsubscribe = store.subscribe(({ settings, apiKeyPresent }) => {
-    renderSettings(settings);
-    renderKeyPresence(apiKeyPresent);
-  });
 
   return () => {
     unsubscribe();

@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runConnectionTest, type ConnectionTestResult } from '@/core/jev-client';
-import { API_KEY_STORAGE_KEY, DEFAULT_SETTINGS, createSettingsStore } from '@/core/settings-store';
+import {
+  API_KEY_STORAGE_KEY,
+  DEFAULT_SETTINGS,
+  createSettingsStore,
+  type Settings,
+  type SettingsWriteResult,
+} from '@/core/settings-store';
 import { COPY, mountOptionsPage, type OptionsPageDeps } from '@/dom/options';
 import { createMemoryBackend } from '../helpers/memory-backend';
 
@@ -40,6 +46,12 @@ function type(el: HTMLInputElement, value: string) {
   el.value = value;
   el.dispatchEvent(new Event('input', { bubbles: true }));
 }
+
+/** Unused by the tests that pass it; satisfies the deps contract for direct mounts. */
+const stubTestConnection: OptionsPageDeps['testConnection'] = async (attemptId) => ({
+  attemptId,
+  result: { status: 'no-key' },
+});
 
 describe('options page', () => {
   afterEach(() => {
@@ -299,5 +311,145 @@ describe('options page', () => {
     const { store } = await setup();
     await store.setSettings({ enabled: false });
     await vi.waitFor(() => expect(q<HTMLInputElement>('pref-enabled').checked).toBe(false));
+  });
+
+  // Regression (scrutiny round 3): a save reply that resolves AFTER a newer storage change must
+  // not repaint its older snapshot. The write itself persists immediately (the background's single
+  // writer); only the reply's delivery is delayed, like a slow message round-trip.
+  it('ignores a delayed save reply older than a storage change made elsewhere', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend); // the page's read/subscribe view
+    const writer = createSettingsStore(memory.backend); // stands in for the background's writer
+    let releaseReply = () => {};
+    const replyGate = new Promise<void>((resolve) => (releaseReply = resolve));
+    const saveSettings = vi.fn(async (update: Partial<Settings>): Promise<SettingsWriteResult> => {
+      const write = await writer.setSettings(update); // persists now, revision stamped
+      await replyGate; // the reply's transport delay
+      return write;
+    });
+    document.body.innerHTML = '<div id="app"></div>';
+    teardowns.push(await mountOptionsPage(document.getElementById('app')!, { store, saveSettings, testConnection: stubTestConnection }));
+
+    // The user unchecks the master preference; the write persists but the reply is still in flight.
+    const box = q<HTMLInputElement>('pref-enabled');
+    box.checked = false;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush();
+    expect((await store.getSettings()).enabled).toBe(false);
+    expect(box.checked).toBe(false);
+
+    // A newer write from another context lands; the page follows it (revision 2 beats 1).
+    await writer.setSettings({ enabled: true, minDraftLength: 40 });
+    await flush();
+    expect(box.checked).toBe(true);
+    expect(q<HTMLInputElement>('pref-minDraftLength').value).toBe('40');
+
+    // The stale reply (revision 1, enabled: false) finally resolves: no repaint of the old state,
+    // while the attempt's own success feedback still shows.
+    releaseReply();
+    await flush();
+    expect(box.checked).toBe(true);
+    expect(q<HTMLInputElement>('pref-minDraftLength').value).toBe('40');
+    expect(q('prefs-status').textContent).toBe(COPY.prefsSaved);
+    expect(q('prefs-status').dataset.state).toBe('success');
+  });
+
+  it('keeps the latest save attempt in charge when a superseded attempt then fails', async () => {
+    const resolvers: Array<(reply: SettingsWriteResult) => void> = [];
+    const rejecters: Array<(error: Error) => void> = [];
+    const saveSettings = vi.fn(
+      () =>
+        new Promise<SettingsWriteResult>((resolve, reject) => {
+          resolvers.push(resolve);
+          rejecters.push(reject);
+        }),
+    );
+    document.body.innerHTML = '<div id="app"></div>';
+    teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
+      store: createSettingsStore(createMemoryBackend().backend),
+      saveSettings,
+      testConnection: stubTestConnection,
+    }));
+
+    q<HTMLInputElement>('pref-enabled').click();
+    await flush();
+    q<HTMLInputElement>('pref-autoAnalyze').click();
+    await flush();
+
+    // The newer attempt resolves first and owns the status line; the superseded attempt then
+    // FAILS, which must not overwrite the newer attempt's success with an error.
+    resolvers[1]?.({ settings: { ...DEFAULT_SETTINGS, autoAnalyze: false }, settingsRevision: 2 });
+    await flush();
+    expect(q('prefs-status').textContent).toBe(COPY.prefsSaved);
+    expect(q('prefs-status').dataset.state).toBe('success');
+    rejecters[0]?.(new Error('write failed'));
+    await flush();
+    expect(q('prefs-status').textContent).toBe(COPY.prefsSaved);
+    expect(q('prefs-status').dataset.state).toBe('success');
+    expect(q<HTMLInputElement>('pref-autoAnalyze').checked).toBe(false);
+  });
+
+  it('keeps the latest save attempt in charge when a superseded attempt then succeeds', async () => {
+    const resolvers: Array<(reply: SettingsWriteResult) => void> = [];
+    const saveSettings = vi.fn(
+      () => new Promise<SettingsWriteResult>((resolve) => void resolvers.push(resolve)),
+    );
+    document.body.innerHTML = '<div id="app"></div>';
+    teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
+      store: createSettingsStore(createMemoryBackend().backend),
+      saveSettings,
+      testConnection: stubTestConnection,
+    }));
+
+    q<HTMLInputElement>('pref-enabled').click();
+    await flush();
+    q<HTMLInputElement>('pref-autoAnalyze').click();
+    await flush();
+
+    // The newer attempt (revision 2) resolves first; the older reply (revision 1) arrives later
+    // and must neither repaint the controls nor the status line.
+    resolvers[1]?.({ settings: { ...DEFAULT_SETTINGS, autoAnalyze: false }, settingsRevision: 2 });
+    await flush();
+    resolvers[0]?.({ settings: { ...DEFAULT_SETTINGS, enabled: false }, settingsRevision: 1 });
+    await flush();
+    expect(q('prefs-status').textContent).toBe(COPY.prefsSaved);
+    expect(q<HTMLInputElement>('pref-autoAnalyze').checked).toBe(false);
+    expect(q<HTMLInputElement>('pref-enabled').checked).toBe(true);
+  });
+
+  it('shows the latest attempt failure even when an older attempt succeeded first', async () => {
+    const resolvers: Array<(reply: SettingsWriteResult) => void> = [];
+    const rejecters: Array<(error: Error) => void> = [];
+    const saveSettings = vi.fn(
+      () =>
+        new Promise<SettingsWriteResult>((resolve, reject) => {
+          resolvers.push(resolve);
+          rejecters.push(reject);
+        }),
+    );
+    const memory = createMemoryBackend();
+    document.body.innerHTML = '<div id="app"></div>';
+    teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
+      store: createSettingsStore(memory.backend),
+      saveSettings,
+      testConnection: stubTestConnection,
+    }));
+
+    q<HTMLInputElement>('pref-enabled').click();
+    await flush();
+    // The first save succeeds while it is still the latest attempt.
+    resolvers[0]?.({ settings: { ...DEFAULT_SETTINGS, enabled: false }, settingsRevision: 1 });
+    await flush();
+    expect(q('prefs-status').textContent).toBe(COPY.prefsSaved);
+
+    // The next (latest) attempt then fails: its own error must show and the controls must resync
+    // to the store's values, replacing the older attempt's success.
+    q<HTMLInputElement>('pref-autoAnalyze').click();
+    await flush();
+    rejecters[1]?.(new Error('write failed'));
+    await flush();
+    expect(q('prefs-status').textContent).toBe(COPY.prefsFailed);
+    expect(q('prefs-status').dataset.state).toBe('error');
+    expect(q<HTMLInputElement>('pref-autoAnalyze').checked).toBe(true);
   });
 });

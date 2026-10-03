@@ -30,9 +30,11 @@ export function createBackgroundHandlers(deps: BackgroundHandlerDeps): Handlers 
     },
     'set-settings': async ({ update }) => {
       // Reject non-object payloads outright; the store sanitizes everything else (unknown keys and
-      // malformed values are dropped, numbers clamped) so a page can never persist garbage.
+      // malformed values are dropped, numbers clamped) so a page can never persist garbage. The
+      // reply carries the write's revision so the requesting page can order it against
+      // storage-driven updates (strictly-newer gate) instead of repainting stale state.
       if (typeof update !== 'object' || update === null) throw new Error('Invalid settings update.');
-      return { settings: await store.setSettings(update) };
+      return store.setSettings(update);
     },
   };
 }
