@@ -4,6 +4,7 @@ import {
   API_KEY_STORAGE_KEY,
   DEFAULT_SETTINGS,
   createSettingsStore,
+  type PageSettingsStore,
   type Settings,
   type SettingsWriteResult,
 } from '@/core/settings-store';
@@ -352,6 +353,112 @@ describe('options page', () => {
     expect(q<HTMLInputElement>('pref-minDraftLength').value).toBe('40');
     expect(q('prefs-status').textContent).toBe(COPY.prefsSaved);
     expect(q('prefs-status').dataset.state).toBe('success');
+  });
+
+  // Harness for the scrutiny round-4 resync race: the page's own save reply resolves late (after a
+  // newer write from another context), and the resync reread it triggers is held mid-flight so the
+  // test can land an even newer write before the reread completes. `pageReads` counts page-driven
+  // store reads (initial read + resync rereads) to pin bounded resyncs.
+  async function setupResyncRace() {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend); // the page's read/subscribe view
+    const writer = createSettingsStore(memory.backend); // stands in for another context's writer
+    let releaseReply = () => {};
+    const replyGate = new Promise<void>((resolve) => (releaseReply = resolve));
+    const saveSettings = vi.fn(async (update: Partial<Settings>): Promise<SettingsWriteResult> => {
+      const write = await writer.setSettings(update); // persists now, revision stamped
+      await replyGate; // the reply's transport delay
+      return write;
+    });
+    let armRereadHold = false;
+    const reread = { release: () => {} };
+    let pageReads = 0;
+    const storeView: PageSettingsStore = {
+      ...store,
+      async getSettingsWithRevision() {
+        const snapshot = await store.getSettingsWithRevision();
+        pageReads += 1;
+        if (armRereadHold) {
+          armRereadHold = false;
+          await new Promise<void>((resolve) => (reread.release = resolve));
+        }
+        return snapshot;
+      },
+    };
+    document.body.innerHTML = '<div id="app"></div>';
+    teardowns.push(
+      await mountOptionsPage(document.getElementById('app')!, { store: storeView, saveSettings, testConnection: stubTestConnection }),
+    );
+    expect(pageReads).toBe(1); // the initial read
+    return { writer, releaseReply, armRereadHold: () => (armRereadHold = true), reread, reads: () => pageReads };
+  }
+
+  // Regression (scrutiny round 4): the resync reread started by a rejected save reply can itself be
+  // overtaken by a newer write while in flight. The stale reread must be rejected by the revision
+  // gate at COMPLETION — rendering it would regress the newer state the subscription already
+  // applied, and with no later storage event the page would diverge from the store indefinitely.
+  it('does not render a resync reread overtaken by a newer write from elsewhere', async () => {
+    const { writer, releaseReply, armRereadHold, reread } = await setupResyncRace();
+
+    // The user saves a preference; the write persists (revision 1) but the reply is held in flight.
+    const box = q<HTMLInputElement>('pref-autoAnalyze');
+    box.checked = false;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush();
+
+    // Write A (another context, revision 2) lands; the page follows it through the subscription.
+    await writer.setSettings({ enabled: true, minDraftLength: 40 });
+    await flush();
+    expect(q<HTMLInputElement>('pref-enabled').checked).toBe(true);
+    expect(q<HTMLInputElement>('pref-minDraftLength').value).toBe('40');
+
+    // The stale reply (revision 1) resolves: rejected by the gate, which starts a resync whose
+    // reread is held after reading the store (still the revision-2 snapshot).
+    armRereadHold();
+    releaseReply();
+    await flush();
+
+    // Write B (revision 3) lands DURING the reread; the subscription applies it immediately.
+    await writer.setSettings({ autoAnalyze: true, minDraftLength: 55 });
+    await flush();
+    expect(q<HTMLInputElement>('pref-minDraftLength').value).toBe('55');
+
+    // The reread completes carrying the stale revision-2 snapshot (minDraftLength 40,
+    // autoAnalyze false): the gate must reject it at completion so revision 3 stays on screen.
+    reread.release();
+    await flush();
+    expect(q<HTMLInputElement>('pref-minDraftLength').value).toBe('55');
+    expect(q<HTMLInputElement>('pref-autoAnalyze').checked).toBe(true);
+    expect(q<HTMLInputElement>('pref-enabled').checked).toBe(true);
+    expect(q('prefs-status').textContent).toBe(COPY.prefsSaved);
+  });
+
+  // The rejected reread must not schedule another resync: at most one resync per rejection, with
+  // the storage subscription owning convergence to the newest state.
+  it('does not loop resyncs when the reread itself is rejected', async () => {
+    const { writer, releaseReply, armRereadHold, reread, reads } = await setupResyncRace();
+
+    const box = q<HTMLInputElement>('pref-autoAnalyze');
+    box.checked = false;
+    box.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush();
+    await writer.setSettings({ enabled: true, minDraftLength: 40 });
+    await flush();
+
+    armRereadHold();
+    releaseReply();
+    await flush();
+    await writer.setSettings({ autoAnalyze: true, minDraftLength: 55 });
+    await flush();
+
+    reread.release();
+    await flush();
+    const readsAfterResync = reads();
+    expect(readsAfterResync).toBe(2); // initial read + exactly one resync reread
+    for (let i = 0; i < 5; i += 1) await flush();
+    expect(reads()).toBe(readsAfterResync); // no further reads: bounded, no loop
+    expect(q<HTMLInputElement>('pref-minDraftLength').value).toBe('55');
+    expect(q<HTMLInputElement>('pref-autoAnalyze').checked).toBe(true);
   });
 
   it('keeps the latest save attempt in charge when a superseded attempt then fails', async () => {

@@ -118,8 +118,11 @@ export async function mountPopupPage(root: HTMLElement, deps: PopupPageDeps): Pr
       store.getLastAnalysis(),
     ]);
     if (ticket !== latestRefresh) return;
-    // The read is fresh (never older than the store), so it renders unconditionally; its revision
-    // still feeds the gate that orders save replies against what this page has applied.
+    // Application-time ordering for this read is the refresh ticket: every storage event triggers a
+    // fresh refresh, so a read overtaken by an event is superseded (its ticket went stale) and the
+    // newer refresh applies instead; if no event fired, the read IS the store's current state and
+    // rendering it can never diverge from the store. The accept() call feeds this read's revision
+    // to the gate so the toggle's own save reply (and later ones) order against it.
     revisionGate.accept(revision);
     renderMaster(settings.enabled);
     renderKey(hasKey);

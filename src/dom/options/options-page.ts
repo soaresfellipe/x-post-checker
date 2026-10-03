@@ -1,6 +1,7 @@
 import type { ConnectionTestResult } from '@/core/jev-client';
 import { createRevisionGate } from '@/core/message-protocol/broadcast';
 import {
+  DEFAULT_SETTINGS,
   NUMERIC_LIMITS,
   SETTINGS_KEYS,
   type PageSettingsStore,
@@ -90,7 +91,14 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
     removeButton.disabled = !present;
   }
 
+  // The settings snapshot currently rendered — every render goes through the revision-gated apply
+  // paths below, so this is always the newest gate-accepted state. A failed or invalid save
+  // re-renders it to restore the controls its attempt touched: nothing was persisted, so the last
+  // applied state is still the store's current state, and no reread is needed.
+  let appliedSettings: Settings = { ...DEFAULT_SETTINGS };
+
   function renderSettings(settings: Settings): void {
+    appliedSettings = settings;
     for (const key of BOOLEAN_PREFS) booleanInputs[key].checked = settings[key];
     for (const key of NUMERIC_PREFS) numberInputs[key].value = String(settings[key]);
   }
@@ -109,24 +117,29 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
   const revisionGate = createRevisionGate();
 
   /**
-   * Initial render from the store, gated: a change whose storage event already applied during the
-   * read must not be regressed by this older snapshot.
+   * Initial render from the store, gated at COMPLETION: a storage change whose event already
+   * applied during the read must not be regressed by this older snapshot — the subscription owns
+   * the newer state, so a rejected read renders nothing.
    */
   async function renderInitialFromStore(): Promise<void> {
     const [{ settings, revision }, hasKey] = await Promise.all([store.getSettingsWithRevision(), store.hasApiKey()]);
+    if (!revisionGate.accept(revision)) return;
     renderKeyPresence(hasKey);
-    if (revisionGate.accept(revision)) renderSettings(settings);
+    renderSettings(settings);
   }
 
   /**
-   * Resync from the store after a failed save or a superseded reply: renders the store's current
-   * state unconditionally — this is a fresh read, and any write that lands afterwards delivers its
-   * own storage event, so the page always converges on the store.
+   * Resync from the store after a superseded save reply (one whose revision the gate rejected, so
+   * the state it persisted may not have been applied here yet). The reread is gated at COMPLETION:
+   * a newer write can land while it is in flight (its storage event then applies the newer state
+   * through the subscription), which makes this reread stale — when the gate rejects it, this
+   * reread renders nothing and does NOT schedule another resync (at most one resync per
+   * rejection); convergence to the newest state is the already-registered subscription's job.
    */
   async function resyncFromStore(): Promise<void> {
     const [{ settings, revision }, hasKey] = await Promise.all([store.getSettingsWithRevision(), store.hasApiKey()]);
+    if (!revisionGate.accept(revision)) return;
     renderKeyPresence(hasKey);
-    revisionGate.accept(revision);
     renderSettings(settings);
   }
 
@@ -221,7 +234,7 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
       setMessage(prefsStatus, COPY.prefsSaved, 'success');
     } catch {
       if (attempt !== latestPrefsSave) return;
-      await resyncFromStore();
+      renderSettings(appliedSettings); // nothing persisted: the applied state is still the store's
       setMessage(prefsStatus, COPY.prefsFailed, 'error');
     }
   }
@@ -235,7 +248,7 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
       const value = Number(raw);
       const { min, max } = NUMERIC_LIMITS[key];
       if (raw === '' || !Number.isInteger(value) || value < min || value > max) {
-        await resyncFromStore();
+        renderSettings(appliedSettings); // nothing persisted: restore the controls the edit moved
         setMessage(prefsStatus, COPY.prefsInvalid(key), 'error');
         return;
       }
