@@ -38,4 +38,68 @@ describe('last analysis record', () => {
     expect(onAnalysis).toHaveBeenCalledWith({ at: 10, outcome: 'ok' });
     expect(onSettings).toHaveBeenCalledTimes(1);
   });
+
+  // Recency gate (VAL-SETUP-015): a delayed OLDER completion must never overwrite a newer
+  // completion's record, or the popup would show the older outcome as the latest.
+  it('keeps the newer record when a delayed older completion lands after it', async () => {
+    const store = createSettingsStore(createMemoryBackend().backend);
+    await store.recordAnalysis({ at: 200, outcome: 'ok' }); // the newer completion commits first
+    await store.recordAnalysis({ at: 100, outcome: 'error' }); // the older write lands late
+    expect(await store.getLastAnalysis()).toEqual({ at: 200, outcome: 'ok' });
+  });
+
+  it('admits a genuinely newer completion over an older record (the convergent direction)', async () => {
+    const store = createSettingsStore(createMemoryBackend().backend);
+    await store.recordAnalysis({ at: 100, outcome: 'error' });
+    await store.recordAnalysis({ at: 200, outcome: 'ok' });
+    expect(await store.getLastAnalysis()).toEqual({ at: 200, outcome: 'ok' });
+  });
+
+  it('is strictly newer: a record stamped at the same time never displaces the stored one', async () => {
+    const store = createSettingsStore(createMemoryBackend().backend);
+    await store.recordAnalysis({ at: 200, outcome: 'error' });
+    await store.recordAnalysis({ at: 200, outcome: 'ok' });
+    expect(await store.getLastAnalysis()).toEqual({ at: 200, outcome: 'error' });
+  });
+
+  // Both held-write interleavings (the memory backend parks `area.set`): whatever order the two
+  // writes are handed to storage in, the newest completion's record must end up stored.
+  it('ends at the newest completion when the older write is the one that stalls', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend);
+    const release = memory.holdWrites();
+    const older = store.recordAnalysis({ at: 100, outcome: 'error' }); // stamps first, write stalls
+    const newer = store.recordAnalysis({ at: 200, outcome: 'ok' }); // queues behind it
+    release();
+    await Promise.all([older, newer]);
+    expect(await store.getLastAnalysis()).toEqual({ at: 200, outcome: 'ok' });
+  });
+
+  it('ends at the newest completion when the newer write is the one that stalls', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend);
+    const release = memory.holdWrites();
+    const newer = store.recordAnalysis({ at: 200, outcome: 'ok' }); // write stalls
+    const older = store.recordAnalysis({ at: 100, outcome: 'error' }); // queues behind it
+    release();
+    await Promise.all([newer, older]);
+    expect(await store.getLastAnalysis()).toEqual({ at: 200, outcome: 'ok' });
+  });
+
+  it('keeps recording after a failed write (the chain never poisons)', async () => {
+    const memory = createMemoryBackend();
+    let failNextWrite = true;
+    const originalSet = memory.backend.area.set.bind(memory.backend.area);
+    memory.backend.area.set = async (items) => {
+      if (failNextWrite) {
+        failNextWrite = false;
+        throw new Error('QUOTA_BYTES quota exceeded');
+      }
+      await originalSet(items);
+    };
+    const store = createSettingsStore(memory.backend);
+    await expect(store.recordAnalysis({ at: 100, outcome: 'ok' })).rejects.toThrow();
+    await store.recordAnalysis({ at: 200, outcome: 'ok' }); // the next record still persists
+    expect(await store.getLastAnalysis()).toEqual({ at: 200, outcome: 'ok' });
+  });
 });

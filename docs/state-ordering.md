@@ -27,7 +27,11 @@ always the same snapshot). **API-key writes stamp a monotonic `keyRevision` the 
 background is the single key writer too (pages send `set-api-key` / `clear-api-key`), and the key
 change + its revision persist in one `area.set` — a clear persists the empty string (absent to
 every reader) rather than removing the key, so presence and revision can never be observed apart.
-Analysis records (`lastAnalysis`) carry no revision either.
+Analysis records (`lastAnalysis`) carry no revision either, but they are ordered by the
+analysis `at` stamp instead (lane (c)): the background's single writer serializes analysis
+records through the same write chain as the settings/key writes AND applies a strictly-newer
+`at` recency gate, so an older completion can never overwrite a newer one in storage; the
+popup's render path applies a monotonic `at` gate on top.
 
 ## Lane (a) — settings: strictly-newer revision gate, single apply funnel
 
@@ -83,16 +87,25 @@ applies it inside `refresh()`: the refresh ticket orders whole refreshes, and th
 the key facts within them (a same-settings-revision refresh still cannot repaint an older key
 fact).
 
-## Lane (c) — analysis: ticket ordering, no settings interplay
+## Lane (c) — analysis: `at` recency gate, no settings interplay
 
 **Invariant:** the last-analysis line reflects the newest analysis record delivered to the page,
 and analysis updates never reorder settings state (nor the reverse).
 
+- Writes are ordered at the source: `recordAnalysis` joins the background's single-writer chain
+  (the settings/key write chain, promise-serialized) and applies a strictly-newer `at` recency
+  gate — a stored record is replaced only by a strictly newer completion, so a delayed OLDER
+  completion (analysis A's stalled write landing after B's) can never overwrite the newer
+  outcome, in either interleaving order.
 - Popup only (Options shows no analysis): `store.subscribeLastAnalysis` events trigger a fresh
   full `refresh()`; the monotonic refresh ticket drops any refresh superseded by a newer one, so
   facts apply in refresh-start order.
-- Analysis facts are ordered by the refresh ticket alone — the revision gate does not order them,
-  and a settings save reply never renders analysis state.
+- The page ALSO gates analysis facts on their `at` stamp (the settings lanes' pattern): a record
+  older than the one already applied never repaints — this is the defense for facts that bypass
+  the background's gated recorder (external/direct storage writers). A same-`at` re-read is a
+  fresh observation of the current record and may render; the empty state renders only before
+  any record has been applied.
+- A settings save reply never renders analysis state.
 - The settings part of a refresh follows lane (a). When a refresh is dropped as settings-stale,
   its analysis render is dropped with it: any newer analysis fact arrives with its own event and
   its own refresh.
@@ -118,6 +131,15 @@ and analysis updates never reorder settings state (nor the reverse).
 - Store: settings and key writes each stamp strictly increasing persisted revisions, concurrent
   writes included; a key clear persists the empty string in the SAME write as its revision
   (`test/unit/settings-store.test.ts`).
+- Store: analysis records are write-serialized with a strictly-newer `at` gate — a delayed older
+  completion never overwrites a newer record, in either held-write interleaving, and equal-`at`
+  records never displace the stored one (`test/unit/last-analysis.test.ts`).
+- Popup: a delayed older analysis record delivered after a newer one was applied repaints
+  nothing, and the reverse interleaving still converges on the newest record
+  (`test/dom/popup-page.test.ts`).
+- E2E: after a real background analysis, a deliberately delayed older `lastAnalysis` write never
+  regresses the popup's line, while a genuinely newer completion still applies
+  (`test/e2e/last-analysis-ordering.spec.ts`).
 - Background: key writes from independent page contexts serialize through the protocol layer with
   unique keyRevisions (`test/unit/settings-single-writer.test.ts`).
 - E2E: key save/removal stamp an ordered keyRevision and both pages converge; a delayed key-save

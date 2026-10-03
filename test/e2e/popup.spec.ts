@@ -88,11 +88,13 @@ test.describe('popup', () => {
 
     // Another context wrote the key directly; the write carries its keyRevision (the key lane's
     // ordering token), so the popup's strictly-newer gate admits it over the absent@0 fact.
-    await page.evaluate(() => chrome.storage.local.set({ jevApiKey: 'k', keyRevision: 1, lastAnalysis: { at: Date.now(), outcome: 'local-only' } }));
-    await expect(page.getByTestId('last-analysis')).toHaveAttribute('data-state', 'local-only');
-    texts.push(await page.locator('body').innerText());
+    // Analysis records land oldest-first on purpose: the popup's analysis `at` gate drops
+    // out-of-order OLDER records, so a newer-then-older sequence would never render the error.
     await page.evaluate(() => chrome.storage.local.set({ lastAnalysis: { at: Date.now() - 3 * 86_400_000, outcome: 'error' } }));
     await expect(page.getByTestId('last-analysis')).toHaveAttribute('data-state', 'error');
+    texts.push(await page.locator('body').innerText());
+    await page.evaluate(() => chrome.storage.local.set({ jevApiKey: 'k', keyRevision: 1, lastAnalysis: { at: Date.now(), outcome: 'local-only' } }));
+    await expect(page.getByTestId('last-analysis')).toHaveAttribute('data-state', 'local-only');
     texts.push(await page.locator('body').innerText());
 
     await page.getByTestId('master-toggle').check();

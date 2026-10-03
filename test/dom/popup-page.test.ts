@@ -75,6 +75,33 @@ describe('popup page', () => {
     expect(q('last-analysis').textContent).toBe('Failed just now');
   });
 
+  // Analysis lane (docs/state-ordering.md lane (c)): the last-analysis line never regresses
+  // behind storage. A delayed OLDER record (an out-of-order completion's write, or any writer
+  // bypassing the background's gated recorder) must not repaint the newer outcome already shown.
+  it('keeps the newest analysis when a delayed older record is delivered last', async () => {
+    const { memory } = await setup({ preset: { [LAST_ANALYSIS_STORAGE_KEY]: { at: NOW, outcome: 'ok' } } });
+    expect(q('last-analysis').dataset.state).toBe('ok');
+
+    memory.data[LAST_ANALYSIS_STORAGE_KEY] = { at: NOW - 5 * 60_000, outcome: 'error' };
+    memory.emit({ [LAST_ANALYSIS_STORAGE_KEY]: { newValue: { at: NOW - 5 * 60_000, outcome: 'error' } } });
+    await flush();
+    expect(q('last-analysis').dataset.state).toBe('ok');
+    expect(q('last-analysis').dataset.at).toBe(String(NOW));
+  });
+
+  // The paired interleaving: the older record first, then the genuinely newer one — the newer
+  // always wins, whatever order the facts are delivered in.
+  it('applies the newer analysis over an older record in the reverse interleaving too', async () => {
+    const { memory } = await setup({ preset: { [LAST_ANALYSIS_STORAGE_KEY]: { at: NOW - 5 * 60_000, outcome: 'error' } } });
+    expect(q('last-analysis').dataset.state).toBe('error');
+
+    memory.data[LAST_ANALYSIS_STORAGE_KEY] = { at: NOW, outcome: 'ok' };
+    memory.emit({ [LAST_ANALYSIS_STORAGE_KEY]: { newValue: { at: NOW, outcome: 'ok' } } });
+    await flush();
+    expect(q('last-analysis').dataset.state).toBe('ok');
+    expect(q('last-analysis').dataset.at).toBe(String(NOW));
+  });
+
   it('writes the master switch to the store', async () => {
     const { store } = await setup();
     const toggle = q<HTMLInputElement>('master-toggle');

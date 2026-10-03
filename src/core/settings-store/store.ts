@@ -68,6 +68,10 @@ export function createSettingsStore(backend: SettingsBackend) {
     return typeof stored === 'string' && stored.length > 0 ? stored : undefined;
   }
 
+  async function getLastAnalysis(): Promise<LastAnalysis | undefined> {
+    return parseLastAnalysis((await backend.area.get(LAST_ANALYSIS_STORAGE_KEY))[LAST_ANALYSIS_STORAGE_KEY]);
+  }
+
   /**
    * One storage read returns the key-presence fact and its revision together (a consistent
    * snapshot): the presence belongs to the revision, so pages can gate the fact on it.
@@ -107,12 +111,25 @@ export function createSettingsStore(backend: SettingsBackend) {
       return write;
     },
 
-    async getLastAnalysis(): Promise<LastAnalysis | undefined> {
-      return parseLastAnalysis((await backend.area.get(LAST_ANALYSIS_STORAGE_KEY))[LAST_ANALYSIS_STORAGE_KEY]);
-    },
+    getLastAnalysis,
 
-    async recordAnalysis(entry: LastAnalysis): Promise<void> {
-      await backend.area.set({ [LAST_ANALYSIS_STORAGE_KEY]: { at: entry.at, outcome: entry.outcome } });
+    /**
+     * Records the most recent analysis outcome as the background's single writer (docs/
+     * state-ordering.md lane (c)). The write joins the serialized chain — an older completion's
+     * delayed write can never land after a newer one's — AND carries a strictly-newer `at`
+     * recency gate, so an out-of-order older completion is dropped even when it is the one
+     * holding the chain: the popup's last-analysis line must reflect the newest outcome, never
+     * an older one. Bookkeeping only: the analyzer swallows rejections.
+     */
+    recordAnalysis(entry: LastAnalysis): Promise<void> {
+      const write = writeChain.then(async () => {
+        const stored = await getLastAnalysis();
+        if (stored && entry.at <= stored.at) return; // not strictly newer: the stored record stays
+        await backend.area.set({ [LAST_ANALYSIS_STORAGE_KEY]: { at: entry.at, outcome: entry.outcome } });
+      });
+      // A failed write must not poison later ones; its own caller still sees the rejection.
+      writeChain = write.catch(() => undefined);
+      return write;
     },
 
     /**

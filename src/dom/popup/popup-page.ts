@@ -117,6 +117,20 @@ export async function mountPopupPage(root: HTMLElement, deps: PopupPageDeps): Pr
   // path, so a fact older than an already-applied one can never repaint presence.
   const keyGate = createRevisionGate();
 
+  // Analysis lane (docs/state-ordering.md lane (c)): the last-analysis line is ordered by a
+  // monotonic `at` gate, matching the revision-gate pattern of the settings lanes. A record
+  // OLDER than the one already applied never repaints (a delayed older completion — or any
+  // writer that bypasses the background's gated recorder — cannot regress the line behind the
+  // newest outcome); a same-`at` re-read is a fresh observation of the current record and may
+  // render. The empty state renders only before any record has been applied.
+  let appliedAnalysisAt: number | undefined;
+  function acceptAnalysis(last: LastAnalysis | undefined): boolean {
+    if (!last) return appliedAnalysisAt === undefined;
+    if (appliedAnalysisAt !== undefined && last.at < appliedAnalysisAt) return false;
+    appliedAnalysisAt = last.at;
+    return true;
+  }
+
   let latestRefresh = 0;
   async function refresh() {
     const ticket = ++latestRefresh;
@@ -142,7 +156,7 @@ export async function mountPopupPage(root: HTMLElement, deps: PopupPageDeps): Pr
     // gate applied (a key-only event always is; an unchanged keyRevision means the indicator is
     // already current and must stay untouched).
     if (keyGate.accept(key.keyRevision)) renderKey(key.apiKeyPresent);
-    renderAnalysis(last);
+    if (acceptAnalysis(last)) renderAnalysis(last);
   }
 
   // Subscribed before the first read so a change landing during that read is never lost.
