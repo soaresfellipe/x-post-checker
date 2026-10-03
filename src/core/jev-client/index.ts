@@ -11,4 +11,5 @@ export * from './request';
 export * from './response';
 export * from './hash';
 export * from './cache';
+export * from './rate-window';
 export * from './client';

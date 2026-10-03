@@ -1,6 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createMemoryVerdictCache, createJevClient, JEV_RATE_LIMIT, JEV_RETRY } from '@/core/jev-client';
+import {
+  createMemoryVerdictCache,
+  createJevClient,
+  JEV_RATE_LIMIT,
+  JEV_RETRY,
+  RATE_WINDOW_STORAGE_KEY,
+} from '@/core/jev-client';
 import { JEV_ENDPOINT } from '@/core/jev-client/transport';
+import { createMemoryBackend } from '../helpers/memory-backend';
 import { makeDraft } from '../helpers/draft';
 import { jevOkResponse } from '../helpers/jev-fixtures';
 
@@ -290,6 +297,85 @@ describe('JevClient rate-limit guard (VAL-DRAFT-031)', () => {
   it('exposes the default window policy from the config module', () => {
     expect(JEV_RATE_LIMIT.maxRequests).toBeGreaterThan(0);
     expect(JEV_RATE_LIMIT.windowMs).toBeGreaterThan(0);
+  });
+});
+
+describe('JevClient persistent rate window (survives service-worker restarts, VAL-DRAFT-031)', () => {
+  it('rehydrates the window in a fresh client (simulated MV3 restart): the ceiling still holds', async () => {
+    const memory = createMemoryBackend();
+    const now = vi.fn(() => 1_000);
+    const fetchOk = vi.fn(async () => jevOkResponse());
+    const rateLimit = { maxRequests: 2, windowMs: 60_000 };
+
+    const first = createJevClient({ fetchImpl: fetchOk, now, rateLimit, rateWindowArea: memory.backend.area });
+    expect(await first.analyzeDraft({ apiKey: KEY, draft: makeDraft() })).toMatchObject({ ok: true });
+    expect(await first.analyzeDraft({ apiKey: KEY, draft: makeDraft({ isReply: true }) })).toMatchObject({ ok: true });
+    expect(
+      await first.analyzeDraft({ apiKey: KEY, draft: makeDraft({ isReply: true, replyToHandle: 'x' }) }),
+    ).toEqual({ ok: false, failure: { kind: 'rate-limited' } });
+
+    // The worker is suspended and restarted: a NEW client instance over the SAME storage must
+    // inherit the in-window send count instead of starting from zero.
+    const restarted = createJevClient({ fetchImpl: fetchOk, now, rateLimit, rateWindowArea: memory.backend.area });
+    const result = await restarted.analyzeDraft({
+      apiKey: KEY,
+      draft: makeDraft({ isReply: true, replyToHandle: 'y' }),
+    });
+    expect(result).toEqual({ ok: false, failure: { kind: 'rate-limited' } });
+    expect(fetchOk).toHaveBeenCalledTimes(2); // no third POST crossed the restarted limiter
+
+    // The window slides: once every persisted stamp leaves the window, capacity returns.
+    now.mockReturnValue(1_000 + 60_000);
+    expect(
+      await restarted.analyzeDraft({ apiKey: KEY, draft: makeDraft({ isReply: true, replyToHandle: 'z' }) }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it('persists every transport attempt, retries included, across the restart', async () => {
+    const memory = createMemoryBackend();
+    const now = vi.fn(() => 1_000);
+    const fetchImpl = vi
+      .fn<(url: string, init: RequestInit) => Promise<Response>>()
+      .mockResolvedValueOnce(new Response('service unavailable', { status: 503 }))
+      .mockResolvedValue(jevOkResponse());
+    const rateLimit = { maxRequests: 2, windowMs: 60_000 };
+
+    const first = createJevClient({
+      fetchImpl,
+      now,
+      sleep: async () => undefined,
+      rateLimit,
+      rateWindowArea: memory.backend.area,
+    });
+    expect(await first.analyzeDraft({ apiKey: KEY, draft: makeDraft() })).toMatchObject({ ok: true });
+    expect(fetchImpl).toHaveBeenCalledTimes(2); // the 503, then the retry's 200
+
+    // Both attempts (the retry included) were persisted: the restarted client inherits the full
+    // window, so the next draft fails rate-limited instead of sneaking in a 3rd real request.
+    const restarted = createJevClient({ fetchImpl, now, rateLimit, rateWindowArea: memory.backend.area });
+    expect(await restarted.analyzeDraft({ apiKey: KEY, draft: makeDraft({ isReply: true }) })).toEqual({
+      ok: false,
+      failure: { kind: 'rate-limited' },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('degrades to an empty window when the persisted state is unreadable, and still counts onward', async () => {
+    const memory = createMemoryBackend();
+    memory.data[RATE_WINDOW_STORAGE_KEY] = 'not-an-array';
+    const now = vi.fn(() => 1_000);
+    const fetchOk = vi.fn(async () => jevOkResponse());
+    const client = createJevClient({
+      fetchImpl: fetchOk,
+      now,
+      rateLimit: { maxRequests: 1, windowMs: 60_000 },
+      rateWindowArea: memory.backend.area,
+    });
+    expect(await client.analyzeDraft({ apiKey: KEY, draft: makeDraft() })).toMatchObject({ ok: true });
+    expect(await client.analyzeDraft({ apiKey: KEY, draft: makeDraft({ isReply: true }) })).toEqual({
+      ok: false,
+      failure: { kind: 'rate-limited' },
+    });
   });
 });
 

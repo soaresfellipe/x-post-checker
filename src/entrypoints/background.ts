@@ -16,8 +16,13 @@ export default defineBackground(() => {
 
   // The analysis pipeline. The verdict cache is persisted in storage.local so it survives
   // service-worker suspension (Chrome idles MV3 workers out after ~30s): re-analyzing an
-  // identical draft later in the session is served from cache, not paid for again.
-  const jevClient = createJevClient({ cache: createStorageVerdictCache(browser.storage.local) });
+  // identical draft later in the session is served from cache, not paid for again. The rate
+  // window persists the same way — a restarted worker rehydrates the send count, so the
+  // requests-per-window maximum holds across suspension.
+  const jevClient = createJevClient({
+    cache: createStorageVerdictCache(browser.storage.local),
+    rateWindowArea: browser.storage.local,
+  });
   const analyzer = createAnalyzerService({ store, jev: jevClient });
   const handlers = createBackgroundHandlers({
     store,

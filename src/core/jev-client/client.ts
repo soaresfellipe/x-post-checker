@@ -18,10 +18,11 @@ import {
   JEV_RETRYABLE_HTTP_STATUSES,
   type MainWeaknessId,
 } from './config';
-import { createMemoryVerdictCache, type JevVerdictCache } from './cache';
+import { createMemoryVerdictCache, type JevVerdictCache, type VerdictCacheArea } from './cache';
 import { draftCacheKey } from './hash';
 import { buildDraftAnalysisRequest } from './request';
 import { buildDraftJevVerdict, parseDraftAnalysisResponse } from './response';
+import { createMemoryRateLimiter, createPersistentRateLimiter, type RateLimiter } from './rate-window';
 import { postJevJson } from './transport';
 
 /** Every way a draft analysis can fail, typed so upstream can degrade locally without try/catch. */
@@ -60,30 +61,17 @@ export interface JevClientDeps {
   timeoutMs?: number;
   retry?: { maxRetries?: number; backoffMs?: readonly number[] };
   rateLimit?: { maxRequests?: number; windowMs?: number };
+  /**
+   * Storage area persisting the rate window (`storage.local` in the background). The window state
+   * must survive MV3 service-worker suspension: a restarted worker rehydrates the send count
+   * instead of starting from zero, so the configured maximum is never exceeded. When omitted, the
+   * window is in-memory only (tests, single-session clients).
+   */
+  rateWindowArea?: VerdictCacheArea;
 }
 
 export interface JevClient {
   analyzeDraft(request: JevAnalyzeRequest): Promise<JevDraftAnalysisResult>;
-}
-
-/** Sliding-window limiter: at most `maxRequests` sends in any `windowMs` slice of time. */
-class SlidingWindowLimiter {
-  private sends: number[] = [];
-
-  constructor(
-    private readonly maxRequests: number,
-    private readonly windowMs: number,
-    private readonly now: () => number,
-  ) {}
-
-  /** Records a send when capacity remains; false means the window is full (typed failure, no wait). */
-  tryAcquire(): boolean {
-    const at = this.now();
-    this.sends = this.sends.filter((sentAt) => at - sentAt < this.windowMs);
-    if (this.sends.length >= this.maxRequests) return false;
-    this.sends.push(at);
-    return true;
-  }
 }
 
 function delayFor(backoffMs: readonly number[], retryIndex: number): number {
@@ -115,11 +103,14 @@ export function createJevClient(deps: JevClientDeps = {}): JevClient {
   const timeoutMs = deps.timeoutMs ?? JEV_ANALYSIS_TIMEOUT_MS;
   const maxRetries = deps.retry?.maxRetries ?? JEV_RETRY.maxRetries;
   const backoffMs = deps.retry?.backoffMs ?? JEV_RETRY.backoffMs;
-  const limiter = new SlidingWindowLimiter(
-    deps.rateLimit?.maxRequests ?? JEV_RATE_LIMIT.maxRequests,
-    deps.rateLimit?.windowMs ?? JEV_RATE_LIMIT.windowMs,
-    now,
-  );
+  const maxRequests = deps.rateLimit?.maxRequests ?? JEV_RATE_LIMIT.maxRequests;
+  const windowMs = deps.rateLimit?.windowMs ?? JEV_RATE_LIMIT.windowMs;
+  // The hard ceiling must survive MV3 service-worker suspension: with a storage area, the window
+  // state persists (write-serialized) and a restarted background rehydrates it at client
+  // creation, so no restart can admit a request beyond the configured maximum.
+  const limiter: RateLimiter = deps.rateWindowArea
+    ? createPersistentRateLimiter(deps.rateWindowArea, maxRequests, windowMs, now)
+    : createMemoryRateLimiter(maxRequests, windowMs, now);
   // One in-flight promise per unique draft: bursts coalesce here, and the entry is removed as soon
   // as the promise settles so a follow-up analysis starts a fresh exchange.
   const inFlight = new Map<string, Promise<JevDraftAnalysisResult>>();
@@ -131,7 +122,7 @@ export function createJevClient(deps: JevClientDeps = {}): JevClient {
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       if (attempt > 0) await sleep(delayFor(backoffMs, attempt - 1));
       // Every transport attempt counts against the window: a retry is a real API call.
-      if (!limiter.tryAcquire()) return { ok: false, failure: { kind: 'rate-limited' } };
+      if (!(await limiter.tryAcquire())) return { ok: false, failure: { kind: 'rate-limited' } };
 
       const result = await postJevJson({ apiKey, body, timeoutMs, fetchImpl: deps.fetchImpl, now });
       if (result.ok) {
