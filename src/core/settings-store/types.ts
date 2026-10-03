@@ -25,6 +25,17 @@ export const SETTINGS_KEYS = [
 /** Stored flat in `storage.local` beside the preferences; never in `storage.sync`. */
 export const API_KEY_STORAGE_KEY = 'jevApiKey';
 
+/** Outcome record of the most recent draft analysis; written by the analyzer, read by the popup. */
+export const LAST_ANALYSIS_STORAGE_KEY = 'lastAnalysis';
+
+export type AnalysisOutcome = 'ok' | 'local-only' | 'error';
+
+export interface LastAnalysis {
+  /** Epoch milliseconds when the analysis finished. */
+  at: number;
+  outcome: AnalysisOutcome;
+}
+
 export const DEFAULT_SETTINGS: Readonly<Settings> = {
   enabled: true,
   autoAnalyze: true,

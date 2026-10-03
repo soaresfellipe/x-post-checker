@@ -1,5 +1,7 @@
 import { runConnectionTest } from '@/core/jev-client';
 import { createLocalSettingsStore } from '@/core/settings-store';
+import { broadcastToTabs, createSettingsBroadcast } from '@/core/message-protocol/broadcast';
+import { SETTINGS_KEYS } from '@/core/settings-store';
 import { PROTOCOL_VERSION, handleRequest, isRequest, type Handlers } from '@/core/message-protocol';
 
 const handlers: Handlers = {
@@ -18,5 +20,13 @@ export default defineBackground(() => {
     if (!isRequest(message)) return false;
     void handleRequest(message, handlers).then(sendResponse);
     return true;
+  });
+
+  // Also registered synchronously so a storage change wakes a suspended worker. The popup and
+  // Options page only write storage; this is the single place that fans changes out to tabs.
+  createLocalSettingsStore().subscribe(({ settings, changedKeys }) => {
+    const settingsKeys = changedKeys.filter((key) => (SETTINGS_KEYS as readonly string[]).includes(key));
+    if (settingsKeys.length === 0) return;
+    void broadcastToTabs(browser.tabs, createSettingsBroadcast(settings, settingsKeys));
   });
 });

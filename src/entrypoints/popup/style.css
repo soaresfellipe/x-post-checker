@@ -1,0 +1,13 @@
+:root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+body { margin: 0; }
+.popup { width: 280px; padding: 12px 16px 16px; }
+h1 { font-size: 1.1rem; margin: 0 0 12px; }
+.master { display: flex; gap: 8px; align-items: center; font-weight: 600; cursor: pointer; }
+.status { margin: 12px 0; }
+.status > div { margin: 8px 0; }
+dt { font-size: 0.8rem; opacity: 0.75; }
+dd { margin: 2px 0 0; }
+button { padding: 6px 12px; font: inherit; cursor: pointer; width: 100%; }
+[role='alert'] { min-height: 1.2em; margin: 6px 0 0; color: #cf222e; }
+[data-state='present'] { color: #1a7f37; }
+[data-state='missing'], [data-state='error'] { color: #cf222e; }

@@ -22,6 +22,10 @@ export async function optionsUrl(context: BrowserContext): Promise<string> {
   return `chrome-extension://${new URL(worker.url()).host}/options.html`;
 }
 
+export async function popupUrl(context: BrowserContext): Promise<string> {
+  return (await optionsUrl(context)).replace(/options\.html$/, 'popup.html');
+}
+
 /**
  * Extensions only load in full Chromium (`channel: 'chromium'`), not the default headless shell.
  * The context is persistent because Chromium requires a user-data dir to load extensions.
