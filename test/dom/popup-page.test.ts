@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { API_KEY_STORAGE_KEY, LAST_ANALYSIS_STORAGE_KEY, DEFAULT_SETTINGS, createSettingsStore } from '@/core/settings-store';
-import type { Settings, SettingsWriteResult } from '@/core/settings-store';
+import type { PageSettingsStore, Settings, SettingsWriteResult } from '@/core/settings-store';
 import { COPY, formatAnalysisTime, mountPopupPage } from '@/dom/popup';
 import { createMemoryBackend } from '../helpers/memory-backend';
 
@@ -222,6 +222,64 @@ describe('popup page', () => {
     expect(toggle.checked).toBe(true);
     expect(q('master-label').textContent).toBe(COPY.masterOn);
     expect(q('toggle-error').textContent).toBe('');
+  });
+
+  // Regression (scrutiny round 5): a subscription-triggered refresh can capture its snapshot
+  // BEFORE a newer save reply applies — the reply renders the master switch directly, without
+  // starting a new refresh, so the older refresh can still be the newest ticket when it
+  // completes. It must not repaint its older snapshot: the gate rejects its revision and it is
+  // not a same-revision re-read.
+  it('drops a delayed subscription refresh whose snapshot lost to a newer save reply', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend); // the page's read/subscribe view
+    const writer = createSettingsStore(memory.backend); // stands in for another context's writer
+    let armReadHold = false; // arms a hold on the next page read after it captures
+    const readHold = { release: () => {} };
+    const storeView: PageSettingsStore = {
+      ...store,
+      async getSettingsWithRevision() {
+        const snapshot = await store.getSettingsWithRevision();
+        if (armReadHold) {
+          armReadHold = false;
+          await new Promise<void>((resolve) => (readHold.release = resolve));
+        }
+        return snapshot;
+      },
+    };
+    // The newer save reply: shaped like the background's answer (revision 2) and rendered
+    // directly by the toggle path without starting a refresh or touching storage.
+    const saveSettings = vi.fn(async (update: Partial<Settings>): Promise<SettingsWriteResult> => ({
+      settings: { ...DEFAULT_SETTINGS, ...update },
+      settingsRevision: 2,
+    }));
+    document.body.innerHTML = '<div id="app"></div>';
+    teardowns.push(await mountPopupPage(document.getElementById('app')!, {
+      store: storeView,
+      saveSettings,
+      openOptions: async () => undefined,
+      now: () => NOW,
+    }));
+
+    // A settings write from another context lands; the subscription starts a refresh whose read
+    // captures the revision-1 snapshot and parks (still the newest ticket).
+    armReadHold = true;
+    await writer.setSettings({ enabled: true, minDraftLength: 40 });
+    await flush();
+
+    // A newer save reply (revision 2) applies directly: the switch turns off.
+    const toggle = q<HTMLInputElement>('master-toggle');
+    toggle.checked = false;
+    toggle.dispatchEvent(new Event('change', { bubbles: true }));
+    await flush();
+    expect(toggle.checked).toBe(false);
+    expect(q('master-label').textContent).toBe(COPY.masterOff);
+
+    // The parked refresh (revision 1, enabled: true) completes while still the newest ticket:
+    // it must not repaint the older state over the applied revision-2 reply.
+    readHold.release();
+    await flush();
+    expect(toggle.checked).toBe(false);
+    expect(q('master-label').textContent).toBe(COPY.masterOff);
   });
 
   it('opens the Options page from the button and reports failure', async () => {

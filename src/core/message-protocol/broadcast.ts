@@ -54,6 +54,10 @@ export function createRevisionGate() {
       lastAppliedRevision = revision;
       return true;
     },
+    /** The highest revision accepted so far; `undefined` before the first accept. */
+    lastApplied(): number | undefined {
+      return lastAppliedRevision;
+    },
   };
 }
 

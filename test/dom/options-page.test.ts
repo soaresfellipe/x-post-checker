@@ -461,6 +461,64 @@ describe('options page', () => {
     expect(q<HTMLInputElement>('pref-autoAnalyze').checked).toBe(true);
   });
 
+  // The key-presence lane is event-first: a key-only storage event re-reads presence fresh at
+  // delivery and applies it, whatever the settings revision is doing (key writes carry none).
+  it('applies key-only storage events to the key lane fresh at delivery', async () => {
+    const { store } = await setup();
+    await store.setApiKey(KEY);
+    await flush();
+    expect(q('key-status').dataset.state).toBe('present');
+    expect(q('key-status').textContent).toBe(COPY.keyPresent);
+    await store.clearApiKey();
+    await flush();
+    expect(q('key-status').dataset.state).toBe('absent');
+  });
+
+  // Regression (scrutiny round 5): API-key writes carry no settingsRevision, so the settings
+  // revision gate cannot order key presence against reads. An initial read that captured `absent`
+  // and completes after a key-only storage event already applied `present` must not repaint it —
+  // no later event is required, so the page would otherwise disagree with storage indefinitely
+  // (VAL-SETUP-015).
+  it('does not regress key presence when the initial read finishes after a key-only event', async () => {
+    const memory = createMemoryBackend();
+    const store = createSettingsStore(memory.backend);
+    let armKeyReadHold = true; // holds the initial read's key read after it captures
+    const keyReadHold = { release: () => {} };
+    const storeView: PageSettingsStore = {
+      ...store,
+      async hasApiKey() {
+        const present = await store.hasApiKey();
+        if (armKeyReadHold) {
+          armKeyReadHold = false;
+          await new Promise<void>((resolve) => (keyReadHold.release = resolve));
+        }
+        return present;
+      },
+    };
+    document.body.innerHTML = '<div id="app"></div>';
+    // Not awaited yet: the initial read must still be in flight while the key event lands.
+    const mounted = mountOptionsPage(document.getElementById('app')!, {
+      store: storeView,
+      saveSettings: (update) => store.setSettings(update),
+      testConnection: stubTestConnection,
+    });
+    await flush(); // the initial read captured hasKey === false (no key yet) and is parked
+
+    // A key-only write from another context lands; the subscription applies presence fresh at
+    // delivery. Key events carry no revision, so the settings gate is not involved.
+    await store.setApiKey(KEY);
+    await flush();
+    expect(q('key-status').dataset.state).toBe('present');
+
+    // The parked initial read (stale `absent`, unchanged revision 0) completes: it must leave the
+    // event-applied key presence alone, ending at storage's truth.
+    keyReadHold.release();
+    await flush();
+    teardowns.push(await mounted);
+    expect(q('key-status').dataset.state).toBe('present');
+    expect(memory.data[API_KEY_STORAGE_KEY]).toBe(KEY);
+  });
+
   it('keeps the latest save attempt in charge when a superseded attempt then fails', async () => {
     const resolvers: Array<(reply: SettingsWriteResult) => void> = [];
     const rejecters: Array<(error: Error) => void> = [];

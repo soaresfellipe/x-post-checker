@@ -118,12 +118,17 @@ export async function mountPopupPage(root: HTMLElement, deps: PopupPageDeps): Pr
       store.getLastAnalysis(),
     ]);
     if (ticket !== latestRefresh) return;
-    // Application-time ordering for this read is the refresh ticket: every storage event triggers a
-    // fresh refresh, so a read overtaken by an event is superseded (its ticket went stale) and the
-    // newer refresh applies instead; if no event fired, the read IS the store's current state and
-    // rendering it can never diverge from the store. The accept() call feeds this read's revision
-    // to the gate so the toggle's own save reply (and later ones) order against it.
-    revisionGate.accept(revision);
+    // Application-time ordering for this read (see docs/state-ordering.md): the refresh ticket
+    // supersedes any read overtaken by an event (its ticket went stale and the newer refresh
+    // applies instead). That is not enough on its own — a save reply renders the master switch
+    // DIRECTLY, without starting a refresh, so a parked read can still be the newest ticket while
+    // holding an older snapshot. The settings part therefore also passes the revision gate:
+    // applied when strictly newer, or when its revision IS the newest applied one (nothing newer
+    // has applied — a fresh observation of the current state, e.g. restoring the switch after a
+    // failed toggle, or re-rendering after a key-only event, which moves no revision). An older
+    // snapshot is dropped; convergence is the subscription's next refresh.
+    const current = revisionGate.accept(revision) || revision === revisionGate.lastApplied();
+    if (!current) return;
     renderMaster(settings.enabled);
     renderKey(hasKey);
     renderAnalysis(last);

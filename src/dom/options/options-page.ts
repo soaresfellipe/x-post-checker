@@ -1,6 +1,7 @@
 import type { ConnectionTestResult } from '@/core/jev-client';
 import { createRevisionGate } from '@/core/message-protocol/broadcast';
 import {
+  API_KEY_STORAGE_KEY,
   DEFAULT_SETTINGS,
   NUMERIC_LIMITS,
   SETTINGS_KEYS,
@@ -116,30 +117,27 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
   // rendered; the page re-reads the store instead, converging on the newest state.
   const revisionGate = createRevisionGate();
 
-  /**
-   * Initial render from the store, gated at COMPLETION: a storage change whose event already
-   * applied during the read must not be regressed by this older snapshot — the subscription owns
-   * the newer state, so a rejected read renders nothing.
-   */
-  async function renderInitialFromStore(): Promise<void> {
-    const [{ settings, revision }, hasKey] = await Promise.all([store.getSettingsWithRevision(), store.hasApiKey()]);
-    if (!revisionGate.accept(revision)) return;
-    renderKeyPresence(hasKey);
-    renderSettings(settings);
-  }
+  // Key-presence lane, ordered independently of the settings revision (see docs/state-ordering.md):
+  // API-key writes advance no settingsRevision, so the gate cannot order key facts against reads.
+  // Storage events re-read the presence FRESH at delivery, so once one has applied, its fact is
+  // newer than any read that was still in flight. From then on reads must leave the lane alone —
+  // otherwise a delayed initial read (or resync reread) that captured `absent` would repaint over
+  // an event-applied `present`, and with no further key event the page would disagree with
+  // storage indefinitely. Until the first key event, reads own the lane (the initial render).
+  let keyEventApplied = false;
 
   /**
-   * Resync from the store after a superseded save reply (one whose revision the gate rejected, so
-   * the state it persisted may not have been applied here yet). The reread is gated at COMPLETION:
-   * a newer write can land while it is in flight (its storage event then applies the newer state
-   * through the subscription), which makes this reread stale — when the gate rejects it, this
-   * reread renders nothing and does NOT schedule another resync (at most one resync per
-   * rejection); convergence to the newest state is the already-registered subscription's job.
+   * Single read-and-render funnel for both the initial render and the resync after a superseded
+   * save reply, gated at COMPLETION (a change landing during the read must win over it):
+   * - key presence is rendered only while the lane is still read-owned (no key event applied);
+   * - settings are rendered only when the snapshot's revision is strictly newer than everything
+   *   applied so far — a snapshot overtaken by a newer write renders nothing, and convergence to
+   *   the newest state is the already-registered subscription's job.
    */
-  async function resyncFromStore(): Promise<void> {
+  async function readStoreAndRender(): Promise<void> {
     const [{ settings, revision }, hasKey] = await Promise.all([store.getSettingsWithRevision(), store.hasApiKey()]);
+    if (!keyEventApplied) renderKeyPresence(hasKey);
     if (!revisionGate.accept(revision)) return;
-    renderKeyPresence(hasKey);
     renderSettings(settings);
   }
 
@@ -150,20 +148,25 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
     } else {
       // A newer state was already applied (initial read, subscription, or a newer reply):
       // converge on the store instead of repainting this reply's older snapshot.
-      void resyncFromStore();
+      void readStoreAndRender();
     }
   }
 
-  // Subscribed before the initial read so a change landing during that read is applied by the
-  // event and the (older) read snapshot is then rejected by the revision gate, never repainting
-  // stale settings over a newer state.
+  // Subscribed before the initial read so a change landing during that read is never lost. The
+  // two lanes are ordered independently (see docs/state-ordering.md):
+  // - key presence: the event's fact was re-read fresh at delivery, so it always applies and
+  //   marks the lane event-owned — a later-completing read can no longer regress it;
+  // - settings: strictly-newer revision gate — a superseded snapshot renders nothing.
   const unsubscribe = store.subscribe((change) => {
+    const touchesKey = change.changedKeys.includes(API_KEY_STORAGE_KEY);
     const touchesSettings = change.changedKeys.some((key) => (SETTINGS_KEYS as readonly string[]).includes(key));
-    if (touchesSettings && !revisionGate.accept(change.revision)) return; // superseded settings state
-    renderKeyPresence(change.apiKeyPresent);
-    if (touchesSettings) renderSettings(change.settings);
+    if (touchesKey) {
+      keyEventApplied = true;
+      renderKeyPresence(change.apiKeyPresent);
+    }
+    if (touchesSettings && revisionGate.accept(change.revision)) renderSettings(change.settings);
   });
-  await renderInitialFromStore();
+  await readStoreAndRender();
 
   toggleButton.addEventListener('click', () => setKeyVisible(keyInput.type === 'password'));
 
