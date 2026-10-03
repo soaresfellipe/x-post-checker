@@ -5,12 +5,19 @@
  */
 import { toJevVerdict, type JevVerdict } from '@/core/heuristic-engine';
 import {
+  ANGLE_LABELS,
   MAIN_WEAKNESS_QUESTION,
   MAIN_WEAKNESS_QUESTION_ID,
+  REPLY_ANGLE_QUESTION,
+  REPLY_ANGLE_QUESTION_ID,
+  REPLY_ORDINAL_MAX,
+  REPLY_POTENTIAL_QUESTION_ID,
   VIRAL_ORDINAL_MAX,
   VIRAL_POTENTIAL_QUESTION_ID,
   WEAKNESS_LABELS,
   type MainWeaknessId,
+  type ReplyAngleId,
+  type TargetReplyAngle,
 } from './config';
 
 export interface ParsedScoreAnswer {
@@ -107,4 +114,74 @@ export function buildDraftJevVerdict(answers: ParsedDraftAnalysis): JevVerdict {
     confidence: answers.viralPotential.confidence,
     weaknesses: [WEAKNESS_LABELS[answers.mainWeakness.choice]],
   });
+}
+
+/** Parsed target rubric answers: the reply-potential score plus the suggested reply angle. */
+export interface ParsedTargetAnalysis {
+  readonly replyPotential: ParsedScoreAnswer;
+  readonly replyAngle: {
+    readonly choice: ReplyAngleId;
+    readonly confidence: number;
+    readonly probabilities: Readonly<Record<string, number>>;
+  };
+}
+
+export type ParseTargetAnalysisResult =
+  | { ok: true; answers: ParsedTargetAnalysis }
+  | { ok: false; reason: string };
+
+export function parseTargetAnalysisResponse(data: unknown): ParseTargetAnalysisResult {
+  if (!isRecord(data) || !isRecord(data.answers)) return { ok: false, reason: 'missing answers object' };
+
+  const score = data.answers[REPLY_POTENTIAL_QUESTION_ID];
+  if (!isRecord(score)) return { ok: false, reason: 'missing reply_potential answer' };
+  if (score.type !== 'score') return { ok: false, reason: 'reply_potential answer is not a score answer' };
+  const ordinal = finiteNumber(score.score);
+  if (ordinal === undefined || ordinal < 0 || ordinal > REPLY_ORDINAL_MAX) {
+    return { ok: false, reason: 'reply_potential score is not an ordinal in range' };
+  }
+  const scoreConfidence = parseConfidence(score.confidence);
+  if (scoreConfidence === undefined) return { ok: false, reason: 'reply_potential confidence is missing or invalid' };
+  const scoreProbabilities = parseProbabilities(score.probabilities);
+  if (scoreProbabilities === undefined) return { ok: false, reason: 'reply_potential probabilities are malformed' };
+
+  const choice = data.answers[REPLY_ANGLE_QUESTION_ID];
+  if (!isRecord(choice)) return { ok: false, reason: 'missing reply_angle answer' };
+  if (choice.type !== 'choice') return { ok: false, reason: 'reply_angle answer is not a choice answer' };
+  const chosen =
+    // Prototype-safe membership, same rule as the draft weakness choice: inherited Object
+    // names are not rubric options and must degrade to the typed malformed failure.
+    typeof choice.choice === 'string' && Object.hasOwn(REPLY_ANGLE_QUESTION.criteria, choice.choice)
+      ? (choice.choice as ReplyAngleId)
+      : undefined;
+  if (chosen === undefined) return { ok: false, reason: 'reply_angle choice is not one of the rubric options' };
+  const choiceConfidence = parseConfidence(choice.confidence);
+  if (choiceConfidence === undefined) return { ok: false, reason: 'reply_angle confidence is missing or invalid' };
+  const choiceProbabilities = parseProbabilities(choice.probabilities);
+  if (choiceProbabilities === undefined) return { ok: false, reason: 'reply_angle probabilities are malformed' };
+
+  return {
+    ok: true,
+    answers: {
+      replyPotential: { ordinal, confidence: scoreConfidence, probabilities: scoreProbabilities },
+      replyAngle: { choice: chosen, confidence: choiceConfidence, probabilities: choiceProbabilities },
+    },
+  };
+}
+
+/** The typed verdict for the popover: band derived from the ordinal; no draft weaknesses apply. */
+export function buildTargetJevVerdict(answers: ParsedTargetAnalysis): JevVerdict {
+  return toJevVerdict({
+    ordinal: answers.replyPotential.ordinal,
+    confidence: answers.replyPotential.confidence,
+  });
+}
+
+/** The popover's angle line: the label plus the model's confidence in the choice. */
+export function buildTargetAngle(answers: ParsedTargetAnalysis): TargetReplyAngle {
+  return {
+    choice: answers.replyAngle.choice,
+    label: ANGLE_LABELS[answers.replyAngle.choice],
+    confidence: answers.replyAngle.confidence,
+  };
 }

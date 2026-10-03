@@ -10,18 +10,34 @@
  * (request -> headers -> body), which this client inherits for every attempt.
  */
 import type { DraftSnapshot } from '@/core/draft-snapshot';
+import type { PostSnapshot } from '@/core/post-snapshot';
 import type { JevVerdict } from '@/core/heuristic-engine';
 import {
   JEV_ANALYSIS_TIMEOUT_MS,
   JEV_RATE_LIMIT,
   JEV_RETRY,
   JEV_RETRYABLE_HTTP_STATUSES,
+  ANGLE_LABELS,
   type MainWeaknessId,
+  type TargetReplyAngle,
 } from './config';
-import { createMemoryVerdictCache, type JevVerdictCache, type VerdictCacheArea } from './cache';
-import { draftCacheKey } from './hash';
-import { buildDraftAnalysisRequest } from './request';
-import { buildDraftJevVerdict, parseDraftAnalysisResponse } from './response';
+import {
+  createMemoryVerdictCache,
+  createMemoryTargetVerdictCache,
+  type JevVerdictCache,
+  type TargetCachedVerdict,
+  type TargetVerdictCache,
+  type VerdictCacheArea,
+} from './cache';
+import { draftCacheKey, targetCacheKey } from './hash';
+import { buildDraftAnalysisRequest, buildTargetAnalysisRequest } from './request';
+import {
+  buildDraftJevVerdict,
+  buildTargetAngle,
+  buildTargetJevVerdict,
+  parseDraftAnalysisResponse,
+  parseTargetAnalysisResponse,
+} from './response';
 import { createMemoryRateLimiter, createPersistentRateLimiter, type RateLimiter } from './rate-window';
 import { postJevJson } from './transport';
 
@@ -52,12 +68,34 @@ export interface JevAnalyzeRequest {
   readonly draft: DraftSnapshot;
 }
 
+/** One target deep-analysis request: the post snapshot plus the caller-read key. */
+export interface JevTargetAnalyzeRequest {
+  readonly apiKey: string | undefined;
+  readonly post: PostSnapshot;
+}
+
+/** What a target deep analysis produced: verdict + suggested angle, fresh or cached. */
+export interface JevTargetAnalysisSuccess {
+  readonly verdict: JevVerdict;
+  readonly angle?: TargetReplyAngle;
+  /** `fresh` = a real exchange just completed; `cache` = this post's stored verdict was reused. */
+  readonly source: 'fresh' | 'cache';
+  /** Measured full-exchange latency, fresh results only. */
+  readonly latencyMs?: number;
+}
+
+export type JevTargetAnalysisResult =
+  | ({ ok: true } & JevTargetAnalysisSuccess)
+  | { ok: false; failure: JevAnalysisFailure };
+
 /** Injectable retry / rate-limit policy overrides (tests inject deterministic clocks). */
 export interface JevClientDeps {
   fetchImpl?: (url: string, init: RequestInit) => Promise<Response>;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   cache?: JevVerdictCache;
+  /** The per-post verdict cache for deep analysis (defaults to in-memory; storage in background). */
+  targetCache?: TargetVerdictCache;
   timeoutMs?: number;
   retry?: { maxRetries?: number; backoffMs?: readonly number[] };
   rateLimit?: { maxRequests?: number; windowMs?: number };
@@ -72,6 +110,8 @@ export interface JevClientDeps {
 
 export interface JevClient {
   analyzeDraft(request: JevAnalyzeRequest): Promise<JevDraftAnalysisResult>;
+  /** The popover's on-demand "Deep analysis" path: one exchange per post, cached by post id. */
+  analyzeTarget(request: JevTargetAnalyzeRequest): Promise<JevTargetAnalysisResult>;
 }
 
 function delayFor(backoffMs: readonly number[], retryIndex: number): number {
@@ -98,6 +138,7 @@ function translateTransportFailure(
 
 export function createJevClient(deps: JevClientDeps = {}): JevClient {
   const cache = deps.cache ?? createMemoryVerdictCache();
+  const targetCache = deps.targetCache ?? createMemoryTargetVerdictCache();
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const timeoutMs = deps.timeoutMs ?? JEV_ANALYSIS_TIMEOUT_MS;
@@ -111,12 +152,25 @@ export function createJevClient(deps: JevClientDeps = {}): JevClient {
   const limiter: RateLimiter = deps.rateWindowArea
     ? createPersistentRateLimiter(deps.rateWindowArea, maxRequests, windowMs, now)
     : createMemoryRateLimiter(maxRequests, windowMs, now);
-  // One in-flight promise per unique draft: bursts coalesce here, and the entry is removed as soon
-  // as the promise settles so a follow-up analysis starts a fresh exchange.
-  const inFlight = new Map<string, Promise<JevDraftAnalysisResult>>();
+  // One in-flight promise per unique request identity (draft hash / target post id): bursts
+  // coalesce here, and the entry is removed as soon as the promise settles so a follow-up
+  // analysis starts a fresh exchange.
+  const inFlight = new Map<string, Promise<JevDraftAnalysisResult | JevTargetAnalysisResult>>();
 
-  async function sendWithRetry(apiKey: string, draft: DraftSnapshot, cacheKey: string): Promise<JevDraftAnalysisResult> {
-    const body = buildDraftAnalysisRequest(draft);
+  /**
+   * The shared transport+retry pipeline. `parse` turns a 200 body into either the caller's
+   * success value plus its cache entry, or a parse failure (never retried: the API answered,
+   * wrongly). Every transport attempt counts against the rate window.
+   */
+  async function exchangeWithRetry<S>(
+    apiKey: string,
+    pipeline: {
+      body: unknown;
+      cacheKey: string;
+      cacheSet: (key: string, entry: never) => Promise<void>;
+      parse: (data: unknown) => { ok: true; cacheEntry: unknown; success: S } | { ok: false };
+    },
+  ): Promise<{ ok: true; success: S; latencyMs: number } | { ok: false; failure: JevAnalysisFailure }> {
     let lastFailure: JevAnalysisFailure | undefined;
 
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
@@ -124,15 +178,13 @@ export function createJevClient(deps: JevClientDeps = {}): JevClient {
       // Every transport attempt counts against the window: a retry is a real API call.
       if (!(await limiter.tryAcquire())) return { ok: false, failure: { kind: 'rate-limited' } };
 
-      const result = await postJevJson({ apiKey, body, timeoutMs, fetchImpl: deps.fetchImpl, now });
+      const result = await postJevJson({ apiKey, body: pipeline.body, timeoutMs, fetchImpl: deps.fetchImpl, now });
       if (result.ok) {
-        const parsed = parseDraftAnalysisResponse(result.data);
+        const parsed = pipeline.parse(result.data);
         if (!parsed.ok) return { ok: false, failure: { kind: 'malformed' } }; // no retry: the API answered, wrongly
-        const mainWeakness = parsed.answers.mainWeakness.choice;
-        const entry = { verdict: buildDraftJevVerdict(parsed.answers), mainWeakness, at: now() };
         // A failed cache write never fails the analysis: the verdict is already in hand.
-        await cache.set(cacheKey, entry).catch(() => undefined);
-        return { ok: true, verdict: entry.verdict, mainWeakness, source: 'fresh', latencyMs: result.latencyMs };
+        await pipeline.cacheSet(pipeline.cacheKey, parsed.cacheEntry as never).catch(() => undefined);
+        return { ok: true, success: parsed.success, latencyMs: result.latencyMs };
       }
 
       const translated = translateTransportFailure(result.failure);
@@ -154,11 +206,87 @@ export function createJevClient(deps: JevClientDeps = {}): JevClient {
       }
 
       const existing = inFlight.get(cacheKey);
-      if (existing) return existing; // coalesced: this caller shares the ONE in-flight request
+      if (existing) return existing as Promise<JevDraftAnalysisResult>; // coalesced: this caller shares the ONE in-flight request
 
-      const promise = sendWithRetry(key, draft, cacheKey).finally(() => {
-        if (inFlight.get(cacheKey) === promise) inFlight.delete(cacheKey);
-      });
+      const promise = exchangeWithRetry<JevDraftAnalysisResult & { ok: true }>(key, {
+        body: buildDraftAnalysisRequest(draft),
+        cacheKey,
+        cacheSet: (key: string, entry: never) => cache.set(key, entry as Parameters<JevVerdictCache['set']>[1]),
+        parse: (data) => {
+          const parsed = parseDraftAnalysisResponse(data);
+          if (!parsed.ok) return { ok: false };
+          const mainWeakness = parsed.answers.mainWeakness.choice;
+          const entry = { verdict: buildDraftJevVerdict(parsed.answers), mainWeakness, at: now() };
+          return {
+            ok: true,
+            cacheEntry: entry,
+            success: { ok: true, verdict: entry.verdict, mainWeakness, source: 'fresh' } as JevDraftAnalysisResult & { ok: true },
+          };
+        },
+      })
+        .then((result) =>
+          result.ok
+            ? ({ ...result.success, latencyMs: result.latencyMs } as JevDraftAnalysisResult)
+            : { ok: false, failure: result.failure },
+        )
+        .finally(() => {
+          if (inFlight.get(cacheKey) === promise) inFlight.delete(cacheKey);
+        }) as Promise<JevDraftAnalysisResult>;
+      inFlight.set(cacheKey, promise);
+      return promise;
+    },
+
+    async analyzeTarget({ apiKey, post }) {
+      const key = apiKey?.trim();
+      if (!key) return { ok: false, failure: { kind: 'no-key' } };
+
+      // VAL-TARGET-020: the cache identity is the POST — closing and reopening this post's
+      // popover reuses its stored verdict without another request; another post pays its own.
+      const cacheKey = targetCacheKey(post.id);
+      const cached = await targetCache.get(cacheKey);
+      if (cached) {
+        return {
+          ok: true,
+          verdict: cached.verdict,
+          ...(cached.angle === undefined
+            ? {}
+            : { angle: { choice: cached.angle.choice, label: ANGLE_LABELS[cached.angle.choice], confidence: cached.angle.confidence } }),
+          source: 'cache',
+        };
+      }
+
+      const existing = inFlight.get(cacheKey);
+      if (existing) return existing as Promise<JevTargetAnalysisResult>;
+
+      const promise = exchangeWithRetry<JevTargetAnalysisResult & { ok: true }>(key, {
+        body: buildTargetAnalysisRequest(post),
+        cacheKey,
+        cacheSet: (key: string, entry: never) => targetCache.set(key, entry as Parameters<TargetVerdictCache['set']>[1]),
+        parse: (data) => {
+          const parsed = parseTargetAnalysisResponse(data);
+          if (!parsed.ok) return { ok: false };
+          const verdict = buildTargetJevVerdict(parsed.answers);
+          const angle = buildTargetAngle(parsed.answers);
+          const entry: TargetCachedVerdict = {
+            verdict,
+            angle: { choice: angle.choice, confidence: angle.confidence },
+            at: now(),
+          };
+          return {
+            ok: true,
+            cacheEntry: entry,
+            success: { ok: true, verdict, angle, source: 'fresh' } as JevTargetAnalysisResult & { ok: true },
+          };
+        },
+      })
+        .then((result) =>
+          result.ok
+            ? ({ ...result.success, latencyMs: result.latencyMs } as JevTargetAnalysisResult)
+            : { ok: false, failure: result.failure },
+        )
+        .finally(() => {
+          if (inFlight.get(cacheKey) === promise) inFlight.delete(cacheKey);
+        }) as Promise<JevTargetAnalysisResult>;
       inFlight.set(cacheKey, promise);
       return promise;
     },

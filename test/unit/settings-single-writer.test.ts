@@ -14,6 +14,12 @@ import type { ConnectionTestResult } from '@/core/jev-client';
 import type { AnalyzerService } from '@/core/analyzer';
 import { createMemoryBackend } from '../helpers/memory-backend';
 
+const test = {
+  /** Unused by these tests; the handler set requires the deep-analysis pipeline to exist. */
+  targetAnalyzer: { analyzeTarget: async () => ({ kind: 'unavailable' as const }) },
+};
+
+
 /** Stub analyzer: these tests exercise the settings/key write lanes, not the analysis pipeline. */
 const analyzer: AnalyzerService = {
   async analyzeDraft() {
@@ -61,7 +67,7 @@ describe('background single-writer for settings', () => {
   it('serializes concurrent writes from two independent contexts with unique revisions', async () => {
     const memory = createMemoryBackend();
     const store = createSettingsStore(memory.backend);
-    const handlers = createBackgroundHandlers({ store, analyzer });
+    const handlers = createBackgroundHandlers({ store, analyzer, targetAnalyzer: test.targetAnalyzer });
     const contextA = makePageContext(handlers);
     const contextB = makePageContext(handlers);
     const revisions: number[] = [];
@@ -84,7 +90,7 @@ describe('background single-writer for settings', () => {
   it('makes each write read what the previous one persisted, so no update is lost', async () => {
     const memory = createMemoryBackend();
     const store = createSettingsStore(memory.backend);
-    const handlers = createBackgroundHandlers({ store, analyzer });
+    const handlers = createBackgroundHandlers({ store, analyzer, targetAnalyzer: test.targetAnalyzer });
     const contextA = makePageContext(handlers);
     const contextB = makePageContext(handlers);
 
@@ -103,7 +109,7 @@ describe('background single-writer for settings', () => {
   it('converges every context to the store final state through storage notifications', async () => {
     const memory = createMemoryBackend();
     const store = createSettingsStore(memory.backend);
-    const handlers = createBackgroundHandlers({ store, analyzer });
+    const handlers = createBackgroundHandlers({ store, analyzer, targetAnalyzer: test.targetAnalyzer });
 
     // Each context observes the shared storage through its own store instance.
     const storeA = createSettingsStore(memory.backend);
@@ -133,7 +139,7 @@ describe('background single-writer for settings', () => {
   it('rejects a malformed update without touching storage or the revision', async () => {
     const memory = createMemoryBackend();
     const store = createSettingsStore(memory.backend);
-    const handlers = createBackgroundHandlers({ store, analyzer });
+    const handlers = createBackgroundHandlers({ store, analyzer, targetAnalyzer: test.targetAnalyzer });
     const context = makePageContext(handlers);
     await context.saveSettings({ enabled: false });
 
@@ -149,7 +155,7 @@ describe('background single-writer for settings', () => {
   it('ignores unknown keys in an update instead of persisting them', async () => {
     const memory = createMemoryBackend();
     const store = createSettingsStore(memory.backend);
-    const handlers = createBackgroundHandlers({ store, analyzer });
+    const handlers = createBackgroundHandlers({ store, analyzer, targetAnalyzer: test.targetAnalyzer });
     const context = makePageContext(handlers);
 
     await context.saveSettings({ enabled: false, jevApiKey: 'injected' } as Partial<Settings>);
@@ -162,7 +168,8 @@ describe('background single-writer for settings', () => {
     const store = createSettingsStore(memory.backend);
     await store.setApiKey('saved-key');
     const probe = vi.fn(async () => okResult);
-    const handlers = createBackgroundHandlers({ store, analyzer, runConnectionTest: probe });
+    const handlers = createBackgroundHandlers({ store, analyzer,
+        targetAnalyzer: { analyzeTarget: async () => ({ kind: 'unavailable' as const }) }, runConnectionTest: probe });
 
     const response = await handleRequest(createRequest('test-connection', { attemptId: 'a1' }), handlers);
     expect(response).toEqual({ ok: true, data: { attemptId: 'a1', result: okResult } });
@@ -174,7 +181,8 @@ describe('background single-writer for settings', () => {
     const store = createSettingsStore(memory.backend);
     await store.setApiKey('saved-key');
     const probe = vi.fn(async () => okResult);
-    const handlers = createBackgroundHandlers({ store, analyzer, runConnectionTest: probe });
+    const handlers = createBackgroundHandlers({ store, analyzer,
+        targetAnalyzer: { analyzeTarget: async () => ({ kind: 'unavailable' as const }) }, runConnectionTest: probe });
 
     await handleRequest(createRequest('test-connection', { attemptId: 'a2', apiKey: ' typed-key ' }), handlers);
     expect(probe).toHaveBeenCalledWith({ apiKey: 'typed-key' });
@@ -185,7 +193,7 @@ describe('background single-writer for API keys', () => {
   it('serializes concurrent key writes from two contexts with unique keyRevisions', async () => {
     const memory = createMemoryBackend();
     const store = createSettingsStore(memory.backend);
-    const handlers = createBackgroundHandlers({ store, analyzer });
+    const handlers = createBackgroundHandlers({ store, analyzer, targetAnalyzer: test.targetAnalyzer });
     const contextA = makeKeyPageContext(handlers);
     const contextB = makeKeyPageContext(handlers);
     const revisions: number[] = [];
@@ -206,7 +214,7 @@ describe('background single-writer for API keys', () => {
   it('stamps set and clear writes on one order, ending at the last write\'s presence', async () => {
     const memory = createMemoryBackend();
     const store = createSettingsStore(memory.backend);
-    const handlers = createBackgroundHandlers({ store, analyzer });
+    const handlers = createBackgroundHandlers({ store, analyzer, targetAnalyzer: test.targetAnalyzer });
     const contextA = makeKeyPageContext(handlers);
     const contextB = makeKeyPageContext(handlers);
 
@@ -222,7 +230,7 @@ describe('background single-writer for API keys', () => {
   it('rejects an empty key without touching storage or the counter', async () => {
     const memory = createMemoryBackend();
     const store = createSettingsStore(memory.backend);
-    const handlers = createBackgroundHandlers({ store, analyzer });
+    const handlers = createBackgroundHandlers({ store, analyzer, targetAnalyzer: test.targetAnalyzer });
     const context = makeKeyPageContext(handlers);
 
     const response = await handleRequest(createRequest('set-api-key', { key: '   ' }), handlers);

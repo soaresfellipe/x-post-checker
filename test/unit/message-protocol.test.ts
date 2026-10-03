@@ -33,6 +33,7 @@ const handlers: Handlers = {
   'clear-api-key': () => ({ apiKeyPresent: false, keyRevision: 0 }),
   'analyze-draft': ({ draft }) =>
     typeof draft.text === 'string' ? analysisResult : { kind: 'below-min-length', minDraftLength: 10 },
+  'analyze-target': () => ({ kind: 'unavailable' }),
   'open-options-page': () => ({ opened: true }),
 };
 
@@ -92,7 +93,8 @@ describe('message protocol', () => {
       'analyze-draft': () => {
         throw new Error('boom');
       },
-      'open-options-page': () => {
+      'analyze-target': () => ({ kind: 'unavailable' }),
+  'open-options-page': () => {
         throw new Error('boom');
       },
     };

@@ -3,8 +3,10 @@
  * injected store/transport while the entrypoint only wires them to the real browser APIs.
  */
 import { isDraftSnapshot, type AnalysisTrigger } from '@/core/draft-snapshot';
+import { isPostSnapshot } from '@/core/post-snapshot';
 import { runConnectionTest } from '@/core/jev-client';
 import type { AnalyzerService } from '@/core/analyzer';
+import type { TargetAnalysisService } from '@/core/target-analysis';
 import type { SettingsStore } from '@/core/settings-store';
 import { PROTOCOL_VERSION, type Handlers } from './index';
 
@@ -20,6 +22,8 @@ export interface BackgroundHandlerDeps {
   runConnectionTest?: ConnectionTester;
   /** The analysis pipeline (heuristic engine + Jev client); injectable for unit tests. */
   analyzer: AnalyzerService;
+  /** The deep-analysis pipeline for timeline targets ("Deep analysis"); injectable for tests. */
+  targetAnalyzer: TargetAnalysisService;
   /**
    * Opens the Options page (`browser.runtime.openOptionsPage`); injectable for unit tests. The
    * background always wires it; when absent the handler answers with an explicit protocol error
@@ -31,7 +35,7 @@ export interface BackgroundHandlerDeps {
 const TRIGGERS: readonly AnalysisTrigger[] = ['auto', 'manual'];
 
 export function createBackgroundHandlers(deps: BackgroundHandlerDeps): Handlers {
-  const { store, analyzer } = deps;
+  const { store, analyzer, targetAnalyzer } = deps;
   const testConnection = deps.runConnectionTest ?? runConnectionTest;
   return {
     ping: () => ({ pong: true, protocolVersion: PROTOCOL_VERSION }),
@@ -63,6 +67,12 @@ export function createBackgroundHandlers(deps: BackgroundHandlerDeps): Handlers 
       if (!isDraftSnapshot(draft)) throw new Error('Invalid draft snapshot.');
       if (!TRIGGERS.includes(trigger)) throw new Error('Invalid analysis trigger.');
       return analyzer.analyzeDraft(draft, trigger);
+    },
+    // Same untrusted-input rule for deep analysis: an invalid PostSnapshot is a protocol error;
+    // a valid one gets a typed result (analyzed / unavailable / no-key / error), never a throw.
+    'analyze-target': ({ post }) => {
+      if (!isPostSnapshot(post)) throw new Error('Invalid post snapshot.');
+      return targetAnalyzer.analyzeTarget(post);
     },
     // Content scripts cannot call runtime.openOptionsPage (extension pages only), so the overlay's
     // "Connect Jev" prompt asks the background to open it.

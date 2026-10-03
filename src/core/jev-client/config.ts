@@ -22,10 +22,10 @@ export interface JevScoreQuestion {
   readonly criteria: readonly string[];
 }
 
-export interface JevChoiceQuestion {
+export interface JevChoiceQuestion<ChoiceId extends string = MainWeaknessId> {
   readonly type: 'choice';
   readonly instructions: string;
-  readonly criteria: Readonly<Record<MainWeaknessId, string>>;
+  readonly criteria: Readonly<Record<ChoiceId, string>>;
 }
 
 export const VIRAL_POTENTIAL_QUESTION_ID = 'viral_potential';
@@ -105,3 +105,81 @@ export const JEV_CACHE_MAX_ENTRIES = 50;
 
 /** The score question's ordinal range: 0..criteria-1 (six criteria levels -> 0..5). */
 export const VIRAL_ORDINAL_MAX = VIRAL_POTENTIAL_QUESTION.criteria.length - 1;
+
+/**
+ * Reply-target deep analysis rubric (M3, the popover's "Deep analysis" action). Both question
+ * types are VERIFIED live (score and choice — library/jev-api.md); the `noul` type is not
+ * verified and is deliberately unused here. Like the draft rubric: a heuristic judgment for an
+ * English-language X audience, never presented as a prediction.
+ */
+export type ReplyAngleId =
+  | 'add_data'
+  | 'share_experience'
+  | 'ask_followup'
+  | 'respectful_disagreement'
+  | 'no_angle';
+
+export const REPLY_POTENTIAL_QUESTION_ID = 'reply_potential';
+export const REPLY_ANGLE_QUESTION_ID = 'reply_angle';
+
+/** How worthwhile is replying to THIS post, for an author seeking engagement (ordinal 0..5). */
+export const REPLY_POTENTIAL_QUESTION: JevScoreQuestion = Object.freeze({
+  type: 'score',
+  instructions:
+    'For an English-language X audience, how worthwhile is it for another user to reply to this ' +
+    'post right now if they want their reply to be seen and to earn engagement? Consider the ' +
+    'conversation momentum, the invitation to respond, and how visible a good reply would be. ' +
+    'This is a heuristic judgment, not a guaranteed prediction.',
+  criteria: Object.freeze([
+    'Very low: no visible momentum and nothing invites a reply.',
+    'Low: little momentum; a reply would likely go unnoticed.',
+    'Below average: some conversation, but replies are not clearly surfaced.',
+    'Moderate: an active conversation where a good reply can be seen.',
+    'High: strong momentum or a direct invitation; a good reply is likely to be seen.',
+    'Very high: exceptional momentum and invitation; an excellent reply opportunity right now.',
+  ]),
+});
+
+/** The single reply angle most likely to earn engagement on this post. */
+export const REPLY_ANGLE_QUESTION: JevChoiceQuestion<ReplyAngleId> = Object.freeze({
+  type: 'choice',
+  instructions: 'Which single reply angle is most likely to earn engagement on this post?',
+  criteria: Object.freeze({
+    add_data: 'Add a concrete fact, number, or source that advances the conversation.',
+    share_experience: 'Share a short first-hand experience that relates to the post.',
+    ask_followup: 'Ask a sharp follow-up question that moves the thread forward.',
+    respectful_disagreement: 'Respectfully push back with a clear reason.',
+    no_angle: 'No angle stands out; a reply is unlikely to stand out either.',
+  }),
+});
+
+/** Both target rubric questions, keyed by the ids used on the wire. */
+export const TARGET_ANALYSIS_QUESTIONS = Object.freeze({
+  [REPLY_POTENTIAL_QUESTION_ID]: REPLY_POTENTIAL_QUESTION,
+  [REPLY_ANGLE_QUESTION_ID]: REPLY_ANGLE_QUESTION,
+});
+
+/** The popover's reply-angle result: the rubric choice plus its human-readable label. */
+export interface TargetReplyAngle {
+  readonly choice: ReplyAngleId;
+  readonly label: string;
+  readonly confidence: number;
+}
+
+/** Human-readable one-liners for the angle choices, keyed by the choice ids Jev returns. */
+export const ANGLE_LABELS: Readonly<Record<ReplyAngleId, string>> = Object.freeze({
+  add_data: 'Add data - a concrete fact, number, or source.',
+  share_experience: 'Share a short first-hand experience.',
+  ask_followup: 'Ask a sharp follow-up question.',
+  respectful_disagreement: 'Respectfully disagree with a clear reason.',
+  no_angle: 'No angle stands out.',
+});
+
+/**
+ * Bump when the target rubric or its state format changes: folded into the target cache key, so
+ * a changed request can never be served an older verdict.
+ */
+export const TARGET_RUBRIC_VERSION = 'target-analysis-rubric-v1';
+
+/** The target score question's ordinal range: 0..criteria-1 (six criteria levels -> 0..5). */
+export const REPLY_ORDINAL_MAX = REPLY_POTENTIAL_QUESTION.criteria.length - 1;

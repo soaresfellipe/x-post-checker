@@ -3,7 +3,9 @@
  * background. Add a new message by extending `MessageMap`; handlers and clients stay type-checked.
  */
 import type { AnalysisTrigger, DraftSnapshot } from '@/core/draft-snapshot';
+import type { PostSnapshot } from '@/core/post-snapshot';
 import type { DraftAnalysisResult } from '@/core/analyzer';
+import type { TargetAnalysisResult } from '@/core/target-analysis';
 import type { ConnectionTestResult } from '@/core/jev-client/connection-test';
 import type { ApiKeyWriteResult, Settings, SettingsWriteResult } from '@/core/settings-store/types';
 
@@ -62,6 +64,17 @@ export interface MessageMap {
     response: DraftAnalysisResult;
   };
   /**
+   * A timeline post the user chose to deep-analyze from its target badge's popover ("Deep
+   * analysis"). The TargetAnalysisService gates on settings (`unavailable` when `jevForTargets`
+   * is off — the target path stays local, VAL-SETUP-012) and the Jev client serves the per-post
+   * cache, so repeated activations cost zero further API calls (VAL-TARGET-020). Ordinary
+   * timeline scanning NEVER sends this message.
+   */
+  'analyze-target': {
+    request: { post: PostSnapshot };
+    response: TargetAnalysisResult;
+  };
+  /**
    * Opens the extension's Options page — content scripts cannot call `runtime.openOptionsPage`
    * themselves, so the overlay's "Connect Jev" prompt routes through the background.
    */
@@ -94,6 +107,7 @@ const MESSAGE_TYPES: readonly string[] = [
   'set-api-key',
   'clear-api-key',
   'analyze-draft',
+  'analyze-target',
   'open-options-page',
 ] satisfies MessageType[];
 
