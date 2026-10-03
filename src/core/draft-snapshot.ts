@@ -23,8 +23,11 @@ export interface DraftSnapshot {
   /** Handle being replied to, without the `@`. Only present when visible in the DOM. */
   replyToHandle?: string;
   /**
-   * Follow-state indicator between the viewer and `replyToHandle`, ONLY when the DOM shows it
-   * (x.com renders it as a social-context badge). Never guessed: absent means unknown.
+   * Follow state between the viewer and `replyToHandle` — NEVER set by composer extraction: the
+   * real reply composer exposes no marker that the viewer follows the reply target (verified
+   * read-only x.com inspection 2026-10-03; `library/x-dom.md`). The field stays in the contract
+   * for the pure scoring engine (VAL-DRAFT-028) and possible future verified sources; absent
+   * means unknown, never guessed.
    */
   replyToFollowedByViewer?: boolean;
   /** Raw character count of `text` (no X-style URL/CJK weighting — the contract is raw). */

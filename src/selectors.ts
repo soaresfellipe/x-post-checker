@@ -29,11 +29,10 @@ export const SELECTORS = {
   ],
   /** Primary "replying to" handle chip in a composer region (structural fallback is scan-based). */
   replyToHandle: ['[data-testid="replyToHandle"]'],
-  /**
-   * Follow-state badge (x.com social context). Its text is localized, so only its VISIBILITY and
-   * its binding to the reply target's reply-to line may be used — never the words it shows.
-   */
-  followIndicator: ['[data-testid="socialContext"]', '[data-testid="userFollowIndicator"]'],
+  // NOTE: no follow-state selector is registered. The real reply composer exposes NO marker that
+  // the viewer follows the reply target (verified read-only inspection 2026-10-03, see
+  // library/x-dom.md); `socialContext` is generic context and `userFollowIndicator` means the
+  // REVERSE ("Follows you"). A future verified marker gets its own entry with that proof.
   article: ['article[data-testid="tweet"]', 'article[role="article"]'],
   tweetText: ['[data-testid="tweetText"]'],
   userName: ['[data-testid="User-Name"]'],

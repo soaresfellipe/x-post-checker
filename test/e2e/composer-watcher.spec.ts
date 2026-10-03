@@ -52,6 +52,16 @@ test.describe('composer watcher', () => {
     await expect(marker).toHaveAttribute('data-watcher-dispatches', '1', { timeout: 5_000 });
   });
 
+  test('counts a USER-entered leading blank line toward minDraftLength: Enter then 9 chars = 10 raw chars (VAL-SETUP-014)', async ({ context }) => {
+    const page = await openFixture(context);
+    const marker = page.locator(MARKER_HOST);
+    await page.locator(HOME_COMPOSER).click();
+    await page.keyboard.press('Enter'); // user-entered leading blank line block
+    await page.keyboard.type('123456789'); // 9 raw chars on the next line
+    // Leading newline + 9 chars = 10 raw chars: eligible, unlike the untouched placeholder.
+    await expect(marker).toHaveAttribute('data-watcher-dispatches', '1', { timeout: 5_000 });
+  });
+
   test('analyzes an IME composition exactly once, after compositionend + debounce', async ({ context }) => {
     const page = await openFixture(context);
     const marker = page.locator(MARKER_HOST);
@@ -164,11 +174,14 @@ test.describe('composer watcher', () => {
   });
 
   for (const badgeCase of [
-    { href: '/ana_builds/status/1800000000000000001', expectBoost: true, name: 'visible badge beside the reply line' },
-    { href: '/badge_hidden/status/1800000000000000011', expectBoost: false, name: 'hidden follow badge' },
-    { href: '/badge_elsewhere/status/1800000000000000012', expectBoost: false, name: 'unrelated follow badge' },
+    { href: '/ana_builds/status/1800000000000000001', name: 'visible badge beside the reply line' },
+    { href: '/badge_hidden/status/1800000000000000011', name: 'hidden follow badge' },
+    { href: '/badge_elsewhere/status/1800000000000000012', name: 'unrelated follow badge' },
   ]) {
-    test(`reply follow boost only with a visible, target-specific badge: ${badgeCase.name} (VAL-DRAFT-019)`, async ({ context }) => {
+    test(`never boosts reply-mutual from a composer badge: ${badgeCase.name} (VAL-DRAFT-019, verified real-x absence)`, async ({ context }) => {
+      // library/x-dom.md (2026-10-03): the real reply composer exposes no viewer-follows-target
+      // marker, so the snapshot never carries replyToFollowedByViewer and the breakdown always
+      // reads the follow state as not visible — whatever badge variant the page shows.
       const page = await openFixture(context);
       await page.locator(`a[href="${badgeCase.href}"]`).first().click();
       await expect(page.locator(REPLY_COMPOSER)).toBeVisible();
@@ -178,13 +191,8 @@ test.describe('composer watcher', () => {
       const signals = page.getByTestId('overlay-signals');
       await expect(signals).toBeVisible({ timeout: 5_000 });
       const row = signals.locator('li[data-signal-id="reply-mutual"]');
-      if (badgeCase.expectBoost) {
-        await expect(row).toContainText('the viewer follows (visible)');
-        await expect(row.locator('.points')).toHaveText('+5');
-      } else {
-        await expect(row).toContainText('not visible, boost not applied');
-        await expect(row.locator('.points')).toHaveText('0');
-      }
+      await expect(row).toContainText('not visible, boost not applied');
+      await expect(row.locator('.points')).toHaveText('0');
     });
   }
 });

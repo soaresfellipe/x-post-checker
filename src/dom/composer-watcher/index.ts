@@ -7,7 +7,6 @@ export {
   findReplyToHandle,
   getComposerTestidIndex,
   getComposerText,
-  hasVisibleFollowIndicatorForReplyTarget,
 } from './extract';
 export { createComposerWatcher, describeComposer } from './watcher';
 export { stampWatcherDiagnostics } from './diagnostics';

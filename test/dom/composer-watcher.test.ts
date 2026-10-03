@@ -415,16 +415,18 @@ describe('snapshot payload on dispatch', () => {
     expect(snapshot.urls).toEqual(['https://thanks.example/x']);
   });
 
-  it('grants replyToFollowedByViewer only for a visible, target-specific follow badge', async () => {
-    // Visible badge beside the reply-to line → boost proof. Hidden or unrelated badges elsewhere
-    // in the composer region must leave the field ABSENT (never guessed, VAL-DRAFT-019).
+  it('never sets replyToFollowedByViewer from any socialContext badge (verified real-x absence)', async () => {
+    // library/x-dom.md (2026-10-03): the real reply composer exposes no viewer-follows-target
+    // marker, so NO badge — visible or hidden, follow-worded or generic, beside the line or
+    // nested away — may fabricate follow proof (VAL-DRAFT-019 never-guessed rule).
     const replyLine = '<div dir="ltr"><span>Respondendo a </span><a href="/ana_builds" role="link">@ana_builds</a></div>';
     const badgeCases = [
-      { html: '<span data-testid="socialContext">Seguindo</span>', expectField: true },
-      { html: '<span data-testid="socialContext" style="display:none">Seguindo</span>', expectField: false },
-      { html: '<div class="quoted-post-context"><span data-testid="socialContext">Seguindo</span></div>', expectField: false },
+      { html: '<span data-testid="socialContext">Seguindo</span>' },
+      { html: '<span data-testid="socialContext">Curtido por alguém</span>' },
+      { html: '<span data-testid="socialContext" style="display:none">Seguindo</span>' },
+      { html: '<div class="quoted-post-context"><span data-testid="socialContext">Seguindo</span></div>' },
     ] as const;
-    for (const { html, expectField } of badgeCases) {
+    for (const { html } of badgeCases) {
       document.body.innerHTML = REPLY_VIEW_HTML.replace(replyLine, `${replyLine}${html}`);
       const { harness } = start();
       await vi.advanceTimersByTimeAsync(0);
@@ -434,8 +436,7 @@ describe('snapshot payload on dispatch', () => {
       expect(harness.dispatches).toHaveLength(1);
       const snapshot = harness.dispatches[0]!.snapshot;
       expect(snapshot.replyToHandle).toBe('ana_builds');
-      if (expectField) expect(snapshot.replyToFollowedByViewer).toBe(true);
-      else expect('replyToFollowedByViewer' in snapshot).toBe(false);
+      expect('replyToFollowedByViewer' in snapshot).toBe(false);
       document.body.innerHTML = '';
     }
   });

@@ -97,101 +97,44 @@ function handleFromText(text: string | null | undefined): string | undefined {
   return match ? match[1]! : undefined;
 }
 
-/**
- * True only when a follow-state badge is VISIBLE on screen and BOUND to the reply target:
- * - visible: neither the badge nor an ancestor is hidden (`hidden` attribute, display:none,
- *   visibility:hidden) — a hidden badge proves nothing the viewer can see;
- * - bound: the badge sits with the visible reply-to line for `handle` (inside the line's own
- *   block, or beside it under the same parent) — a social-context badge nested elsewhere in the
- *   composer region says nothing about THIS reply target.
- * The badge text is localized, so only structure and visibility are read. Association with the
- * reply-to line is positional; real-x follow-badge semantics stay unverified, so the badge is
- * never documented as a general marker.
- */
-export function hasVisibleFollowIndicatorForReplyTarget(region: ParentNode, handle: string | undefined): boolean {
-  if (!handle) return false; // no visible reply target to bind a badge to: never guess
-  const anchors = replyTargetAnchors(region, handle);
-  if (anchors.length === 0) return false;
-  for (const selector of SELECTORS.followIndicator) {
-    for (const badge of region.querySelectorAll(selector)) {
-      if (!isVisible(badge)) continue;
-      if (!bindsToReplyTarget(badge, anchors)) continue;
-      return true;
-    }
-  }
-  return false;
-}
-
-/** Elements in the region that visibly reference the reply target handle. */
-function replyTargetAnchors(region: ParentNode, handle: string): Element[] {
-  const anchors: Element[] = [];
-  for (const selector of SELECTORS.replyToHandle) {
-    for (const chip of region.querySelectorAll(selector)) {
-      const link = chip.matches('a[href]') ? chip : chip.querySelector('a[href]');
-      if (handleFromLink(link) === handle || handleFromText(chip.textContent) === handle) anchors.push(chip);
-    }
-  }
-  for (const link of region.querySelectorAll('a[href^="/"][role="link"]')) {
-    if (handleFromLink(link) === handle && (link.textContent ?? '').trim().startsWith('@')) anchors.push(link);
-  }
-  return anchors;
-}
-
-/** The badge rides with the reply-to line: inside its block, or a sibling under the same parent. */
-function bindsToReplyTarget(badge: Element, anchors: Element[]): boolean {
-  for (const anchor of anchors) {
-    const line = anchor.parentElement;
-    if (!line) continue;
-    if (line.contains(badge)) return true;
-    if (badge.parentElement === line.parentElement) return true;
-  }
-  return false;
-}
-
-/** Rendered on screen: no `hidden` attribute and no display:none / visibility:hidden ancestor. */
-function isVisible(element: Element): boolean {
-  let node: Element | null = element;
-  while (node !== null) {
-    if (node.hasAttribute('hidden')) return false;
-    const win: Window | null = node.ownerDocument?.defaultView ?? null;
-    const style = win?.getComputedStyle(node);
-    if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
-    node = node.parentElement;
-  }
-  return true;
-}
-
 function hasComposerMedia(region: ParentNode): boolean {
   return SELECTORS.composerMedia.some((selector) => region.querySelector(selector) !== null);
 }
 
 /**
  * Full composer text: DraftEditor renders one block element per line; join those with newlines.
- * Empty line blocks are REAL lines — a `<div><br></div>` block contributes the newline that
- * separates it, so blank lines count toward the raw charCount (VAL-DRAFT-030, VAL-SETUP-014).
- * Leading empty blocks are the untouched-composer placeholder shape and stay zero chars, so the
- * empty state survives (VAL-DRAFT-005).
+ * Every line block is newline-separated from what precedes it — including EMPTY blocks, whose
+ * newlines are raw characters the user entered (leading, interior and trailing blank lines all
+ * count toward charCount: VAL-DRAFT-030, VAL-SETUP-014). The single untouched-placeholder block
+ * (one empty block, nothing before it) contributes nothing, so the empty state survives
+ * (VAL-DRAFT-005) — but as soon as anything precedes a block, that block joins with its newline.
  */
 export function getComposerText(composer: Element): string {
   let text = '';
+  // Whether anything was emitted before the current node: a prior line block (EVEN a blank one —
+  // the user entered its newline) or a non-blank inline run. A blank line's newline is raw text.
+  let sawContent = false;
   for (const node of composer.childNodes) {
     if (node.nodeType === node.TEXT_NODE) {
       // DraftEditor keeps all text inside line blocks; stray whitespace-only top-level nodes are
       // markup formatting, not draft content.
       const value = node.textContent ?? '';
-      if (value.trim()) text += value;
+      if (value.trim()) {
+        text += value;
+        sawContent = true;
+      }
       continue;
     }
     if (node.nodeType !== node.ELEMENT_NODE) continue;
     const element = node as Element;
     const inner = element.textContent ?? '';
     if (element.localName === 'div' || element.localName === 'p') {
-      // Line block: newline-separate it from prior content; an empty block keeps its separator
-      // (the blank line's raw newline) unless no content precedes it (placeholder shape).
-      text = text ? `${text}\n${inner}` : inner;
+      text = sawContent ? `${text}\n${inner}` : inner;
+      sawContent = true;
       continue;
     }
     text += inner; // inline markup inside the flow: no line break of its own
+    if (inner.trim()) sawContent = true;
   }
   return text;
 }
@@ -199,8 +142,13 @@ export function getComposerText(composer: Element): string {
 /**
  * Field-for-field DraftSnapshot from the live composer (VAL-DRAFT-030): text, hashtags, urls
  * (t.co-expanded when the markup exposes the destination), hasMedia, reply context (isReply,
- * replyToHandle, replyToFollowedByViewer ONLY with a visible, target-specific follow badge),
- * raw charCount and capturedAt.
+ * replyToHandle) and raw charCount + capturedAt.
+ *
+ * `replyToFollowedByViewer` is NEVER set here: the real reply composer exposes no marker that
+ * the viewer follows the reply target (verified read-only x.com inspection 2026-10-03 — see
+ * `library/x-dom.md`). Any badge near the reply-to line (socialContext / userFollowIndicator)
+ * is at best generic context or the reverse-direction "Follows you", so the field stays absent
+ * and the breakdown honestly reads "not visible" (never guessed, architecture.md).
  */
 export function extractDraftSnapshot(composer: Element, options: { now?: number } = {}): DraftSnapshot {
   const text = getComposerText(composer);
@@ -219,9 +167,6 @@ export function extractDraftSnapshot(composer: Element, options: { now?: number 
     capturedAt: options.now ?? Date.now(),
   };
   if (replyToHandle !== undefined) snapshot.replyToHandle = replyToHandle;
-  if (replyToHandle !== undefined && hasVisibleFollowIndicatorForReplyTarget(region, replyToHandle)) {
-    snapshot.replyToFollowedByViewer = true;
-  }
   return snapshot;
 }
 

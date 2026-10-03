@@ -52,7 +52,7 @@ describe('composer extraction (VAL-DRAFT-030)', () => {
     expect(snapshot.hasMedia).toBe(true);
     expect(snapshot.isReply).toBe(true);
     expect(snapshot.replyToHandle).toBe('ana_builds');
-    expect(snapshot.replyToFollowedByViewer).toBe(true);
+    expect('replyToFollowedByViewer' in snapshot).toBe(false);
     expect(snapshot.charCount).toBe(snapshot.text.length);
     expect(snapshot.capturedAt).toBe(1_700_000_000_000);
   });
@@ -77,7 +77,7 @@ describe('composer extraction (VAL-DRAFT-030)', () => {
     expect(snapshot.charCount).toBe(snapshot.text.length);
   });
 
-  it('omits replyToFollowedByViewer when no follow state is visible (never guessed)', () => {
+  it('omits every optional reply field beyond the visible handle (nothing guessed)', () => {
     document.querySelector('[data-testid="socialContext"]')!.remove();
     const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
     expect(snapshot.isReply).toBe(true);
@@ -169,16 +169,46 @@ describe('composer text extraction', () => {
     expect(extractDraftSnapshot(composer, { now: 1 }).charCount).toBe(0);
   });
 
-  it('reads leading empty line blocks as the untouched-composer shape, not as newlines', () => {
+  it('counts a USER-entered leading blank line as the raw newline (blank + 9 chars = 10 raw chars)', () => {
+    // Pressing Enter on the untouched composer leaves one empty leading block; typing nine
+    // characters after it yields 10 RAW characters — eligible at minDraftLength 10
+    // (VAL-SETUP-014, VAL-DRAFT-030). Only the untouched placeholder may read as zero.
+    document.body.innerHTML =
+      '<div id="c" role="textbox" contenteditable="true"><div><br></div><div>123456789</div></div>';
+    const composer = document.getElementById('c')!;
+
+    expect(getComposerText(composer)).toBe('\n123456789');
+    const snapshot = extractDraftSnapshot(composer, { now: 1 });
+    expect(snapshot.charCount).toBe(10);
+    expect(isDraftEligible(snapshot, 10)).toBe(true);
+  });
+
+  it('keeps the leading-blank boundary honest: blank + 8 chars = 9 raw chars, below the gate', () => {
+    document.body.innerHTML =
+      '<div id="c" role="textbox" contenteditable="true"><div><br></div><div>12345678</div></div>';
+    const composer = document.getElementById('c')!;
+
+    const snapshot = extractDraftSnapshot(composer, { now: 1 });
+    expect(snapshot.text).toBe('\n12345678');
+    expect(snapshot.charCount).toBe(9);
+    expect(isDraftEligible(snapshot, 10)).toBe(false);
+  });
+
+  it('counts EVERY user-entered leading blank line (two leading blanks + text = two raw newlines)', () => {
     document.body.innerHTML =
       '<div id="c" role="textbox" contenteditable="true"><div><br></div><div><br></div><div>real text</div></div>';
     const composer = document.getElementById('c')!;
 
-    expect(getComposerText(composer)).toBe('real text');
+    expect(getComposerText(composer)).toBe('\n\nreal text');
+    expect(extractDraftSnapshot(composer, { now: 1 }).charCount).toBe(11);
   });
 });
 
-describe('follow indicator binding (VAL-DRAFT-019: visible and target-specific only)', () => {
+describe('follow proof is never inferred from composer DOM (VAL-DRAFT-019, verified real-x absence)', () => {
+  // library/x-dom.md (2026-10-03 inspection): the real reply composer region exposes NO node for
+  // "viewer follows the reply target" — no socialContext, no userFollowIndicator, no follow-
+  // vocabulary text, for in-network AND out-of-network targets, before and after focus. A badge
+  // near the reply-to line is therefore never follow proof, whatever its testid or words.
   const replyWith = (badgeHtml: string, replyLineHtml = ''): string => `
 <div data-testid="primaryColumn">
   <div data-testid="replyComposerContainer">
@@ -189,58 +219,51 @@ describe('follow indicator binding (VAL-DRAFT-019: visible and target-specific o
     </div>
   </div>
 </div>`;
+  const replyLine = '<div dir="ltr"><span>Respondendo a </span><a href="/ana_builds" role="link">@ana_builds</a></div>';
 
-  it('grants the follow state for a visible badge beside the reply-to line (target-specific)', () => {
-    document.body.innerHTML = RICH_REPLY_COMPOSER_HTML;
-    const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
-    expect(snapshot.replyToHandle).toBe('ana_builds');
-    expect(snapshot.replyToFollowedByViewer).toBe(true);
-  });
-
-  it('accepts the userFollowIndicator testid as the target-specific badge when visible', () => {
-    document.body.innerHTML = RICH_REPLY_COMPOSER_HTML;
-    document.querySelector('[data-testid="socialContext"]')!.setAttribute('data-testid', 'userFollowIndicator');
-    const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
-    expect(snapshot.replyToFollowedByViewer).toBe(true);
-  });
-
-  it('stays absent when the badge is hidden with display:none', () => {
-    document.body.innerHTML = RICH_REPLY_COMPOSER_HTML;
-    document.querySelector('[data-testid="socialContext"]')!.setAttribute('style', 'display:none');
+  it('never treats a generic socialContext sibling of the reply-to line as follow proof', () => {
+    // The round-2 blocker: a generic "Liked by someone" badge shares the reply line's container —
+    // proximity is not a follow relationship, and liking the post proves nothing about following.
+    document.body.innerHTML = replyWith(
+      '<span data-testid="socialContext">Curtido por alguém</span>',
+      replyLine,
+    );
     const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
     expect(snapshot.replyToHandle).toBe('ana_builds');
     expect('replyToFollowedByViewer' in snapshot).toBe(false);
   });
 
-  it('stays absent when the badge carries the hidden attribute', () => {
-    document.body.innerHTML = RICH_REPLY_COMPOSER_HTML;
-    document.querySelector('[data-testid="socialContext"]')!.setAttribute('hidden', '');
+  it('never treats even follow-WORDED badges beside the reply line as follow proof', () => {
+    document.body.innerHTML = replyWith('<span data-testid="socialContext">Seguindo</span>', replyLine);
+    const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
+    expect('replyToFollowedByViewer' in snapshot).toBe(false);
+  });
+
+  it('never treats a userFollowIndicator badge as viewer-follows-target proof (direction is the reverse)', () => {
+    document.body.innerHTML = replyWith('<span data-testid="userFollowIndicator">Segue você</span>', replyLine);
+    const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
+    expect('replyToFollowedByViewer' in snapshot).toBe(false);
+  });
+
+  it('stays absent when the badge is hidden with display:none', () => {
+    document.body.innerHTML = replyWith(
+      '<span data-testid="socialContext" style="display:none">Seguindo</span>',
+      replyLine,
+    );
     const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
     expect('replyToFollowedByViewer' in snapshot).toBe(false);
   });
 
   it('stays absent when a socialContext badge in the region is unrelated to the reply line', () => {
-    // Present in the composer region but nested away from the reply-to chip: it says nothing
-    // about the reply target, so the boost must never be guessed from it.
     document.body.innerHTML = replyWith(
       '<div class="quoted-post-context"><span data-testid="socialContext">Seguindo</span></div>',
-      '<div dir="ltr"><span>Respondendo a </span><a href="/ana_builds" role="link">@ana_builds</a></div>',
-    );
-    const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
-    expect(snapshot.replyToHandle).toBe('ana_builds');
-    expect('replyToFollowedByViewer' in snapshot).toBe(false);
-  });
-
-  it('stays absent when the badge is inside a hidden subtree', () => {
-    document.body.innerHTML = replyWith(
-      '<div style="display:none"><span data-testid="socialContext">Seguindo</span></div>',
-      '<div dir="ltr"><span>Respondendo a </span><a href="/ana_builds" role="link">@ana_builds</a></div>',
+      replyLine,
     );
     const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
     expect('replyToFollowedByViewer' in snapshot).toBe(false);
   });
 
-  it('stays absent when no visible reply target exists to bind the badge to', () => {
+  it('stays absent when no visible reply target exists to bind a badge to', () => {
     document.body.innerHTML = replyWith('<span data-testid="socialContext">Seguindo</span>');
     const snapshot = extractDraftSnapshot(findComposer(document)!, { now: 1 });
     expect(snapshot.isReply).toBe(true); // numbered reply composer
