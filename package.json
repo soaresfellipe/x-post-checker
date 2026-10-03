@@ -39,6 +39,7 @@
     "test:unit": "vitest run test/unit",
     "test:dom": "vitest run test/dom",
     "test:e2e": "playwright test",
+    "test:real-x": "pnpm build:chrome && node scripts/real-x-smoke.mjs",
     "fixture": "tsx scripts/fixture-server.ts",
     "parity": "tsx scripts/parity/run.ts --browser=both",
     "parity:chrome": "tsx scripts/parity/run.ts --browser=chrome",

@@ -88,6 +88,7 @@ pnpm build:firefox  # -> .output/firefox-mv3
 | `pnpm test` | All three suites in order. |
 | `pnpm parity` | **Cross-browser fixture parity**: the same 12 scenario flows (composer detection, empty state, local score, Jev success/failure/clearing/stale responses, SPA teardown/remount, API-outage resilience on both surfaces) run in Chrome (Playwright) and Firefox (web-ext + headless Firefox), their outcomes are compared field-by-field, and each browser's Options page is opened and verified. |
 | `pnpm parity:chrome` / `pnpm smoke:firefox` | The same harness for one browser. |
+| `pnpm test:real-x` | **Real x.com read-only smoke (Chrome, automated)** — rebuilds the release Chrome build, then loads it in a cookie-backed headless Chromium on the real logged-in x.com. See the next section. Separate from `pnpm test` on purpose (the anti-bot-prone live site must never gate a milestone). |
 | `pnpm fixture` | Standalone fixture server (port 3177) — the harnesses host it in-process themselves. |
 
 ### The e2e build mode
@@ -97,6 +98,51 @@ its content script also injects into the local fixture page, and the smoke harne
 state and steer the Jev endpoint to an in-process mock through a test-only protocol message. The
 **release** build (`mode production`) contains none of this — test hooks are inert unless the
 build mode is `e2e`.
+
+## Real x.com verification (read-only)
+
+The extension ships for the real site, so its live-site checks are strictly **read-only**: nothing
+is ever posted, liked, followed, reposted, or bookmarked, and the Post button is never touched.
+Typing a synthetic draft into the composer (without submitting) is the most the automated run does.
+
+### Automated Chrome leg — `pnpm test:real-x`
+
+Rebuilds the release Chrome build and loads it into a headless Chromium whose profile is seeded
+with the `X_AUTH_TOKEN` / `X_CT0` session cookies (read from the gitignored `.env.local` into
+memory; the temporary profile is deleted when the run ends, pass or fail). It then verifies on
+`https://x.com/home`:
+
+1. the content script activates (marker mounts, background connected, composer watched);
+2. reply-target badges appear on eligible timeline posts (default threshold first; if the live
+   timeline yields none, the threshold is lowered through the real Options UI and the timeline is
+   re-gated — the configured threshold defines eligibility);
+3. typing a synthetic draft shows the overlay with a local score and the "Local signals only"
+   notice (the profile has no API key, so the AI half is structurally off); the draft is cleared
+   afterwards and never submitted;
+4. clicking an extension-owned badge opens its popover without navigating or activating the post;
+5. the network capture shows **zero** `api.typesafe.ai` requests and **zero** post-submission
+   requests (`CreateTweet`/`CreateNoteTweet`/`statuses/update`/`CreatePost`);
+6. the session is still logged in at the end (no logout side-effects).
+
+Evidence (redacted: page text transparent and images hidden in screenshots, only method/host/path
+in the network log, no cookies/keys/headers anywhere) lands in `test-results/real-x-smoke/`
+(override with `REALX_EVIDENCE_DIR`). Exit codes: 0 pass, 2 missing cookies, 3 session
+challenged/expired (do not retry aggressively), 4 assertion failure, 1 error.
+
+### Manual leg — your own Chrome and Firefox
+
+The live-site badge/popover check in **both** browsers is a human verification:
+
+1. Load the unpacked build in your browser (instructions above) and log in to x.com normally.
+2. On your home timeline, confirm eligible posts show AmplifyX badges.
+3. Click a badge: the popover must open and the post behind it must NOT activate or navigate
+   (the click is confined to the extension's own Shadow DOM). Confirm the post's URL and state
+   are unchanged, and that you performed no post action.
+4. With no Jev key configured, confirm the devtools network tab shows no `api.typesafe.ai`
+   requests while scrolling the timeline (badge scoring is local).
+5. Afterwards, confirm you are still logged in (no logout side-effects).
+6. Capture the screenshots you share as evidence with the same redaction care: no key, no session
+   cookies, and blur/remove personal timeline content you would not publish.
 
 ## Repository layout
 
