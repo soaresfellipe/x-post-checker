@@ -377,6 +377,104 @@ describe('JevClient persistent rate window (survives service-worker restarts, VA
       failure: { kind: 'rate-limited' },
     });
   });
+
+  // Fail CLOSED (VAL-DRAFT-031): when durable rate accounting cannot be established, the request
+  // must NOT be sent — an unpersisted window stamp would let a restarted worker admit requests
+  // beyond the configured hard maximum. The typed degraded failure keeps the honest outcome.
+  it('denies the send when the hydration read rejects (durable accounting unavailable)', async () => {
+    const fetchOk = vi.fn(async () => jevOkResponse());
+    const readRejects = {
+      get: async () => {
+        throw new Error('storage.local get failed');
+      },
+      set: async (items: Record<string, unknown>) => {
+        await createMemoryBackend().backend.area.set(items); // writes would work; reads never do
+      },
+    };
+    const client = createJevClient({
+      fetchImpl: fetchOk,
+      now: vi.fn(() => 1_000),
+      rateLimit: { maxRequests: 2, windowMs: 60_000 },
+      rateWindowArea: readRejects,
+    });
+
+    const result = await client.analyzeDraft({ apiKey: KEY, draft: makeDraft() });
+
+    expect(result).toEqual({ ok: false, failure: { kind: 'rate-limited' } });
+    expect(fetchOk).not.toHaveBeenCalled(); // never sent with unpersisted accounting
+  });
+
+  it('denies the send when the reservation write rejects (the stamp would not survive a restart)', async () => {
+    const memory = createMemoryBackend({ failWrites: true });
+    const fetchOk = vi.fn(async () => jevOkResponse());
+    const client = createJevClient({
+      fetchImpl: fetchOk,
+      now: vi.fn(() => 1_000),
+      rateLimit: { maxRequests: 2, windowMs: 60_000 },
+      rateWindowArea: memory.backend.area,
+    });
+
+    const result = await client.analyzeDraft({ apiKey: KEY, draft: makeDraft() });
+
+    expect(result).toEqual({ ok: false, failure: { kind: 'rate-limited' } });
+    expect(fetchOk).not.toHaveBeenCalled(); // the unpersisted reservation is never sent
+  });
+
+  it('holds the ceiling across a restart after rejected writes: a fresh client inside the window still cannot send', async () => {
+    // QUOTA_BYTES-style persistent failure: EVERY write rejects, so no stamp can ever persist.
+    const memory = createMemoryBackend({ failWrites: true });
+    const fetchOk = vi.fn(async () => jevOkResponse());
+    const rateLimit = { maxRequests: 2, windowMs: 60_000 };
+    const deps = { fetchImpl: fetchOk, now: vi.fn(() => 1_000), rateLimit, rateWindowArea: memory.backend.area };
+
+    const first = createJevClient(deps);
+    expect(await first.analyzeDraft({ apiKey: KEY, draft: makeDraft() })).toEqual({
+      ok: false,
+      failure: { kind: 'rate-limited' },
+    });
+
+    // Simulated MV3 restart inside the same 60s window: the fail-open bug would admit a fresh
+    // client (empty rehydration) and blow through the maximum. Fail-closed keeps the ceiling.
+    const restarted = createJevClient(deps);
+    expect(await restarted.analyzeDraft({ apiKey: KEY, draft: makeDraft({ isReply: true }) })).toEqual({
+      ok: false,
+      failure: { kind: 'rate-limited' },
+    });
+
+    expect(fetchOk).not.toHaveBeenCalled(); // 0 real requests ≤ the configured maximum
+  });
+
+  it('holds the ceiling across a restart when the storage breaks after an earlier successful send', async () => {
+    // maxRequests=2: send 1 persists, then the storage breaks. The in-window restart must
+    // rehydrate send 1 and still deny the unpersistable reservation (fail-open would allow the
+    // restarted client to send on memory-only accounting).
+    const memory = createMemoryBackend();
+    const now = vi.fn(() => 1_000);
+    const fetchOk = vi.fn(async () => jevOkResponse());
+    const rateLimit = { maxRequests: 2, windowMs: 60_000 };
+    let broken = false;
+    const breakingArea = {
+      get: memory.backend.area.get,
+      set: async (items: Record<string, unknown>) => {
+        if (broken) throw new Error('QUOTA_BYTES quota exceeded');
+        await memory.backend.area.set(items);
+      },
+    };
+    const first = createJevClient({ fetchImpl: fetchOk, now, rateLimit, rateWindowArea: breakingArea });
+    expect(await first.analyzeDraft({ apiKey: KEY, draft: makeDraft() })).toMatchObject({ ok: true });
+    broken = true;
+
+    const result = await first.analyzeDraft({ apiKey: KEY, draft: makeDraft({ isReply: true }) });
+    expect(result).toEqual({ ok: false, failure: { kind: 'rate-limited' } });
+    expect(fetchOk).toHaveBeenCalledTimes(1); // send 2 denied: its stamp would not persist
+
+    const restarted = createJevClient({ fetchImpl: fetchOk, now, rateLimit, rateWindowArea: breakingArea });
+    expect(await restarted.analyzeDraft({ apiKey: KEY, draft: makeDraft({ isReply: true, replyToHandle: 'x' }) })).toEqual({
+      ok: false,
+      failure: { kind: 'rate-limited' },
+    });
+    expect(fetchOk).toHaveBeenCalledTimes(1); // the ceiling (2) was never exceeded: 1 real send
+  });
 });
 
 describe('JevClient typed failures (never throw into the UI)', () => {
