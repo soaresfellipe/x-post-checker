@@ -23,8 +23,8 @@ function snapshot(partial: Partial<PostSnapshot> & { id?: string; text?: string 
 }
 
 /** The scorer under test, applied to a factory snapshot. */
-function scored(partial: Partial<PostSnapshot> & { id?: string; text?: string }): TargetScore {
-  return scoreTarget(snapshot(partial));
+function scored(partial: Partial<PostSnapshot> & { id?: string; text?: string }, now?: number): TargetScore {
+  return now === undefined ? scoreTarget(snapshot(partial)) : scoreTarget(snapshot(partial), now);
 }
 
 /** Neutral filler with no '?', no digits, and no bait/claim vocabulary (target signals only). */
@@ -125,6 +125,37 @@ describe('48-hour recency filter (VAL-TARGET-010)', () => {
 
   it('boundary: exactly 48 hours stays eligible, strictly older is excluded', () => {
     expect(scored({ ageMinutes: TARGET_CONFIG.recency.maxAgeMinutes - 1 }).eligible).toBe(true);
+    expect(scored({ ageMinutes: TARGET_CONFIG.recency.maxAgeMinutes }).eligible).toBe(true);
+    expect(scored({ ageMinutes: TARGET_CONFIG.recency.maxAgeMinutes + 1 }).eligible).toBe(false);
+  });
+
+  it('eligibility derives from the EXACT publication instant, never a rounded minute value', () => {
+    const NOW = Date.parse('2026-10-03T12:00:00Z');
+    const maxAgeMs = TARGET_CONFIG.recency.maxAgeMinutes * 60_000;
+    // Exactly 48h stays eligible (strict >48h exclusion, mirroring the x-algorithm AgeFilter).
+    expect(scored({ publishedAt: NOW - maxAgeMs, ageMinutes: 2880 }, NOW).eligible).toBe(true);
+    // 48h + 1s and + 29s ROUND to 2880 whole minutes: the rounded capture would pass the gate,
+    // the exact instant must not (the extraction-to-scorer bug this locks out).
+    expect(scored({ publishedAt: NOW - maxAgeMs - 1_000, ageMinutes: 2880 }, NOW).eligible).toBe(false);
+    expect(scored({ publishedAt: NOW - maxAgeMs - 29_000, ageMinutes: 2880 }, NOW).eligible).toBe(false);
+    // 48h + 30s and beyond: excluded (and past the rounding window too).
+    expect(scored({ publishedAt: NOW - maxAgeMs - 30_000, ageMinutes: 2881 }, NOW).eligible).toBe(false);
+    // Just under 48h stays eligible.
+    expect(scored({ publishedAt: NOW - maxAgeMs + 1_000, ageMinutes: 2880 }, NOW).eligible).toBe(true);
+    expect(scored({ publishedAt: NOW - maxAgeMs + 30_000, ageMinutes: 2879 }, NOW).eligible).toBe(true);
+  });
+
+  it('an exact-age exclusion carries the stale reason and a zero score like any other stale post', () => {
+    const NOW = Date.parse('2026-10-03T12:00:00Z');
+    const maxAgeMs = TARGET_CONFIG.recency.maxAgeMinutes * 60_000;
+    const stale = scored({ publishedAt: NOW - maxAgeMs - 5_000, ageMinutes: 2880, ...counts }, NOW);
+    expect(stale.eligible).toBe(false);
+    expect(stale.ineligibleReason).toBe('stale-over-48h');
+    expect(stale.headline).toBe(0);
+    expect(stale.signals).toHaveLength(1);
+  });
+
+  it('a snapshot without the exact instant (legacy) still gates on the whole-minute capture', () => {
     expect(scored({ ageMinutes: TARGET_CONFIG.recency.maxAgeMinutes }).eligible).toBe(true);
     expect(scored({ ageMinutes: TARGET_CONFIG.recency.maxAgeMinutes + 1 }).eligible).toBe(false);
   });

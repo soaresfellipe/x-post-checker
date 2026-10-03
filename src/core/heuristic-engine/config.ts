@@ -169,9 +169,12 @@ export const JEV_BAND_LABELS: Readonly<Record<string, string>> = {
 export const TARGET_CONFIG = {
   /**
    * AgeFilter (hard eligibility): candidates older than 48 hours are removed regardless of
-   * engagement. "Older than" is strict — a post captured at exactly maxAgeMinutes is still in.
+   * engagement. "Older than" is strict — a post captured at exactly 48 hours is still in.
+   * `maxAgeMs` is the SAME window at exact-ms granularity: eligibility compares
+   * `now - publishedAt > maxAgeMs`, never the rounded whole-minute capture, whose rounding
+   * would admit posts up to 30 seconds past the boundary.
    */
-  recency: { maxAgeMinutes: 48 * 60 },
+  recency: { maxAgeMinutes: 48 * 60, maxAgeMs: 48 * 60 * 60_000 },
 
   weights: {
     /** A question invites predicted replies (the +5.0 reply coefficient, as the draft question signal). */

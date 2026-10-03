@@ -4,6 +4,7 @@ import {
   parseLocalizedCount,
   parseStatusLink,
   postAgeMinutes,
+  postPublishedAt,
   postMetricsSignature,
   type PostSnapshot,
 } from '../../src/core/post-snapshot';
@@ -120,6 +121,7 @@ describe('postMetricsSignature (change detection for the rescoring policy)', () 
       { inNetwork: false },
       { replyToHandle: 'ana_builds' },
       { ageMinutes: 121 },
+      { publishedAt: Date.parse('2026-10-03T09:00:00Z') },
       { likeCount: 311 },
       { replyCount: 46 },
       { repostCount: 13 },
@@ -147,6 +149,12 @@ describe('isPostSnapshot (message-boundary runtime guard)', () => {
     ).toBe(true);
   });
 
+  it('accepts the optional exact publication instant and rejects non-finite values', () => {
+    expect(isPostSnapshot(snapshot({ publishedAt: Date.parse('2026-10-03T10:00:00Z') }))).toBe(true);
+    expect(isPostSnapshot(snapshot({ publishedAt: Number.NaN }))).toBe(false);
+    expect(isPostSnapshot(snapshot({ publishedAt: '2026-10-03T10:00:00Z' as unknown as number }))).toBe(false);
+  });
+
   it('rejects wrong types, missing fields, and non-objects', () => {
     expect(isPostSnapshot(null)).toBe(false);
     expect(isPostSnapshot('post')).toBe(false);
@@ -158,5 +166,17 @@ describe('isPostSnapshot (message-boundary runtime guard)', () => {
     expect(isPostSnapshot(snapshot({ replyToHandle: 5 as unknown as string }))).toBe(false);
     const { url: _url, ...withoutUrl } = snapshot();
     expect(isPostSnapshot(withoutUrl)).toBe(false);
+  });
+});
+
+describe('postPublishedAt (the exact instant behind the hard 48h gate)', () => {
+  it('returns the exact epoch ms of the datetime, unrounded', () => {
+    expect(postPublishedAt('2026-10-03T10:00:30.500Z')).toBe(Date.parse('2026-10-03T10:00:30.500Z'));
+  });
+
+  it('returns undefined for missing or unparseable datetimes', () => {
+    expect(postPublishedAt('')).toBeUndefined();
+    expect(postPublishedAt('not a date')).toBeUndefined();
+    expect(postPublishedAt(undefined)).toBeUndefined();
   });
 });

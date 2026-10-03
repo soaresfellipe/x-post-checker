@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { scoreTarget } from '../../src/core/heuristic-engine';
 import { extractPostSnapshot, getPostText } from '../../src/dom/timeline-scanner/extract';
 import { FIXTURE_POSTS, formatCount, renderPost } from '../fixtures/x-fixture';
 
@@ -152,5 +153,32 @@ describe('PostSnapshot extraction, field-for-field (VAL-TARGET-025)', () => {
     const article = document.querySelector('article[data-testid="tweet"]')!;
     article.querySelector('a[href*="/status/"]')!.setAttribute('href', '/i/status/1800000000000000001');
     expect(extractPostSnapshot(article, { now: NOW })).toBeNull();
+  });
+});
+
+describe('exact publication instant and the 48h eligibility path (VAL-TARGET-010)', () => {
+  const HOUR = 3_600_000;
+
+  /** An article whose time[datetime] sits EXACTLY ageMs before the extraction clock. */
+  function articleAgeMsOld(ageMs: number): HTMLElement {
+    document.body.innerHTML = renderPost({ ...FIXTURE_POSTS[0]!, ageMinutes: ageMs / 60_000 }, NOW);
+    return document.querySelector('article[data-testid="tweet"]')!;
+  }
+
+  it('captures the exact publication epoch from time[datetime], unrounded', () => {
+    const snapshot = extractPostSnapshot(articleAgeMsOld(120 * MIN), { now: NOW })!;
+    expect(snapshot.publishedAt).toBe(NOW - 120 * MIN);
+  });
+
+  it('a post 48h plus seconds old is excluded, 48h minus seconds stays eligible (extraction-to-scorer)', () => {
+    // 48h + 10s rounds to 2880 whole minutes: the rounded capture passes the old gate, the exact
+    // instant the scorer now receives must not.
+    const stale = scoreTarget(extractPostSnapshot(articleAgeMsOld(48 * HOUR + 10_000), { now: NOW })!, NOW);
+    expect(stale.eligible).toBe(false);
+    expect(stale.ineligibleReason).toBe('stale-over-48h');
+    expect(stale.headline).toBe(0);
+
+    const fresh = scoreTarget(extractPostSnapshot(articleAgeMsOld(48 * HOUR - 10_000), { now: NOW })!, NOW);
+    expect(fresh.eligible).toBe(true);
   });
 });

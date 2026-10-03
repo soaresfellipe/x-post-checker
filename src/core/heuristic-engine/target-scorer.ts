@@ -45,8 +45,8 @@ const SIGNAL_LABELS: Readonly<Record<keyof typeof SIGNAL_IDS, string>> = {
  * breakdown. Ineligible posts (stale, out-of-network reply) score 0 with the exclusion reason —
  * the badge layer renders nothing for them regardless of the configured threshold.
  */
-export function scoreTarget(post: PostSnapshot): TargetScore {
-  const ineligibleReason = ineligibilityOf(post);
+export function scoreTarget(post: PostSnapshot, now: number = Date.now()): TargetScore {
+  const ineligibleReason = ineligibilityOf(post, now);
   if (ineligibleReason !== null) {
     return {
       headline: 0,
@@ -87,8 +87,15 @@ function clampHeadline(totalPoints: number): number {
  * second. `inNetwork: false` on a reply is the honest no-visible-marker extraction, which the
  * source filter treats the same way (replies with missing ancestry data are also removed).
  */
-function ineligibilityOf(post: PostSnapshot): TargetIneligibilityReason | null {
-  if (post.ageMinutes > TARGET_CONFIG.recency.maxAgeMinutes) return 'stale-over-48h';
+function ineligibilityOf(post: PostSnapshot, now: number): TargetIneligibilityReason | null {
+  // AgeFilter on the EXACT publication instant: strict >48h exclusion at ms granularity, so a
+  // post 48h+1s old (which rounds to 2880 whole minutes) is still excluded. Snapshots without
+  // `publishedAt` (legacy captures) fall back to the whole-minute gate.
+  if (post.publishedAt !== undefined) {
+    if (now - post.publishedAt > TARGET_CONFIG.recency.maxAgeMs) return 'stale-over-48h';
+  } else if (post.ageMinutes > TARGET_CONFIG.recency.maxAgeMinutes) {
+    return 'stale-over-48h';
+  }
   if (post.isReply && !post.inNetwork) return 'out-of-network-reply';
   return null;
 }

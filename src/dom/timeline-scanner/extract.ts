@@ -8,6 +8,7 @@ import {
   parseLocalizedCount,
   parseStatusLink,
   postAgeMinutes,
+  postPublishedAt,
   type PostSnapshot,
   type StatusRouteTarget,
 } from '@/core/post-snapshot';
@@ -133,6 +134,10 @@ export function extractPostSnapshot(article: Element, options: { now?: number } 
   const now = options.now ?? Date.now();
   const time = findFirst(article, 'timestamp');
   if (!time) return null;
+  // The EXACT publication instant first (the hard 48h eligibility gate consumes it); the rounded
+  // capture age is derived from the same attribute for display/signature granularity.
+  const publishedAt = postPublishedAt(time.getAttribute('datetime'));
+  if (publishedAt === undefined) return null; // unparseable timestamp: no age, no instant — skip
   const ageMinutes = postAgeMinutes(time.getAttribute('datetime'), now);
   if (ageMinutes === undefined) return null;
   const status = findStatusTarget(article);
@@ -148,6 +153,7 @@ export function extractPostSnapshot(article: Element, options: { now?: number } 
     isReply: replyToHandle !== undefined,
     inNetwork: findFirst(article, 'viewerFollowsAuthor') !== null,
     ageMinutes,
+    publishedAt,
     url: absoluteUrl(article, status.href),
   };
   if (replyToHandle !== undefined) snapshot.replyToHandle = replyToHandle;

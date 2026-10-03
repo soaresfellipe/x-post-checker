@@ -27,8 +27,17 @@ export interface PostSnapshot {
   inNetwork: boolean;
   /** Handle being replied to, without the `@` — only when a visible reply chip names it. */
   replyToHandle?: string;
-  /** Whole minutes between `time[datetime]` and the capture, clamped at 0 (clock skew). */
+  /** Whole minutes between `time[datetime]` and the capture, clamped at 0 (clock skew).
+   * DISPLAY/signature granularity only — the hard 48h eligibility gate never reads this rounded
+   * value (see `publishedAt`). */
   ageMinutes: number;
+  /**
+   * Exact publication epoch ms parsed from `time[datetime]`. The scorer derives the strict
+   * >48h exclusion from THIS instant: whole-minute rounding of `ageMinutes` would admit posts
+   * up to 30 seconds past the 48-hour boundary (a 48h+1s post rounds to 2880). Optional only
+   * for snapshots created before the field existed; live extraction always sets it.
+   */
+  publishedAt?: number;
   /** Engagement counts parsed DIGITS-ONLY from localized button labels — absent when unshown. */
   likeCount?: number;
   replyCount?: number;
@@ -70,9 +79,23 @@ export function parseStatusLink(href: string | undefined | null, base: string = 
 }
 
 /**
+ * The EXACT publication instant of an ISO `datetime` attribute, unrounded (epoch ms), or
+ * undefined when missing/unparseable. This is the value the scorer's hard 48h eligibility gate
+ * consumes (`docs/timeline-scanner.md`, age rules): rounding happens only downstream, for
+ * display and capture-signature granularity.
+ */
+export function postPublishedAt(datetime: string | undefined | null): number | undefined {
+  if (!datetime) return undefined;
+  const parsed = Date.parse(datetime);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
  * Whole minutes between an ISO `datetime` attribute and `now`, rounded to the nearest minute and
  * clamped at 0 (a future timestamp is clock skew, not negative age). Unparseable datetimes yield
- * undefined — the caller skips the article rather than guess an age.
+ * undefined — the caller skips the article rather than guess an age. NEVER used for the 48h
+ * eligibility decision (that is `publishedAt`'s job); display and capture-signature granularity
+ * only.
  */
 export function postAgeMinutes(datetime: string | undefined | null, now: number): number | undefined {
   if (!datetime) return undefined;
@@ -139,6 +162,7 @@ export function postMetricsSignature(post: PostSnapshot): string {
     post.inNetwork,
     post.replyToHandle ?? null,
     post.ageMinutes,
+    post.publishedAt ?? null,
     post.replyCount ?? null,
     post.repostCount ?? null,
     post.likeCount ?? null,
@@ -168,6 +192,7 @@ export function isPostSnapshot(value: unknown): value is PostSnapshot {
     c.ageMinutes >= 0 &&
     typeof c.url === 'string' &&
     (c.replyToHandle === undefined || typeof c.replyToHandle === 'string') &&
+    (c.publishedAt === undefined || (typeof c.publishedAt === 'number' && Number.isFinite(c.publishedAt))) &&
     isOptionalCount(c.likeCount) &&
     isOptionalCount(c.replyCount) &&
     isOptionalCount(c.repostCount)
