@@ -2,7 +2,9 @@
  * The background's request handlers. Kept out of the entrypoint so they are unit-testable with an
  * injected store/transport while the entrypoint only wires them to the real browser APIs.
  */
+import { isDraftSnapshot, type AnalysisTrigger } from '@/core/draft-snapshot';
 import { runConnectionTest } from '@/core/jev-client';
+import type { AnalyzerService } from '@/core/analyzer';
 import type { SettingsStore } from '@/core/settings-store';
 import { PROTOCOL_VERSION, type Handlers } from './index';
 
@@ -16,10 +18,14 @@ export interface BackgroundHandlerDeps {
    */
   store: SettingsStore;
   runConnectionTest?: ConnectionTester;
+  /** The analysis pipeline (heuristic engine + Jev client); injectable for unit tests. */
+  analyzer: AnalyzerService;
 }
 
+const TRIGGERS: readonly AnalysisTrigger[] = ['auto', 'manual'];
+
 export function createBackgroundHandlers(deps: BackgroundHandlerDeps): Handlers {
-  const { store } = deps;
+  const { store, analyzer } = deps;
   const testConnection = deps.runConnectionTest ?? runConnectionTest;
   return {
     ping: () => ({ pong: true, protocolVersion: PROTOCOL_VERSION }),
@@ -44,14 +50,13 @@ export function createBackgroundHandlers(deps: BackgroundHandlerDeps): Handlers 
       return store.setApiKey(key);
     },
     'clear-api-key': () => store.clearApiKey(),
-    // Honest placeholder until the analyzer pipeline (heuristic engine + Jev client) lands: the
-    // draft IS captured and validated, but nothing scores it yet. Callers must not render a
-    // score from this reply — the watcher treats any reply as fire-and-forget.
-    'analyze-draft': ({ draft }) => {
-      if (typeof draft !== 'object' || draft === null || typeof (draft as { text?: unknown }).text !== 'string') {
-        throw new Error('Invalid draft snapshot.');
-      }
-      return { accepted: false, reason: 'analyzer-unavailable' };
+    // The message payload is untrusted input: a snapshot must pass the runtime guard before the
+    // analyzer touches it. Invalid input is a protocol error (the caller sees {ok:false}); every
+    // VALID draft gets a typed analysis result, never a throw.
+    'analyze-draft': ({ draft, trigger }) => {
+      if (!isDraftSnapshot(draft)) throw new Error('Invalid draft snapshot.');
+      if (!TRIGGERS.includes(trigger)) throw new Error('Invalid analysis trigger.');
+      return analyzer.analyzeDraft(draft, trigger);
     },
   };
 }

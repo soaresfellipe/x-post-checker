@@ -3,6 +3,7 @@
  * background. Add a new message by extending `MessageMap`; handlers and clients stay type-checked.
  */
 import type { AnalysisTrigger, DraftSnapshot } from '@/core/draft-snapshot';
+import type { DraftAnalysisResult } from '@/core/analyzer';
 import type { ConnectionTestResult } from '@/core/jev-client/connection-test';
 import type { ApiKeyWriteResult, Settings, SettingsWriteResult } from '@/core/settings-store/types';
 
@@ -51,13 +52,14 @@ export interface MessageMap {
   };
   /**
    * A captured draft, sent by the content script's composer watcher (automatic debounced path or
-   * the overlay's explicit "Analyze" action). The analyzer pipeline (m2 heuristic engine + Jev
-   * client) turns this into scored results; until it lands the background answers honestly that
-   * no analyzer is available, and callers treat that as "captured, not analyzed".
+   * the overlay's explicit "Analyze" action). The AnalyzerService scores it: the local heuristic
+   * result always, the Jev verdict when enabled with a key, plus meta the overlay uses (headline,
+   * status, draft hash). Honest refusals (`disabled`, `below-min-length`) carry no score and are
+   * never recorded as analyses.
    */
   'analyze-draft': {
     request: { draft: DraftSnapshot; trigger: AnalysisTrigger };
-    response: { accepted: boolean; reason?: 'analyzer-unavailable' };
+    response: DraftAnalysisResult;
   };
 }
 

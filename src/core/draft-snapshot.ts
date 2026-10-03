@@ -73,3 +73,28 @@ export function parseUrls(text: string): string[] {
 export function isDraftEligible(snapshot: Pick<DraftSnapshot, 'charCount'>, minDraftLength: number): boolean {
   return snapshot.charCount >= minDraftLength;
 }
+
+/**
+ * Runtime guard for snapshots crossing the message boundary (`analyze-draft`): the shape the
+ * watcher extracts is trusted, but a message payload is untrusted input. Optional fields must be
+ * absent-or-typed, never wrong-typed.
+ */
+export function isDraftSnapshot(value: unknown): value is DraftSnapshot {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.text === 'string' &&
+    Array.isArray(candidate.hashtags) &&
+    candidate.hashtags.every((tag) => typeof tag === 'string') &&
+    Array.isArray(candidate.urls) &&
+    candidate.urls.every((url) => typeof url === 'string') &&
+    typeof candidate.hasMedia === 'boolean' &&
+    typeof candidate.isReply === 'boolean' &&
+    typeof candidate.charCount === 'number' &&
+    Number.isFinite(candidate.charCount) &&
+    typeof candidate.capturedAt === 'number' &&
+    Number.isFinite(candidate.capturedAt) &&
+    (candidate.replyToHandle === undefined || typeof candidate.replyToHandle === 'string') &&
+    (candidate.replyToFollowedByViewer === undefined || typeof candidate.replyToFollowedByViewer === 'boolean')
+  );
+}

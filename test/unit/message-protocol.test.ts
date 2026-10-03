@@ -7,6 +7,20 @@ import {
   type Handlers,
 } from '../../src/core/message-protocol';
 import { DEFAULT_SETTINGS } from '../../src/core/settings-store';
+import type { DraftAnalysisResult } from '../../src/core/analyzer';
+
+/** A minimal but valid analysis result, for stubbing the analyze-draft handler. */
+const analysisResult: DraftAnalysisResult = {
+  kind: 'analyzed',
+  local: { headline: 50, totalPoints: 0, signals: [] },
+  meta: {
+    analyzedAt: 1,
+    trigger: 'auto',
+    draftHash: 'hash',
+    headline: 50,
+    jevStatus: 'skipped-no-key',
+  },
+};
 
 const handlers: Handlers = {
   ping: () => ({ pong: true, protocolVersion: PROTOCOL_VERSION }),
@@ -17,7 +31,8 @@ const handlers: Handlers = {
   }),
   'set-api-key': ({ key }) => ({ apiKeyPresent: true, keyRevision: key.length }),
   'clear-api-key': () => ({ apiKeyPresent: false, keyRevision: 0 }),
-  'analyze-draft': ({ draft }) => ({ accepted: typeof draft.text === 'string', reason: 'analyzer-unavailable' as const }),
+  'analyze-draft': ({ draft }) =>
+    typeof draft.text === 'string' ? analysisResult : { kind: 'below-min-length', minDraftLength: 10 },
 };
 
 describe('message protocol', () => {

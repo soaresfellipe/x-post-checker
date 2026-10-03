@@ -3,6 +3,8 @@ import { broadcastToTabs, createSettingsBroadcast } from '@/core/message-protoco
 import { SETTINGS_KEYS } from '@/core/settings-store';
 import { handleRequest, isRequest } from '@/core/message-protocol';
 import { createBackgroundHandlers } from '@/core/message-protocol/handlers';
+import { createAnalyzerService } from '@/core/analyzer';
+import { createJevClient, createStorageVerdictCache } from '@/core/jev-client';
 
 export default defineBackground(() => {
   // ONE store instance for the whole background: it is the extension's SINGLE settings writer.
@@ -11,7 +13,13 @@ export default defineBackground(() => {
   // are registered synchronously below: Chrome's service worker and Firefox's event page are both
   // suspended and restarted, so no listener may depend on module-level state.)
   const store = createLocalSettingsStore();
-  const handlers = createBackgroundHandlers({ store });
+
+  // The analysis pipeline. The verdict cache is persisted in storage.local so it survives
+  // service-worker suspension (Chrome idles MV3 workers out after ~30s): re-analyzing an
+  // identical draft later in the session is served from cache, not paid for again.
+  const jevClient = createJevClient({ cache: createStorageVerdictCache(browser.storage.local) });
+  const analyzer = createAnalyzerService({ store, jev: jevClient });
+  const handlers = createBackgroundHandlers({ store, analyzer });
 
   browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
     if (!isRequest(message)) return false;
