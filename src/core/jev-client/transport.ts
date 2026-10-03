@@ -7,6 +7,23 @@
 
 export const JEV_ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
 
+/**
+ * Test-only endpoint redirect (e2e builds only — src/core/test-hooks.ts): lets the Firefox smoke
+ * harness serve deterministic Jev responses from the local fixture, which an event-page
+ * background cannot get from Playwright-style route interception. `setJevEndpointOverrideForTests`
+ * is a no-op outside the e2e build mode, so release builds always POST to the verified endpoint.
+ */
+let e2eEndpointOverride: string | undefined;
+
+export function setJevEndpointOverrideForTests(url: string | undefined): void {
+  if (import.meta.env.MODE !== 'e2e') return;
+  e2eEndpointOverride = url;
+}
+
+function activeJevEndpoint(): string {
+  return e2eEndpointOverride ?? JEV_ENDPOINT;
+}
+
 /** Why a Jev exchange did not produce parsed JSON. */
 export type JevTransportFailure =
   | { kind: 'timeout' }
@@ -36,7 +53,7 @@ export async function postJevJson<T = unknown>(deps: PostJevJsonDeps): Promise<J
 
   let response: Response | undefined;
   try {
-    response = await fetchImpl(JEV_ENDPOINT, {
+    response = await fetchImpl(activeJevEndpoint(), {
       method: 'POST',
       headers: { Authorization: `Bearer ${deps.apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(deps.body),

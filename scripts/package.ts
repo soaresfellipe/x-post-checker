@@ -1,7 +1,8 @@
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { checkReleaseManifest } from './manifest-check';
+import { validateZipArchive } from './lib/zip';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const OUT_DIR = path.join(ROOT, '.output');
@@ -36,7 +37,21 @@ for (const target of TARGETS) {
     continue;
   }
   copyFileSync(zipSource, path.join(BUILD_DIR, zipName));
-  console.log(`[${target.name}] manifest OK -> build/${zipName}`);
+
+  // Artifact validation (VAL-SETUP-019): non-empty, readable as a ZIP, manifest.json inside.
+  try {
+    const entries = validateZipArchive(readFileSync(path.join(BUILD_DIR, zipName)), zipName, {
+      mustContain: 'manifest.json',
+    });
+    const sizeKb = Math.round(statSync(path.join(BUILD_DIR, zipName)).size / 1024);
+    console.log(
+      `[${target.name}] archive OK (${sizeKb} KiB, ${entries.length} entries) -> build/${zipName}:`,
+      entries.map((entry) => entry.name).join(', '),
+    );
+  } catch (error) {
+    console.error(`[${target.name}] archive validation FAILED:`, error instanceof Error ? error.message : error);
+    failed = true;
+  }
 }
 
 if (failed) process.exit(1);

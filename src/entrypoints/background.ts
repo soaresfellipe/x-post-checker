@@ -7,8 +7,26 @@ import { createAnalyzerService } from '@/core/analyzer';
 import { createTargetAnalysisService } from '@/core/target-analysis';
 import { createOptimizerService } from '@/core/optimizer';
 import { createJevClient, createStorageVerdictCache, createStorageTargetVerdictCache, createStorageOptimizerCache } from '@/core/jev-client';
+import { isE2EBuild, JEV_ENDPOINT_OVERRIDE_STORAGE_KEY } from '@/core/test-hooks';
+import { setJevEndpointOverrideForTests } from '@/core/jev-client/transport';
 
 export default defineBackground(() => {
+  // Test-only seam (e2e builds): the Jev endpoint override is read live from storage so the
+  // Firefox smoke harness can steer every Jev exchange to the fixture mock. Release builds never
+  // register the listener and the override setter is inert outside the e2e mode.
+  if (isE2EBuild()) {
+    const applyOverride = (value: unknown): void => {
+      setJevEndpointOverrideForTests(typeof value === 'string' && value.length > 0 ? value : undefined);
+    };
+    void browser.storage.local.get(JEV_ENDPOINT_OVERRIDE_STORAGE_KEY).then((stored) => {
+      applyOverride(stored[JEV_ENDPOINT_OVERRIDE_STORAGE_KEY]);
+    });
+    browser.storage.onChanged.addListener((changes, areaName) => {
+      if (areaName !== 'local' || !(JEV_ENDPOINT_OVERRIDE_STORAGE_KEY in changes)) return;
+      applyOverride(changes[JEV_ENDPOINT_OVERRIDE_STORAGE_KEY]?.newValue);
+    });
+  }
+
   // ONE store instance for the whole background: it is the extension's SINGLE settings writer.
   // Popup and Options no longer write storage directly — they send `set-settings` requests, which
   // this store serializes and stamps with the revision in the same storage write. (Its listeners

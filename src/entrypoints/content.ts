@@ -2,6 +2,7 @@ import { onSettingsBroadcast, sendMessage } from '@/core/message-protocol/client
 import { createRevisionGate } from '@/core/message-protocol/broadcast';
 import { createSettingsSync } from '@/core/message-protocol/settings-sync';
 import { createLocalSettingsStore, DEFAULT_SETTINGS, type Settings } from '@/core/settings-store';
+import { E2E_SEED_MESSAGE_TYPE, isE2EBuild } from '@/core/test-hooks';
 import { stampMarkerRevision } from '@/dom/marker';
 import { applyEnabled } from '@/dom/marker/lifecycle';
 import { createScoreOverlay } from '@/dom/overlay';
@@ -19,6 +20,19 @@ export default defineContentScript({
   matches: ['https://x.com/*', 'https://twitter.com/*'],
   runAt: 'document_idle',
   main() {
+    // Test-only seed listener (e2e builds): the smoke harness's page driver posts an
+    // `amplifyx:e2e-seed` message whose payload lands in storage.local verbatim (settings, the
+    // synthetic key, the Jev endpoint override). Release builds never register it.
+    if (isE2EBuild()) {
+      window.addEventListener('message', (event) => {
+        if (event.source !== window) return;
+        const data = event.data as { type?: unknown; payload?: unknown } | null;
+        if (!data || data.type !== E2E_SEED_MESSAGE_TYPE) return;
+        if (typeof data.payload !== 'object' || data.payload === null) return;
+        void browser.storage.local.set(data.payload as Record<string, unknown>);
+      });
+    }
+
     const onMounted = (marker: HTMLElement) => {
       void sendMessage('ping', {}).then((response) => {
         marker.dataset.background = response.ok ? 'connected' : 'error';
