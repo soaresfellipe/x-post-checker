@@ -68,6 +68,27 @@ describe('runConnectionTest', () => {
     expect(result).toEqual({ status: 'network', reason: 'timeout' });
   });
 
+  // Regression (VAL-SETUP-006): the timeout must span the FULL response. Headers arriving is not
+  // success — a 200 whose body never completes previously cleared the deadline and left the
+  // Options page pending forever with a disabled button.
+  it('times out when the server sends headers but never a response body', async () => {
+    const fetchImpl = (_url: string, init: RequestInit): Promise<Response> =>
+      new Promise<Response>((resolve) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            // Mirror real fetch: aborting the signal errors the still-open body stream.
+            init.signal?.addEventListener('abort', () =>
+              controller.error(new DOMException('The operation was aborted.', 'AbortError')),
+            );
+          },
+        });
+        resolve(new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
+      });
+
+    const result = await runConnectionTest({ apiKey: KEY, fetchImpl, timeoutMs: 25 });
+    expect(result).toEqual({ status: 'network', reason: 'timeout' });
+  });
+
   it('reports server errors and rate limits as a distinct service error', async () => {
     const result = await runConnectionTest({ apiKey: KEY, fetchImpl: async () => new Response('x', { status: 503 }) });
     expect(result).toEqual({ status: 'error', httpStatus: 503 });

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { ConnectionTestResult } from '@/core/jev-client';
+import { runConnectionTest, type ConnectionTestResult } from '@/core/jev-client';
 import { API_KEY_STORAGE_KEY, DEFAULT_SETTINGS, createSettingsStore } from '@/core/settings-store';
 import { COPY, mountOptionsPage, type OptionsPageDeps } from '@/dom/options';
 import { createMemoryBackend } from '../helpers/memory-backend';
@@ -166,6 +166,51 @@ describe('options page', () => {
     await flush();
     expect(q('test-result').textContent).toBe(COPY.testUnavailable);
     expect(q<HTMLButtonElement>('test-connection').disabled).toBe(false);
+  });
+
+  // Regression (VAL-SETUP-006): a 200 whose body never arrives must resolve to the network-timeout
+  // failure state and leave the page usable (button re-enabled), not pending forever.
+  it('recovers the UI when the connection test stalls after the response headers', async () => {
+    const memory = createMemoryBackend();
+    memory.data[API_KEY_STORAGE_KEY] = KEY;
+    const store = createSettingsStore(memory.backend);
+    const stalledFetch = (_url: string, init: RequestInit): Promise<Response> =>
+      new Promise<Response>((resolve) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init.signal?.addEventListener('abort', () =>
+              controller.error(new DOMException('The operation was aborted.', 'AbortError')),
+            );
+          },
+        });
+        resolve(new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
+      });
+    document.body.innerHTML = '<div id="app"></div>';
+    teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
+      store,
+      testConnection: async (attemptId, apiKey) => ({
+        attemptId,
+        // Mirrors the background handler: a typed key wins, otherwise the saved key is tested.
+        result: await runConnectionTest({
+          apiKey: apiKey ?? (await store.getApiKey()),
+          fetchImpl: stalledFetch,
+          timeoutMs: 25,
+        }),
+      }),
+    }));
+
+    const button = q<HTMLButtonElement>('test-connection');
+    button.click();
+    expect(button.disabled).toBe(true);
+    expect(q('test-result').textContent).toBe(COPY.testing);
+
+    await vi.waitFor(() => expect(button.disabled).toBe(false), { timeout: 5_000 });
+    expect(q('test-result').dataset.state).toBe('network');
+    expect(q('test-result').textContent ?? '').toMatch(/timed out/);
+    expect(memory.data[API_KEY_STORAGE_KEY]).toBe(KEY);
+    // The page remains usable: a follow-up click starts a fresh attempt.
+    button.click();
+    expect(q('test-result').textContent).toBe(COPY.testing);
   });
 
   it('discards the result of a superseded attempt', async () => {

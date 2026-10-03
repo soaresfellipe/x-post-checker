@@ -1,4 +1,6 @@
-export const JEV_ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
+import { JEV_ENDPOINT, postJevJson } from './transport';
+
+export { JEV_ENDPOINT };
 export const JEV_MODEL_ALIAS = 'jev-latest';
 export const CONNECTION_TEST_TIMEOUT_MS = 15_000;
 
@@ -33,47 +35,38 @@ const SENDABLE_KEY = /^[\x21-\x7E]+$/;
 
 /**
  * One tiny real Jev call that classifies the outcome for the Options page. Results never carry the key.
- * Latency is measured around the fetch call only (request sent -> response headers received).
+ * Latency is measured across the full exchange (request sent -> parsed reply) by the shared transport,
+ * whose abort deadline covers the whole response: headers AND body read.
  */
 export async function runConnectionTest(deps: ConnectionTestDeps): Promise<ConnectionTestResult> {
   const apiKey = deps.apiKey?.trim();
   if (!apiKey) return { status: 'no-key' };
   if (!SENDABLE_KEY.test(apiKey)) return { status: 'invalid-key' };
 
-  const fetchImpl = deps.fetchImpl ?? ((url, init) => fetch(url, init));
-  const now = deps.now ?? (() => performance.now());
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), deps.timeoutMs ?? CONNECTION_TEST_TIMEOUT_MS);
+  const result = await postJevJson<{ model?: unknown }>({
+    apiKey,
+    body: CONNECTION_TEST_BODY,
+    timeoutMs: deps.timeoutMs ?? CONNECTION_TEST_TIMEOUT_MS,
+    fetchImpl: deps.fetchImpl,
+    now: deps.now,
+  });
 
-  let response: Response;
-  const startedAt = now();
-  try {
-    response = await fetchImpl(JEV_ENDPOINT, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(CONNECTION_TEST_BODY),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    const aborted = error instanceof Error && error.name === 'AbortError';
-    return { status: 'network', reason: aborted ? 'timeout' : 'unreachable' };
-  } finally {
-    clearTimeout(timer);
-  }
-  const latencyMs = Math.max(0, Math.round(now() - startedAt));
-
-  if (response.status === 401 || response.status === 403) {
-    return { status: 'invalid-key', httpStatus: response.status };
-  }
-  if (!response.ok) return { status: 'error', httpStatus: response.status };
-
-  try {
-    const body = (await response.json()) as { model?: unknown };
-    if (typeof body.model === 'string' && body.model.length > 0) {
-      return { status: 'ok', model: body.model, latencyMs };
+  if (!result.ok) {
+    switch (result.failure.kind) {
+      case 'timeout':
+        return { status: 'network', reason: 'timeout' };
+      case 'unreachable':
+        return { status: 'network', reason: 'unreachable' };
+      case 'unexpected-response':
+        return result.failure.status === 401 || result.failure.status === 403
+          ? { status: 'invalid-key', httpStatus: result.failure.status }
+          : { status: 'error', httpStatus: result.failure.status };
     }
-  } catch {
-    // Fall through: an unreadable body is an unexpected response, not a success.
   }
-  return { status: 'error', httpStatus: response.status };
+
+  const { model } = result.data;
+  if (typeof model === 'string' && model.length > 0) {
+    return { status: 'ok', model, latencyMs: result.latencyMs };
+  }
+  return { status: 'error', httpStatus: 200 };
 }

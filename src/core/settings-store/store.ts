@@ -4,6 +4,7 @@ import {
   LAST_ANALYSIS_STORAGE_KEY,
   NUMERIC_LIMITS,
   SETTINGS_KEYS,
+  SETTINGS_REVISION_STORAGE_KEY,
   type LastAnalysis,
   type Settings,
   type SettingsBackend,
@@ -12,6 +13,16 @@ import {
 } from './types';
 
 const ANALYSIS_OUTCOMES: readonly string[] = ['ok', 'local-only', 'error'] satisfies LastAnalysis['outcome'][];
+
+/** Reads the persisted counter; 0 (unordered) when absent or malformed. */
+function toRevision(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+}
+
+// Settings writes in one context are serialized so every write reads what the previous one
+// persisted, even when callers race (rapid popup toggles): the persisted counter is then a total
+// order over settings writes, which broadcast receivers rely on to reject stale states.
+let settingsWrites: Promise<unknown> = Promise.resolve();
 
 function parseLastAnalysis(raw: unknown): LastAnalysis | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
@@ -55,11 +66,19 @@ export function createSettingsStore(backend: SettingsBackend) {
       return (await getApiKey()) !== undefined;
     },
 
-    async setSettings(update: Partial<Settings>): Promise<Settings> {
-      const next = sanitize({ ...(await backend.area.get([...SETTINGS_KEYS])), ...update });
-      const written = Object.fromEntries(SETTINGS_KEYS.filter((key) => key in update).map((key) => [key, next[key]]));
-      await backend.area.set(written);
-      return next;
+    setSettings(update: Partial<Settings>): Promise<Settings> {
+      const write = settingsWrites.then(async () => {
+        const stored = await backend.area.get([...SETTINGS_KEYS, SETTINGS_REVISION_STORAGE_KEY]);
+        const next = sanitize({ ...stored, ...update });
+        const written = Object.fromEntries(
+          SETTINGS_KEYS.filter((key) => key in update).map((key) => [key, next[key]]),
+        );
+        await backend.area.set({ ...written, [SETTINGS_REVISION_STORAGE_KEY]: toRevision(stored[SETTINGS_REVISION_STORAGE_KEY]) + 1 });
+        return next;
+      });
+      // A failed write must not poison later ones; its own caller still sees the rejection.
+      settingsWrites = write.catch(() => undefined);
+      return write;
     },
 
     async getLastAnalysis(): Promise<LastAnalysis | undefined> {
@@ -87,8 +106,9 @@ export function createSettingsStore(backend: SettingsBackend) {
         if (areaName !== 'local') return;
         const changedKeys = Object.keys(changes).filter((key) => relevant.has(key));
         if (changedKeys.length === 0) return;
+        const revision = toRevision(changes[SETTINGS_REVISION_STORAGE_KEY]?.newValue);
         void Promise.all([getSettings(), getApiKey()]).then(([settings, apiKey]) =>
-          listener({ settings, changedKeys, apiKeyPresent: apiKey !== undefined }),
+          listener({ settings, changedKeys, apiKeyPresent: apiKey !== undefined, revision }),
         );
       };
       backend.onChanged.addListener(onChanged);

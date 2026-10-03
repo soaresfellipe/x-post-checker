@@ -28,6 +28,13 @@ export const API_KEY_STORAGE_KEY = 'jevApiKey';
 /** Outcome record of the most recent draft analysis; written by the analyzer, read by the popup. */
 export const LAST_ANALYSIS_STORAGE_KEY = 'lastAnalysis';
 
+/**
+ * Monotonic counter stamped into every settings write (same `area.set` call, so it can never drift
+ * from the settings it belongs to). It is bookkeeping, not a preference: broadcasts carry it so
+ * receivers can reject a delayed older state. 0 means "no order information" (unset storage).
+ */
+export const SETTINGS_REVISION_STORAGE_KEY = 'settingsRevision';
+
 export type AnalysisOutcome = 'ok' | 'local-only' | 'error';
 
 export interface LastAnalysis {
@@ -55,6 +62,8 @@ export interface SettingsChange {
   changedKeys: string[];
   /** Presence only: the key itself is never broadcast. */
   apiKeyPresent: boolean;
+  /** Revision stamped by the write that fired this change; 0 when the event carries none. */
+  revision: number;
 }
 
 export type SettingsListener = (change: SettingsChange) => void;

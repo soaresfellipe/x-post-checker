@@ -9,12 +9,18 @@ export interface SettingsBroadcast {
   v: typeof PROTOCOL_VERSION;
   kind: 'broadcast';
   type: 'settings-changed';
+  /**
+   * Monotonic counter of the settings write this envelope reflects (persisted beside the settings
+   * by the store). Delivery order between two `sendMessage` calls is not guaranteed, so receivers
+   * must gate application through a `SettingsBroadcastReceiver` and drop older revisions.
+   */
+  revision: number;
   settings: Settings;
   changedKeys: string[];
 }
 
-export function createSettingsBroadcast(settings: Settings, changedKeys: string[]): SettingsBroadcast {
-  return { v: PROTOCOL_VERSION, kind: 'broadcast', type: 'settings-changed', settings, changedKeys };
+export function createSettingsBroadcast(settings: Settings, changedKeys: string[], revision: number): SettingsBroadcast {
+  return { v: PROTOCOL_VERSION, kind: 'broadcast', type: 'settings-changed', revision, settings, changedKeys };
 }
 
 export function isSettingsBroadcast(value: unknown): value is SettingsBroadcast {
@@ -24,11 +30,30 @@ export function isSettingsBroadcast(value: unknown): value is SettingsBroadcast 
     candidate.v === PROTOCOL_VERSION &&
     candidate.kind === 'broadcast' &&
     candidate.type === 'settings-changed' &&
+    typeof candidate.revision === 'number' &&
+    Number.isFinite(candidate.revision) &&
     typeof candidate.settings === 'object' &&
     candidate.settings !== null &&
     typeof (candidate.settings as Record<string, unknown>).enabled === 'boolean' &&
     Array.isArray(candidate.changedKeys)
   );
+}
+
+/**
+ * Receiver-side guard against out-of-order delivery: a delayed "off" broadcast (from a rapid off/on
+ * toggle) must never overwrite the newer "on" a tab already applied. Tracks the highest applied
+ * revision and accepts only strictly newer envelopes, whatever order the transport delivers in.
+ */
+export function createSettingsBroadcastReceiver() {
+  let lastAppliedRevision: number | undefined;
+  return {
+    /** True when `broadcast` is newer than everything applied so far (and records it). */
+    accept(broadcast: SettingsBroadcast): boolean {
+      if (lastAppliedRevision !== undefined && broadcast.revision <= lastAppliedRevision) return false;
+      lastAppliedRevision = broadcast.revision;
+      return true;
+    },
+  };
 }
 
 /** The slice of `browser.tabs` the broadcaster depends on. */

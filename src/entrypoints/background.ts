@@ -24,9 +24,10 @@ export default defineBackground(() => {
 
   // Also registered synchronously so a storage change wakes a suspended worker. The popup and
   // Options page only write storage; this is the single place that fans changes out to tabs.
-  createLocalSettingsStore().subscribe(({ settings, changedKeys }) => {
+  // The envelope carries the write's revision so tabs can reject out-of-order deliveries.
+  createLocalSettingsStore().subscribe(({ settings, changedKeys, revision }) => {
     const settingsKeys = changedKeys.filter((key) => (SETTINGS_KEYS as readonly string[]).includes(key));
     if (settingsKeys.length === 0) return;
-    void broadcastToTabs(browser.tabs, createSettingsBroadcast(settings, settingsKeys));
+    void broadcastToTabs(browser.tabs, createSettingsBroadcast(settings, settingsKeys, revision));
   });
 });

@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { API_KEY_STORAGE_KEY, DEFAULT_SETTINGS, createSettingsStore } from '@/core/settings-store';
+import {
+  API_KEY_STORAGE_KEY,
+  DEFAULT_SETTINGS,
+  SETTINGS_REVISION_STORAGE_KEY,
+  createSettingsStore,
+} from '@/core/settings-store';
 import { createMemoryBackend } from '../helpers/memory-backend';
 
 describe('settings store', () => {
@@ -118,5 +123,45 @@ describe('settings store', () => {
     emit({ somethingElse: { newValue: 1 } }, 'local');
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(listener).not.toHaveBeenCalled();
+  });
+
+  // Regression: rapid off/on writes must stamp a strictly increasing persisted revision so
+  // broadcast receivers can reject a delayed older state (out-of-order delivery).
+  it('stamps each settings write with a strictly increasing persisted revision', async () => {
+    const { backend, data } = createMemoryBackend();
+    const store = createSettingsStore(backend);
+
+    await store.setSettings({ enabled: false });
+    expect(data[SETTINGS_REVISION_STORAGE_KEY]).toBe(1);
+    await store.setSettings({ enabled: true });
+    expect(data[SETTINGS_REVISION_STORAGE_KEY]).toBe(2);
+    expect(await store.getSettings()).toEqual({ ...DEFAULT_SETTINGS, enabled: true });
+  });
+
+  it('orders concurrent setSettings calls so every write sees the previous revision', async () => {
+    const { backend, data } = createMemoryBackend();
+    const store = createSettingsStore(backend);
+
+    const [first, second, third] = await Promise.all([
+      store.setSettings({ enabled: false }),
+      store.setSettings({ minDraftLength: 40 }),
+      store.setSettings({ enabled: true }),
+    ]);
+    // Each write reads what the previous one persisted, so the returned snapshots chain up.
+    expect([first, second, third].map((settings) => settings.enabled)).toEqual([false, false, true]);
+    expect(await store.getSettings()).toEqual({ ...DEFAULT_SETTINGS, enabled: true, minDraftLength: 40 });
+    expect(data[SETTINGS_REVISION_STORAGE_KEY]).toBe(3);
+  });
+
+  it('surfaces the revision of the triggering write to subscribers', async () => {
+    const { backend } = createMemoryBackend();
+    const store = createSettingsStore(backend);
+    const listener = vi.fn();
+    store.subscribe(listener);
+
+    await store.setSettings({ enabled: false });
+    await store.setSettings({ minDraftLength: 40 });
+    await vi.waitFor(() => expect(listener).toHaveBeenCalledTimes(2));
+    expect(listener.mock.calls.map((call) => call[0].revision)).toEqual([1, 2]);
   });
 });
