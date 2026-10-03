@@ -152,4 +152,34 @@ test.describe('timeline scanner (fixture E2E)', () => {
     // No page reload happened anywhere: the load stamp survived the whole journey.
     expect(await fixtureEpoch(page)).toBe(epoch);
   });
+
+  test('an in-place engagement-count change rescores exactly once and moves the badge, with no rescan (VAL-TARGET-004)', async ({ context }) => {
+    const page = await openFixture(context);
+    const postId = FIXTURE_POSTS[0]!.id;
+    const badge = page.locator(`[data-testid="amplifyx-target-badge"][data-amplifyx-post-id="${postId}"]`);
+    await expect(badge).toBeVisible();
+    const scoreBefore = Number(await badge.locator('[data-testid="amplifyx-badge-score"]').textContent());
+    const dispatchesBefore = await dispatchCount(page);
+    expect(dispatchesBefore).toBeGreaterThan(0);
+
+    // The page updates engagement counts INSIDE the existing article — the count TEXT NODE's data
+    // and the button's aria-label. No childList record, no scroll, no navigation: only the
+    // scanner's attribute/characterData observation can schedule the rescoring pass.
+    await page.evaluate((id) => {
+      const article = document.querySelector(`a[href*="/status/${id}"]`)!.closest('article')!;
+      const like = article.querySelector('[data-testid="like"]')!;
+      const count = like.querySelector('[data-testid="app-text-transition-container"] span')!;
+      count.firstChild!.textContent = '31000';
+      like.setAttribute('aria-label', '31 mil Curtidas. Curtir');
+    }, postId);
+
+    // Exactly ONE new scoring dispatch (the changed post alone — every unchanged post stays quiet,
+    // so the counter increment of 1 is itself the no-rescore assertion at the integrated tier).
+    await expect.poll(() => dispatchCount(page)).toBe(dispatchesBefore + 1);
+    await expect.poll(async () => Number(await badge.locator('[data-testid="amplifyx-badge-score"]').textContent())).not.toBe(scoreBefore);
+
+    // The settle window after the change stays quiet.
+    await page.waitForTimeout(600);
+    expect(await dispatchCount(page)).toBe(dispatchesBefore + 1);
+  });
 });
