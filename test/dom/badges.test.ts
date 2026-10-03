@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
 import { MARKER_HOST_ID } from '../../src/dom/marker';
 import { scoreTarget } from '../../src/core/heuristic-engine';
+import type { PostSnapshot } from '../../src/core/post-snapshot';
+import type { TimelineScanner } from '../../src/dom/timeline-scanner';
 import { DEFAULT_SETTINGS, type Settings } from '../../src/core/settings-store';
 import type { TargetAnalysisResult } from '../../src/core/target-analysis';
 import { BADGE_HOST_ATTRIBUTE, createTimelineScanner } from '../../src/dom/timeline-scanner';
@@ -29,6 +31,8 @@ interface HarnessOptions {
 }
 
 interface Harness {
+  scanner: TimelineScanner;
+  scoreCalls: { id: string }[];
   settings: Settings;
   setSettings(update: Partial<Settings>): void;
   onSettingsChanged(): void;
@@ -63,7 +67,12 @@ function startHarness(options: HarnessOptions = {}): Harness {
     badges.destroy();
   });
 
+  // Counting injection around the pure scorer: VAL-TARGET-004's "no rescore" is asserted against
+  // ACTUAL scoring invocations, not the scanner's dispatch counter (the round-1 scrutiny blocker).
+  const scoreCalls: { id: string }[] = [];
   const harness: Harness = {
+    scanner: null as unknown as TimelineScanner, // assigned right after the scanner is created
+    scoreCalls,
     settings: { ...DEFAULT_SETTINGS, ...options.settings },
     setSettings(update) {
       harness.settings = { ...harness.settings, ...update };
@@ -108,6 +117,10 @@ function startHarness(options: HarnessOptions = {}): Harness {
   const badges = createTargetBadges({
     getSettings: () => harness.settings,
     getKeyPresence: () => options.keyPresent ?? false,
+    scoreTarget: (post: PostSnapshot) => {
+      scoreCalls.push({ id: post.id });
+      return scoreTarget(post, NOW); // deterministic clock for the exact 48h gate
+    },
     requestDeepAnalysis: (post) => {
       harness.deepAnalysisCalls.push({ id: post.id });
       if (options.deepAnalysis) return options.deepAnalysis(post);
@@ -120,6 +133,7 @@ function startHarness(options: HarnessOptions = {}): Harness {
   scanner.onScan((event) => badges.onScan(event));
   scanner.start();
   badges.start();
+  harness.scanner = scanner;
   return harness;
 }
 
@@ -466,6 +480,91 @@ describe('view-model helpers', () => {
     expect(harness.badgeOf(POST_ID(0))!.getRootNode()).toBe(harness.badgeHosts()[0]!.shadowRoot ?? expect.anything());
     const painted = harness.badgeHosts().find((host) => badgeInShadow(host) !== null);
     expect(painted?.shadowRoot).not.toBeNull();
+    harness.teardown();
+  });
+});
+
+describe('scoring memoization — unchanged posts are never rescored (VAL-TARGET-004, integrated)', () => {
+  /** The like-count digits + aria-label of the first fixture article, changed IN PLACE. */
+  function bumpLikeCount(article: Element, value: string): void {
+    article.querySelector('[data-testid="like"] [data-testid="app-text-transition-container"] span')!.textContent = value;
+    article.querySelector('[data-testid="like"]')!.setAttribute('aria-label', `${value} Curtidas. Curtir`);
+  }
+
+  it('repeated scans of unchanged posts call the scorer exactly once per post', async () => {
+    const harness = startHarness();
+    await waitThrottle();
+    const afterFirst = harness.scoreCalls.length;
+    expect(afterFirst).toBeGreaterThan(0);
+    expect(new Set(harness.scoreCalls.map((call) => call.id)).size).toBe(afterFirst); // one per post
+
+    harness.scanner.rescan();
+    harness.scanner.rescan();
+    expect(harness.scoreCalls.length).toBe(afterFirst); // zero additional scoreTarget calls
+    expect(harness.badgeCount()).toBeGreaterThan(0); // badges stayed painted
+    harness.teardown();
+  });
+
+  it('a changed captured metric scores exactly once more and the badge reflects the new score', async () => {
+    const harness = startHarness();
+    await waitThrottle();
+    const firstId = POST_ID(0);
+    const callsFor = (): number => harness.scoreCalls.filter((call) => call.id === firstId).length;
+    expect(callsFor()).toBe(1);
+    const scoreBefore = Number(harness.badgeOf(firstId)!.querySelector(`[data-testid="${BADGE_TESTIDS.score}"]`)!.textContent);
+
+    const article = document.querySelector('article')!;
+    bumpLikeCount(article, '3100');
+    harness.scanner.rescan(); // the pass a mutation-triggered scan would run
+
+    expect(callsFor()).toBe(2); // changed metrics -> exactly one rescore
+    const scoreAfter = Number(harness.badgeOf(firstId)!.querySelector(`[data-testid="${BADGE_TESTIDS.score}"]`)!.textContent);
+    expect(scoreAfter).not.toBe(scoreBefore); // the badge moved off the stale value...
+    // ...to EXACTLY the rescored value for the new captured metrics (post 1's velocity band rises
+    // but its reply:like ratio band drops, so the direction depends on the signal mix).
+    const rescored = scoreTarget(extractPostSnapshot(article, { now: NOW })!, NOW);
+    expect(scoreAfter).toBe(rescored.headline);
+
+    harness.scanner.rescan();
+    expect(callsFor()).toBe(2); // and the unchanged pass after it stays quiet
+    harness.teardown();
+  });
+
+  it('a threshold change repaints from the cached score without rescoring', async () => {
+    const harness = startHarness();
+    await waitThrottle();
+    const firstId = POST_ID(0);
+    expect(harness.badgeOf(firstId)).not.toBeNull();
+    const calls = harness.scoreCalls.length;
+
+    harness.setSettings({ targetThreshold: 100 });
+    harness.scanner.rescan();
+    expect(harness.badgeOf(firstId)).toBeNull(); // no longer above threshold — cleared...
+    expect(harness.scoreCalls.length).toBe(calls); // ...without a single rescore
+
+    harness.setSettings({ targetThreshold: 1 });
+    harness.scanner.rescan();
+    expect(harness.badgeOf(firstId)).not.toBeNull(); // back above — repainted from the cache
+    expect(harness.scoreCalls.length).toBe(calls);
+    harness.teardown();
+  });
+
+  it('a recycled host repaints the SAME unchanged post from the cache without rescoring', async () => {
+    const harness = startHarness();
+    await waitThrottle();
+    const firstId = POST_ID(0);
+    expect(harness.badgeOf(firstId)).not.toBeNull();
+    const calls = harness.scoreCalls.length;
+
+    // Feed recycling: the article re-renders the SAME post, the foreign host dies with the subtree.
+    const article = document.querySelector('article')!;
+    const fresh = document.createElement('div');
+    fresh.innerHTML = renderPost(FIXTURE_POSTS[0]!, NOW);
+    article.innerHTML = fresh.querySelector('article')!.innerHTML;
+    harness.scanner.rescan();
+
+    expect(harness.badgeOf(firstId)).not.toBeNull(); // re-painted on the fresh host...
+    expect(harness.scoreCalls.length).toBe(calls); // ...from the cached score: zero rescores
     harness.teardown();
   });
 });

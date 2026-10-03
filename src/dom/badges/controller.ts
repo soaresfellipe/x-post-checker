@@ -20,7 +20,7 @@
  * never show a stale badge.
  */
 import { scoreTarget, type TargetScore } from '@/core/heuristic-engine';
-import type { PostSnapshot } from '@/core/post-snapshot';
+import { postMetricsSignature, type PostSnapshot } from '@/core/post-snapshot';
 import type { Settings } from '@/core/settings-store';
 import type { TargetAnalysisResult } from '@/core/target-analysis';
 import type { ScanEvent } from '@/dom/timeline-scanner';
@@ -39,7 +39,17 @@ export interface TargetBadgesOptions {
   requestDeepAnalysis: (post: PostSnapshot) => Promise<TargetAnalysisResult>;
   /** Opens the extension Options page (via the background; content scripts cannot). */
   openOptions: () => void;
+  /**
+   * The pure in-tab scorer (timeline scanning never touches the network — VAL-TARGET-019).
+   * Defaults to the real `scoreTarget`; injectable for tests. The controller MEMOIZES it per
+   * post id + captured-metrics signature (VAL-TARGET-004): a post whose id and captured metrics
+   * are unchanged across scans is never scored again — its ScanEvent repaints from the cache.
+   */
+  scoreTarget?: (post: PostSnapshot) => TargetScore;
 }
+
+/** Score-cache bound (oldest evicted beyond this), mirroring the scanner's diff-state bound. */
+const MAX_CACHED_SCORES = 2000;
 
 export interface TargetBadges {
   /** Paints (or clears) this event's host from the event's OWN data. Idempotent. */
@@ -62,6 +72,17 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
     },
     doc,
   );
+
+  const scoreOf = options.scoreTarget ?? scoreTarget;
+  /**
+   * id -> { signature, score } of the last scored capture. The rescoring policy's other half:
+   * the scanner's diff decides WHICH events carry a scoring dispatch; this cache makes the
+   * actual `scoreTarget` invocation follow the same rule, so 'unchanged' events (emitted on
+   * every pass so rendering can re-sync) repaint from the cached score at zero scoring cost.
+   * Survives stop()/start() like the scanner's diff state, so a master-switch re-enable does
+   * not rescore unchanged posts.
+   */
+  const scoreCache = new Map<string, { signature: string; score: TargetScore }>();
 
   let running = false;
   /** Per-post deep-analysis state (memory only; the authoritative cache lives in the background). */
@@ -115,6 +136,27 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
     refreshPopover();
   }
 
+  /**
+   * The score for this post, from the cache when the id + captured-metrics signature match the
+   * last scored capture (no rescore), else exactly one `scoreTarget` invocation.
+   */
+  function scoreFor(post: PostSnapshot): TargetScore {
+    const signature = postMetricsSignature(post);
+    const cached = scoreCache.get(post.id);
+    if (cached && cached.signature === signature) return cached.score;
+    const score = scoreOf(post);
+    scoreCache.set(post.id, { signature, score });
+    const excess = scoreCache.size - MAX_CACHED_SCORES;
+    if (excess > 0) {
+      let dropped = 0;
+      for (const key of scoreCache.keys()) {
+        scoreCache.delete(key);
+        if (++dropped >= excess) break;
+      }
+    }
+    return score;
+  }
+
   function paintBadge(event: ScanEvent, score: TargetScore): void {
     const shadow = event.host.shadowRoot ?? event.host.attachShadow({ mode: 'open' });
     // Idempotent repaint: every scan pass rebuilds the shadow content from THIS event's data, so
@@ -163,7 +205,7 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
     onScan(event) {
       if (!running) return;
       const threshold = options.getSettings().targetThreshold;
-      const score = scoreTarget(event.post); // pure, in-tab: timeline scanning never touches the network
+      const score = scoreFor(event.post); // memoized: unchanged posts cost zero scoreTarget calls
       if (isBadgeEligible(score, threshold)) paintBadge(event, score);
       else clearHost(event);
     },
