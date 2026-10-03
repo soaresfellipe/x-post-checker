@@ -1,9 +1,12 @@
 import type { ConnectionTestResult } from '@/core/jev-client';
-import { NUMERIC_LIMITS, type Settings, type SettingsStore } from '@/core/settings-store';
+import { NUMERIC_LIMITS, type PageSettingsStore, type Settings } from '@/core/settings-store';
 import { OPTIONS_TEMPLATE } from './template';
 
 export interface OptionsPageDeps {
-  store: SettingsStore;
+  /** Read-only view of storage; the settings WRITE path is `saveSettings` (background single writer). */
+  store: PageSettingsStore;
+  /** Persists a settings update through the background and resolves with the stored settings. */
+  saveSettings(update: Partial<Settings>): Promise<Settings>;
   /** Runs the connection test in the background; resolves with the result tagged by `attemptId`. */
   testConnection(attemptId: string, apiKey: string | undefined): Promise<{ attemptId: string; result: ConnectionTestResult }>;
 }
@@ -149,7 +152,7 @@ export async function mountOptionsPage(root: HTMLElement, deps: OptionsPageDeps)
 
   async function savePrefs(update: Partial<Settings>): Promise<void> {
     try {
-      renderSettings(await store.setSettings(update));
+      renderSettings(await deps.saveSettings(update));
       setMessage(prefsStatus, COPY.prefsSaved, 'success');
     } catch {
       renderSettings(await store.getSettings());

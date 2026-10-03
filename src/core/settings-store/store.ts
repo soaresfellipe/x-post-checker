@@ -128,3 +128,11 @@ export function createSettingsStore(backend: SettingsBackend) {
 }
 
 export type SettingsStore = ReturnType<typeof createSettingsStore>;
+
+/**
+ * The slice popup and Options contexts may use: read and observe everything, manage the API key
+ * (not revision-stamped, so it cannot collide). `setSettings` is deliberately absent — the
+ * background is the single settings writer, and pages request writes through the `set-settings`
+ * message instead.
+ */
+export type PageSettingsStore = Omit<SettingsStore, 'setSettings'>;

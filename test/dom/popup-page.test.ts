@@ -20,7 +20,13 @@ async function setup(options: { preset?: Record<string, unknown>; failWrites?: b
   const store = createSettingsStore(memory.backend);
   const openOptions = vi.fn(options.openOptions ?? (async () => undefined));
   document.body.innerHTML = '<div id="app"></div>';
-  teardowns.push(await mountPopupPage(document.getElementById('app')!, { store, openOptions, now: () => NOW }));
+  teardowns.push(await mountPopupPage(document.getElementById('app')!, {
+    store,
+    // Pages write settings through the background; here the same store stands in for it.
+    saveSettings: (update) => store.setSettings(update),
+    openOptions,
+    now: () => NOW,
+  }));
   return { memory, store, openOptions };
 }
 

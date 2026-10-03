@@ -1,6 +1,7 @@
 import { onSettingsBroadcast, sendMessage } from '@/core/message-protocol/client';
-import { createSettingsBroadcastReceiver } from '@/core/message-protocol/broadcast';
+import { createSettingsSync } from '@/core/message-protocol/settings-sync';
 import { createLocalSettingsStore } from '@/core/settings-store';
+import { stampMarkerRevision } from '@/dom/marker';
 import { applyEnabled } from '@/dom/marker/lifecycle';
 
 export default defineContentScript({
@@ -13,19 +14,23 @@ export default defineContentScript({
       });
     };
 
-    // Broadcasts are independent sendMessage calls, so a delayed "off" from a rapid off/on toggle
-    // can arrive after a newer "on"; the receiver drops anything not newer than what was applied.
-    const receiver = createSettingsBroadcastReceiver();
-    let broadcastSeen = false;
-    onSettingsBroadcast((broadcast) => {
-      if (!receiver.accept(broadcast)) return;
-      broadcastSeen = true;
-      applyEnabled(broadcast.settings.enabled, onMounted);
+    // One apply path for both delivery routes: broadcasts (the background's low-latency hint) and
+    // storage.onChanged events (authoritative — they fire for every persisted write, so a lost or
+    // rejected broadcast still converges). The revision gate inside drops anything not strictly
+    // newer than what this tab already applied, whatever order the events arrive in.
+    const sync = createSettingsSync((settings, revision) => {
+      applyEnabled(settings.enabled, onMounted);
+      stampMarkerRevision(revision);
     });
-    void createLocalSettingsStore()
-      .getSettings()
-      .then(({ enabled }) => {
-        if (!broadcastSeen) applyEnabled(enabled, onMounted);
-      });
+
+    const store = createLocalSettingsStore();
+    onSettingsBroadcast((broadcast) => void sync.accept(broadcast));
+    store.subscribe((change) => void sync.accept(change));
+
+    // Initial state for tabs opened before any change; skipped when a change already applied
+    // (its state is at least as fresh as this read's).
+    void store.getSettings().then(({ enabled }) => {
+      if (!sync.hasAppliedAny()) applyEnabled(enabled, onMounted);
+    });
   },
 });

@@ -6,10 +6,12 @@ import {
   isRequest,
   type Handlers,
 } from '../../src/core/message-protocol';
+import { DEFAULT_SETTINGS } from '../../src/core/settings-store';
 
 const handlers: Handlers = {
   ping: () => ({ pong: true, protocolVersion: PROTOCOL_VERSION }),
   'test-connection': ({ attemptId }) => ({ attemptId, result: { status: 'no-key' } }),
+  'set-settings': ({ update }) => ({ settings: { ...DEFAULT_SETTINGS, ...update } }),
 };
 
 describe('message protocol', () => {
@@ -45,6 +47,7 @@ describe('message protocol', () => {
         throw new Error('boom');
       },
       'test-connection': handlers['test-connection'],
+      'set-settings': handlers['set-settings'],
     };
     expect(await handleRequest(createRequest('ping', {}), failing)).toEqual({
       ok: false,

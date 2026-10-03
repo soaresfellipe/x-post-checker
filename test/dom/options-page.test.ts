@@ -27,7 +27,12 @@ async function setup(options: { failWrites?: boolean; result?: ConnectionTestRes
     return { attemptId, result: options.result ?? { status: 'ok', model: 'jev-1.13.0', latencyMs: 241 } };
   });
   document.body.innerHTML = '<div id="app"></div>';
-  teardowns.push(await mountOptionsPage(document.getElementById('app')!, { store, testConnection }));
+  teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
+    store,
+    // Pages write settings through the background; here the same store stands in for it.
+    saveSettings: (update) => store.setSettings(update),
+    testConnection,
+  }));
   return { memory, store, testConnection };
 }
 
@@ -188,6 +193,7 @@ describe('options page', () => {
     document.body.innerHTML = '<div id="app"></div>';
     teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
       store,
+      saveSettings: (update) => store.setSettings(update),
       testConnection: async (attemptId, apiKey) => ({
         attemptId,
         // Mirrors the background handler: a typed key wins, otherwise the saved key is tested.
@@ -220,6 +226,7 @@ describe('options page', () => {
     document.body.innerHTML = '<div id="app"></div>';
     teardowns.push(await mountOptionsPage(document.getElementById('app')!, {
       store,
+      saveSettings: (update) => store.setSettings(update),
       testConnection: () => new Promise((resolve) => resolvers.push(resolve)),
     }));
     q<HTMLButtonElement>('test-connection').click();

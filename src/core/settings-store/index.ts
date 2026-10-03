@@ -3,7 +3,7 @@ import { createSettingsStore } from './store';
 import type { SettingsBackend } from './types';
 
 export * from './types';
-export { createSettingsStore, type SettingsStore } from './store';
+export { createSettingsStore, type SettingsStore, type PageSettingsStore } from './store';
 
 /** Store bound to `storage.local`. Never use `storage.sync`: the API key must not leave the device. */
 export function createLocalSettingsStore() {

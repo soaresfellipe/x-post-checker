@@ -1,8 +1,11 @@
-import type { LastAnalysis, SettingsStore } from '@/core/settings-store';
+import type { LastAnalysis, PageSettingsStore, Settings } from '@/core/settings-store';
 import { POPUP_TEMPLATE } from './template';
 
 export interface PopupPageDeps {
-  store: SettingsStore;
+  /** Read-only view of storage; the settings WRITE path is `saveSettings` (background single writer). */
+  store: PageSettingsStore;
+  /** Persists a settings update through the background and resolves with the stored settings. */
+  saveSettings(update: Partial<Settings>): Promise<Settings>;
   /** Opens the extension Options page in a browser tab. */
   openOptions(): Promise<void>;
   now?: () => number;
@@ -114,7 +117,7 @@ export async function mountPopupPage(root: HTMLElement, deps: PopupPageDeps): Pr
     const requested = toggle.checked;
     toggleError.textContent = '';
     try {
-      renderMaster((await store.setSettings({ enabled: requested })).enabled);
+      renderMaster((await deps.saveSettings({ enabled: requested })).enabled);
     } catch {
       toggleError.textContent = COPY.toggleFailed;
       renderMaster((await store.getSettings()).enabled);

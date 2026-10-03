@@ -41,3 +41,13 @@ export function mountMarker(doc: Document = document): HTMLElement {
 export function unmountMarker(doc: Document = document): void {
   doc.getElementById(MARKER_HOST_ID)?.remove();
 }
+
+/**
+ * Records the settings revision the host last applied (e.g. from a broadcast or a storage event).
+ * Observability only: lets tests and debugging verify a tab reached the store's final revision.
+ * No-op while disabled, since the host itself is removed.
+ */
+export function stampMarkerRevision(revision: number, doc: Document = document): void {
+  const host = doc.getElementById(MARKER_HOST_ID);
+  if (host) host.dataset.settingsRevision = String(revision);
+}

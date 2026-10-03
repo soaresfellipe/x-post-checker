@@ -3,6 +3,7 @@
  * background. Add a new message by extending `MessageMap`; handlers and clients stay type-checked.
  */
 import type { ConnectionTestResult } from '@/core/jev-client/connection-test';
+import type { Settings } from '@/core/settings-store/types';
 
 export const PROTOCOL_VERSION = 1;
 
@@ -16,6 +17,17 @@ export interface MessageMap {
     request: { attemptId: string; apiKey?: string };
     /** Echoes `attemptId` so the page can discard results from superseded attempts. */
     response: { attemptId: string; result: ConnectionTestResult };
+  };
+  /**
+   * The ONLY settings write path for pages: the background is the extension's single writer, so
+   * concurrent writes from independent contexts are serialized there and the revision is stamped
+   * atomically with the settings in one storage write.
+   */
+  'set-settings': {
+    /** Partial update; values are sanitized and clamped by the store before persisting. */
+    request: { update: Partial<Settings> };
+    /** The persisted settings after the write, for immediate feedback in the requesting page. */
+    response: { settings: Settings };
   };
 }
 
@@ -35,7 +47,7 @@ export type Handlers = {
   [T in MessageType]: (payload: MessageMap[T]['request']) => MessageMap[T]['response'] | Promise<MessageMap[T]['response']>;
 };
 
-const MESSAGE_TYPES: readonly string[] = ['ping', 'test-connection'] satisfies MessageType[];
+const MESSAGE_TYPES: readonly string[] = ['ping', 'test-connection', 'set-settings'] satisfies MessageType[];
 
 export function createRequest<T extends MessageType>(type: T, payload: MessageMap[T]['request']): Request<T> {
   return { v: PROTOCOL_VERSION, type, payload };
