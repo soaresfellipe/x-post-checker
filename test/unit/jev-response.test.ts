@@ -110,6 +110,16 @@ describe('parseDraftAnalysisResponse (verified wire format)', () => {
     }
   });
 
+  it('rejects a choice inherited from Object.prototype with the typed malformed reason (never a fabricated verdict)', () => {
+    for (const choice of ['toString', 'constructor', 'hasOwnProperty']) {
+      const corrupt = answer('main_weakness');
+      corrupt.choice = choice;
+      const parsed = parseDraftAnalysisResponse(verifiedResponseFrom(corrupt, 'main_weakness'));
+      expect(parsed.ok).toBe(false);
+      if (!parsed.ok) expect(parsed.reason).toBe('main_weakness choice is not one of the rubric options');
+    }
+  });
+
   it('rejects a choice answer with the wrong question type or a missing confidence', () => {
     const wrongType = answer('main_weakness');
     wrongType.type = 'score';

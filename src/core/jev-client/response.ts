@@ -79,7 +79,10 @@ export function parseDraftAnalysisResponse(data: unknown): ParseDraftAnalysisRes
   if (!isRecord(choice)) return { ok: false, reason: 'missing main_weakness answer' };
   if (choice.type !== 'choice') return { ok: false, reason: 'main_weakness answer is not a choice answer' };
   const chosen =
-    typeof choice.choice === 'string' && choice.choice in MAIN_WEAKNESS_QUESTION.criteria
+    // Prototype-safe membership: `in` would admit inherited Object.prototype names ("toString",
+    // "constructor"), which are not rubric options — they must degrade to the typed malformed
+    // failure, never reach the verdict (VAL-DRAFT-016).
+    typeof choice.choice === 'string' && Object.hasOwn(MAIN_WEAKNESS_QUESTION.criteria, choice.choice)
       ? (choice.choice as MainWeaknessId)
       : undefined;
   if (chosen === undefined) return { ok: false, reason: 'main_weakness choice is not one of the rubric options' };

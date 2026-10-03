@@ -9,7 +9,7 @@ import {
 import { JEV_ENDPOINT } from '@/core/jev-client/transport';
 import { createMemoryBackend } from '../helpers/memory-backend';
 import { makeDraft } from '../helpers/draft';
-import { jevOkResponse } from '../helpers/jev-fixtures';
+import { jevOkResponse, VERIFIED_JEV_RESPONSE } from '../helpers/jev-fixtures';
 
 const KEY = 'test-key-abc123';
 
@@ -403,5 +403,23 @@ describe('JevClient typed failures (never throw into the UI)', () => {
     const failing = makeClient({ fetchImpl: vi.fn(async () => new Response('boom', { status: 500 })) });
     const failure = await failing.analyzeDraft({ apiKey: SECRET, draft: makeDraft() });
     expect(JSON.stringify(failure)).not.toContain(SECRET);
+  });
+
+  it('treats a prototype-inherited main_weakness choice as malformed — no verdict, no cache write', async () => {
+    const poisoned = JSON.parse(JSON.stringify(VERIFIED_JEV_RESPONSE)) as {
+      answers: { main_weakness: { choice: unknown } };
+    };
+    poisoned.answers.main_weakness.choice = 'toString'; // inherited Object.prototype name, not a rubric option
+    const cache = createMemoryVerdictCache();
+    const setSpy = vi.spyOn(cache, 'set');
+    const client = makeClient({
+      fetchImpl: vi.fn(async () => new Response(JSON.stringify(poisoned), { status: 200 })),
+      cache,
+    });
+
+    const result = await client.analyzeDraft({ apiKey: KEY, draft: makeDraft() });
+
+    expect(result).toEqual({ ok: false, failure: { kind: 'malformed' } });
+    expect(setSpy).not.toHaveBeenCalled(); // a fabricated verdict must never reach the cache
   });
 });
