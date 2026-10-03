@@ -7,6 +7,7 @@ import { isPostSnapshot } from '@/core/post-snapshot';
 import { runConnectionTest } from '@/core/jev-client';
 import type { AnalyzerService } from '@/core/analyzer';
 import type { TargetAnalysisService } from '@/core/target-analysis';
+import type { OptimizerService } from '@/core/optimizer';
 import type { SettingsStore } from '@/core/settings-store';
 import { PROTOCOL_VERSION, type Handlers } from './index';
 
@@ -24,6 +25,8 @@ export interface BackgroundHandlerDeps {
   analyzer: AnalyzerService;
   /** The deep-analysis pipeline for timeline targets ("Deep analysis"); injectable for tests. */
   targetAnalyzer: TargetAnalysisService;
+  /** The draft-optimization pipeline ("Optimize"); injectable for unit tests. */
+  optimizer: OptimizerService;
   /**
    * Opens the Options page (`browser.runtime.openOptionsPage`); injectable for unit tests. The
    * background always wires it; when absent the handler answers with an explicit protocol error
@@ -35,7 +38,7 @@ export interface BackgroundHandlerDeps {
 const TRIGGERS: readonly AnalysisTrigger[] = ['auto', 'manual'];
 
 export function createBackgroundHandlers(deps: BackgroundHandlerDeps): Handlers {
-  const { store, analyzer, targetAnalyzer } = deps;
+  const { store, analyzer, targetAnalyzer, optimizer } = deps;
   const testConnection = deps.runConnectionTest ?? runConnectionTest;
   return {
     ping: () => ({ pong: true, protocolVersion: PROTOCOL_VERSION }),
@@ -73,6 +76,12 @@ export function createBackgroundHandlers(deps: BackgroundHandlerDeps): Handlers 
     'analyze-target': ({ post }) => {
       if (!isPostSnapshot(post)) throw new Error('Invalid post snapshot.');
       return targetAnalyzer.analyzeTarget(post);
+    },
+    // Same untrusted-input rule for the optimizer: an invalid DraftSnapshot is a protocol error;
+    // a valid one gets a typed result (optimized / disabled / unavailable / no-key / error).
+    'optimize-draft': ({ draft }) => {
+      if (!isDraftSnapshot(draft)) throw new Error('Invalid draft snapshot.');
+      return optimizer.optimizeDraft(draft);
     },
     // Content scripts cannot call runtime.openOptionsPage (extension pages only), so the overlay's
     // "Connect Jev" prompt asks the background to open it.

@@ -10,6 +10,7 @@
  */
 import type { DraftSnapshot } from '@/core/draft-snapshot';
 import { DRAFT_RUBRIC_VERSION, TARGET_RUBRIC_VERSION } from './config';
+import { OPTIMIZER_RUBRIC_VERSION } from '@/core/optimizer/config';
 import { buildDraftContextState } from './request';
 
 const FNV_PRIME = 0x01000193;
@@ -39,4 +40,15 @@ export function draftCacheKey(draft: DraftSnapshot): string {
  */
 export function targetCacheKey(postId: string): string {
   return `target:${TARGET_RUBRIC_VERSION}:${postId}`;
+}
+
+/**
+ * The OPTIMIZER cache key (m4-optimizer): the draft's request identity under the optimizer's own
+ * rubric version — the draft identity alone is NOT enough, because a draft analyzed for its
+ * score and the same draft optimized share the draft text but not the request, and a changed
+ * optimizer rubric must never serve an older optimization. The `optimizer:` prefix keeps these
+ * keys disjoint from the draft hash keys and the `target:` keys in the same storage area.
+ */
+export function optimizerCacheKey(draft: DraftSnapshot): string {
+  return `optimizer:${OPTIMIZER_RUBRIC_VERSION}:${draftCacheKey(draft)}`;
 }

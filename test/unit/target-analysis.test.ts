@@ -220,6 +220,9 @@ describe('TargetAnalysisService (VAL-SETUP-012: AI off keeps targets local)', ()
           latencyMs: 10,
         };
       },
+      optimizeDraft: async () => {
+        throw new Error('not used');
+      },
     };
   }
 
@@ -258,6 +261,9 @@ describe('TargetAnalysisService (VAL-SETUP-012: AI off keeps targets local)', ()
         throw new Error('not used');
       },
       analyzeTarget: async () => ({ ok: false as const, failure: { kind: 'http-error' as const, status: 401 } }),
+      optimizeDraft: async () => {
+        throw new Error('not used');
+      },
     };
     const service = createTargetAnalysisService({ store: storeOver({ jevForTargets: true }, 'k'), jev });
     expect(await service.analyzeTarget(makePost())).toEqual({

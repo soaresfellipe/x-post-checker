@@ -24,12 +24,15 @@ import {
 import {
   createMemoryVerdictCache,
   createMemoryTargetVerdictCache,
+  createMemoryOptimizerCache,
   type JevVerdictCache,
   type TargetCachedVerdict,
   type TargetVerdictCache,
+  type OptimizerCachedEntry,
+  type OptimizerVerdictCache,
   type VerdictCacheArea,
 } from './cache';
-import { draftCacheKey, targetCacheKey } from './hash';
+import { draftCacheKey, targetCacheKey, optimizerCacheKey } from './hash';
 import { buildDraftAnalysisRequest, buildTargetAnalysisRequest } from './request';
 import {
   buildDraftJevVerdict,
@@ -40,6 +43,8 @@ import {
 } from './response';
 import { createMemoryRateLimiter, createPersistentRateLimiter, type RateLimiter } from './rate-window';
 import { postJevJson } from './transport';
+import { buildOptimizerPipeline } from '@/core/optimizer/request';
+import { parseOptimizeResponse, type RankedHashtag, type RankedVariant } from '@/core/optimizer/response';
 
 /** Every way a draft analysis can fail, typed so upstream can degrade locally without try/catch. */
 export type JevAnalysisFailure =
@@ -88,6 +93,28 @@ export type JevTargetAnalysisResult =
   | ({ ok: true } & JevTargetAnalysisSuccess)
   | { ok: false; failure: JevAnalysisFailure };
 
+/** One draft-optimization request: the draft plus the caller-read key (m4-optimizer). */
+export interface JevOptimizeRequest {
+  readonly apiKey: string | undefined;
+  readonly draft: DraftSnapshot;
+}
+
+/** What one draft optimization produced: ranked rewrites + ranked hashtag candidates. */
+export interface JevOptimizeSuccess {
+  /** Ranked best-first (noul probability desc, generation order on ties). */
+  readonly variants: readonly RankedVariant[];
+  /** Ranked best-first. */
+  readonly hashtags: readonly RankedHashtag[];
+  /** `fresh` = a real exchange just completed; `cache` = this draft's stored result was reused. */
+  readonly source: 'fresh' | 'cache';
+  /** Measured full-exchange latency, fresh results only. */
+  readonly latencyMs?: number;
+}
+
+export type JevOptimizeResult =
+  | ({ ok: true } & JevOptimizeSuccess)
+  | { ok: false; failure: JevAnalysisFailure };
+
 /** Injectable retry / rate-limit policy overrides (tests inject deterministic clocks). */
 export interface JevClientDeps {
   fetchImpl?: (url: string, init: RequestInit) => Promise<Response>;
@@ -96,6 +123,8 @@ export interface JevClientDeps {
   cache?: JevVerdictCache;
   /** The per-post verdict cache for deep analysis (defaults to in-memory; storage in background). */
   targetCache?: TargetVerdictCache;
+  /** The per-draft optimization cache (defaults to in-memory; storage in background). */
+  optimizerCache?: OptimizerVerdictCache;
   timeoutMs?: number;
   retry?: { maxRetries?: number; backoffMs?: readonly number[] };
   rateLimit?: { maxRequests?: number; windowMs?: number };
@@ -112,6 +141,12 @@ export interface JevClient {
   analyzeDraft(request: JevAnalyzeRequest): Promise<JevDraftAnalysisResult>;
   /** The popover's on-demand "Deep analysis" path: one exchange per post, cached by post id. */
   analyzeTarget(request: JevTargetAnalyzeRequest): Promise<JevTargetAnalysisResult>;
+  /**
+   * The draft overlay's on-demand "Optimize" path: one noul exchange per draft, cached by the
+   * draft's optimizer identity so repeated clicks on an unchanged draft cost zero API calls
+   * (VAL-OPT-009). The optimizer service derives the presentation facts on top of this.
+   */
+  optimizeDraft(request: JevOptimizeRequest): Promise<JevOptimizeResult>;
 }
 
 function delayFor(backoffMs: readonly number[], retryIndex: number): number {
@@ -139,6 +174,7 @@ function translateTransportFailure(
 export function createJevClient(deps: JevClientDeps = {}): JevClient {
   const cache = deps.cache ?? createMemoryVerdictCache();
   const targetCache = deps.targetCache ?? createMemoryTargetVerdictCache();
+  const optimizerCache = deps.optimizerCache ?? createMemoryOptimizerCache();
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const timeoutMs = deps.timeoutMs ?? JEV_ANALYSIS_TIMEOUT_MS;
@@ -152,10 +188,10 @@ export function createJevClient(deps: JevClientDeps = {}): JevClient {
   const limiter: RateLimiter = deps.rateWindowArea
     ? createPersistentRateLimiter(deps.rateWindowArea, maxRequests, windowMs, now)
     : createMemoryRateLimiter(maxRequests, windowMs, now);
-  // One in-flight promise per unique request identity (draft hash / target post id): bursts
-  // coalesce here, and the entry is removed as soon as the promise settles so a follow-up
-  // analysis starts a fresh exchange.
-  const inFlight = new Map<string, Promise<JevDraftAnalysisResult | JevTargetAnalysisResult>>();
+  // One in-flight promise per unique request identity (draft hash / target post id / optimizer
+  // draft): bursts coalesce here, and the entry is removed as soon as the promise settles so a
+  // follow-up analysis starts a fresh exchange.
+  const inFlight = new Map<string, Promise<JevDraftAnalysisResult | JevTargetAnalysisResult | JevOptimizeResult>>();
 
   /**
    * The shared transport+retry pipeline. `parse` turns a 200 body into either the caller's
@@ -287,6 +323,62 @@ export function createJevClient(deps: JevClientDeps = {}): JevClient {
         .finally(() => {
           if (inFlight.get(cacheKey) === promise) inFlight.delete(cacheKey);
         }) as Promise<JevTargetAnalysisResult>;
+      inFlight.set(cacheKey, promise);
+      return promise;
+    },
+
+    async optimizeDraft({ apiKey, draft }) {
+      const key = apiKey?.trim();
+      if (!key) return { ok: false, failure: { kind: 'no-key' } };
+
+      // VAL-OPT-009: the cache identity is the DRAFT (under the optimizer rubric version) —
+      // repeated Optimize on an unchanged draft reuses this result with zero further API calls.
+      const cacheKey = optimizerCacheKey(draft);
+      const cached = await optimizerCache.get(cacheKey);
+      if (cached) {
+        return { ok: true, variants: cached.variants, hashtags: cached.hashtags, source: 'cache' };
+      }
+
+      const existing = inFlight.get(cacheKey);
+      if (existing) return existing as Promise<JevOptimizeResult>;
+
+      // The variants and hashtag candidates are deterministic pure functions of the draft, so
+      // the pipeline (and with it every question id the parser matches on) is identical for
+      // identical drafts.
+      const pipeline = buildOptimizerPipeline(draft);
+      const promise = exchangeWithRetry<JevOptimizeResult & { ok: true }>(key, {
+        body: pipeline.request,
+        cacheKey,
+        cacheSet: (key: string, entry: never) =>
+          optimizerCache.set(key, entry as Parameters<OptimizerVerdictCache['set']>[1]),
+        parse: (data) => {
+          const parsed = parseOptimizeResponse(data, pipeline);
+          if (!parsed.ok) return { ok: false };
+          const entry: OptimizerCachedEntry = {
+            variants: parsed.variants,
+            hashtags: parsed.hashtags,
+            at: now(),
+          };
+          return {
+            ok: true,
+            cacheEntry: entry,
+            success: {
+              ok: true,
+              variants: parsed.variants,
+              hashtags: parsed.hashtags,
+              source: 'fresh',
+            } as JevOptimizeResult & { ok: true },
+          };
+        },
+      })
+        .then((result) =>
+          result.ok
+            ? ({ ...result.success, latencyMs: result.latencyMs } as JevOptimizeResult)
+            : { ok: false, failure: result.failure },
+        )
+        .finally(() => {
+          if (inFlight.get(cacheKey) === promise) inFlight.delete(cacheKey);
+        }) as Promise<JevOptimizeResult>;
       inFlight.set(cacheKey, promise);
       return promise;
     },

@@ -26,6 +26,19 @@ export const OVERLAY_TESTIDS = {
   jevSuggestions: 'overlay-jev-suggestions',
   jevNotice: 'overlay-jev-notice',
   connectJev: 'overlay-connect-jev',
+  optimizer: 'overlay-optimizer',
+  optimize: 'overlay-optimize',
+  optimizerNotice: 'overlay-optimizer-notice',
+  optimizerPending: 'overlay-optimizer-pending',
+  optimizerVariants: 'overlay-optimizer-variants',
+  optimizerVariant: 'overlay-optimizer-variant',
+  optimizerVariantText: 'overlay-optimizer-variant-text',
+  optimizerVariantChars: 'overlay-optimizer-variant-chars',
+  optimizerCopy: 'overlay-optimizer-copy',
+  optimizerHashtags: 'overlay-optimizer-hashtags',
+  optimizerHashtag: 'overlay-optimizer-hashtag',
+  optimizerDropAdvice: 'overlay-optimizer-drop-advice',
+  optimizerConnect: 'overlay-optimizer-connect',
 } as const;
 
 /** Placement metrics (px): the gap below the composer region and the viewport clamp margin. */
@@ -44,6 +57,9 @@ export const OVERLAY_HEADLINE_TIERS = Object.freeze({
   good: 70,
   ok: 40,
 });
+
+/** Optimizer UI timing (ms): how long a copy button shows "Copied" before reverting. */
+export const OPTIMIZER_COPY_RESET_MS = 1500;
 
 /** Every string the overlay renders. English only — no i18n layer (single-language product). */
 export const OVERLAY_COPY = Object.freeze({
@@ -66,6 +82,18 @@ export const OVERLAY_COPY = Object.freeze({
   confidenceLabel: 'Confidence',
   weaknessHeading: 'Main weakness',
   suggestionsHeading: 'Suggestions',
+  optimizerHeading: 'Optimizer',
+  optimizeButton: 'Optimize',
+  optimizerPending: 'Finding stronger hooks…',
+  optimizerOff: 'AI optimization is off in Settings.',
+  optimizerNoKey: 'Connect Jev in Options to get AI hook variants.',
+  optimizerError: 'Optimization failed - your draft and local score are untouched.',
+  copyButton: 'Copy',
+  copiedLabel: 'Copied',
+  charNote: '{n} characters (X-weighted)',
+  overLimitFlag: 'Over the 280-character limit ({n} weighted) - trim before posting.',
+  hashtagHeading: 'Hashtag suggestions',
+  noHashtags: 'No hashtag suggestions for this draft.',
   errorReasons: Object.freeze({
     network: 'Could not reach the AI service.',
     http: (status: number) => `The AI service returned an error (HTTP ${status}).`,

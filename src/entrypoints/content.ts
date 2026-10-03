@@ -58,6 +58,21 @@ export default defineContentScript({
       openOptions: () => {
         void sendMessage('open-options-page', {}).catch(() => undefined);
       },
+      // The overlay's explicit "Optimize" action (m4-optimizer): the draft goes to the background,
+      // whose optimizer cache/coalescing bounds the Jev cost to one API call per unique draft
+      // (VAL-OPT-009). The reply settles THIS dispatch by identity; failures are non-blocking
+      // (VAL-OPT-010) and the composer text is never touched — copy is the only transfer path.
+      requestOptimize: (draft) => {
+        void sendMessage('optimize-draft', { draft })
+          .then((response) => {
+            if (!response.ok) {
+              overlay.onOptimizeFailed(draft);
+              return;
+            }
+            overlay.onOptimizeResult(response.data, draft);
+          })
+          .catch(() => overlay.onOptimizeFailed(draft));
+      },
     });
 
     const dispatchAnalysis: ComposerWatcherOptions['dispatchAnalysis'] = (dispatch) => {

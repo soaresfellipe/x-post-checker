@@ -6,6 +6,7 @@ import type { AnalysisTrigger, DraftSnapshot } from '@/core/draft-snapshot';
 import type { PostSnapshot } from '@/core/post-snapshot';
 import type { DraftAnalysisResult } from '@/core/analyzer';
 import type { TargetAnalysisResult } from '@/core/target-analysis';
+import type { OptimizationResult } from '@/core/optimizer';
 import type { ConnectionTestResult } from '@/core/jev-client/connection-test';
 import type { ApiKeyWriteResult, Settings, SettingsWriteResult } from '@/core/settings-store/types';
 
@@ -75,6 +76,18 @@ export interface MessageMap {
     response: TargetAnalysisResult;
   };
   /**
+   * The draft overlay's explicit "Optimize" action (m4-optimizer). The OptimizerService gates on
+   * settings/key with honest typed refusals (`disabled` / `unavailable` / `no-key` — the overlay
+   * renders the reason), and the JevClient's per-draft optimizer cache + in-flight coalescing
+   * guarantee at most ONE api.typesafe.ai call per unique draft however often the user clicks
+   * (VAL-OPT-009). Variants are presentation-only: the overlay copies them to the clipboard on
+   * explicit user action and NEVER inserts them into the composer (VAL-OPT-005).
+   */
+  'optimize-draft': {
+    request: { draft: DraftSnapshot };
+    response: OptimizationResult;
+  };
+  /**
    * Opens the extension's Options page — content scripts cannot call `runtime.openOptionsPage`
    * themselves, so the overlay's "Connect Jev" prompt routes through the background.
    */
@@ -108,6 +121,7 @@ const MESSAGE_TYPES: readonly string[] = [
   'clear-api-key',
   'analyze-draft',
   'analyze-target',
+  'optimize-draft',
   'open-options-page',
 ] satisfies MessageType[];
 

@@ -6,6 +6,8 @@
 import type { DraftSnapshot } from '@/core/draft-snapshot';
 import type { JevVerdict, LocalScore } from '@/core/heuristic-engine';
 import type { DraftAnalysis, DraftAnalysisResult } from '@/core/analyzer';
+import type { Optimization, OptimizationResult } from '@/core/optimizer';
+import type { JevAnalysisFailure } from '@/core/jev-client/client';
 import type { Settings } from '@/core/settings-store';
 import type { ComposerChangeEvent, DraftEvent } from '@/dom/composer-watcher';
 
@@ -20,10 +22,30 @@ export interface JevSection {
   readonly reason?: string;
 }
 
+/**
+ * Which Optimize-half state the panel shows (m4-optimizer). `no-key` renders a disabled Optimize
+ * with guidance to Options (VAL-OPT-001); `loading`/`done`/`error` are the action's own lifecycle
+ * (loading -> success or explicit error, VAL-OPT-002/010), tracked PER DRAFT like the analysis
+ * replies so a draft change resets it and a stale reply never paints a newer draft.
+ */
+export type OptimizerSection =
+  | { readonly state: 'idle' }
+  | { readonly state: 'no-key' }
+  | { readonly state: 'off' }
+  | { readonly state: 'loading' }
+  | { readonly state: 'done'; readonly optimization: Optimization }
+  | { readonly state: 'error'; readonly reason: string };
+
+/** The per-draft optimizer slot the controller keeps (matched by draft identity). */
+export type OptimizerSlot =
+  | { readonly hash: string; readonly phase: 'loading' }
+  | { readonly hash: string; readonly phase: 'done'; readonly optimization: Optimization }
+  | { readonly hash: string; readonly phase: 'error'; readonly failure: JevAnalysisFailure };
+
 /** The pure view model for the current draft (all DOM-free; `deriveOverlayView` produces it). */
 export type OverlayView =
   | { readonly phase: 'empty'; readonly minDraftLength: number }
-  | { readonly phase: 'ready' }
+  | { readonly phase: 'ready'; readonly optimizer: OptimizerSection }
   | {
       readonly phase: 'analyzed';
       readonly local: LocalScore;
@@ -31,6 +53,7 @@ export type OverlayView =
       readonly headline: number;
       readonly headlineSource: 'local' | 'hybrid';
       readonly jev: JevSection;
+      readonly optimizer: OptimizerSection;
     };
 
 /** Everything `deriveOverlayView` needs; the overlay controller keeps these slots current. */
@@ -51,6 +74,11 @@ export interface OverlayViewInputs {
    * instead of silently reverting.
    */
   readonly transportFailures: ReadonlySet<string>;
+  /**
+   * The latest Optimize lifecycle slot (loading/done/error), matched by draft identity: a draft
+   * change resets it to null and a reply for a different draft never paints (VAL-DRAFT-011 rule).
+   */
+  readonly optimizer: OptimizerSlot | null;
 }
 
 export interface ScoreOverlayOptions {
@@ -62,6 +90,18 @@ export interface ScoreOverlayOptions {
   requestAnalysis: () => boolean;
   /** Opens the extension Options page (via the background; content scripts cannot). */
   openOptions: () => void;
+  /**
+   * The explicit "Optimize" action for the given draft: dispatches `optimize-draft` through the
+   * background. The reply lands in `onOptimizeResult`/`onOptimizeFailed`. When omitted (tests),
+   * the Optimize button click does nothing.
+   */
+  requestOptimize?: (draft: DraftSnapshot) => void;
+  /**
+   * Puts text on the clipboard for a variant's copy action — the transfer mechanism at this
+   * scope (VAL-OPT-004): the composer is never touched, copying is the explicit user action.
+   * Defaults to `navigator.clipboard.writeText`.
+   */
+  copyVariant?: (text: string) => Promise<void>;
 }
 
 export interface ScoreOverlay {
@@ -91,6 +131,15 @@ export interface ScoreOverlay {
    * (VAL-DRAFT-018). Unrelated in-flight dispatches stay pending.
    */
   onAnalysisFailed(snapshot: DraftSnapshot): void;
+  /**
+   * A settled `optimize-draft` reply, with the dispatched draft so the reply settles THAT draft's
+   * identity (a reply for a different draft never paints — VAL-DRAFT-011 rule). Honest refusals
+   * (disabled/unavailable/no-key) just clear the loading state: the section derives its gate
+   * states live from settings and key presence.
+   */
+  onOptimizeResult(result: OptimizationResult, dispatched: DraftSnapshot): void;
+  /** The optimize-draft transport failed for THIS draft's dispatch: explicit error, non-blocking. */
+  onOptimizeFailed(dispatched: DraftSnapshot): void;
   /** Removes the host and every listener (test teardown). */
   destroy(): void;
 }

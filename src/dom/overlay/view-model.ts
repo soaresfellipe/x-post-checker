@@ -16,7 +16,7 @@ import type { DraftAnalysis } from '@/core/analyzer';
 import type { JevAnalysisFailure } from '@/core/jev-client/client';
 import type { Settings } from '@/core/settings-store';
 import { OVERLAY_COPY } from './config';
-import type { JevSection, OverlayView, OverlayViewInputs } from './types';
+import type { JevSection, OptimizerSection, OptimizerSlot, OverlayView, OverlayViewInputs } from './types';
 
 /** The draft identity replies are matched by: the Jev request identity of the snapshot. */
 export function draftIdentity(snapshot: DraftSnapshot): string {
@@ -84,18 +84,19 @@ function deriveJevSection(
 }
 
 export function deriveOverlayView(inputs: OverlayViewInputs): OverlayView {
-  const { settings, keyPresent, capture, pending, reply, transportFailures } = inputs;
+  const { settings, keyPresent, capture, pending, reply, transportFailures, optimizer } = inputs;
   if (!capture || !isDraftEligible(capture, settings.minDraftLength)) {
     return { phase: 'empty', minDraftLength: settings.minDraftLength };
   }
 
   const hash = draftIdentity(capture);
+  const optimizerSection = deriveOptimizerSection(settings, keyPresent, optimizer, hash);
   const matchingReply = reply?.hash === hash ? reply.result : null;
   // Per-draft terminal-state ownership (VAL-DRAFT-018): this draft's own failure entry decides —
   // another draft's failure or result can neither add nor remove it.
   const transportFailed = transportFailures.has(hash);
   const hasAnalysis = (pending.get(hash) ?? 0) > 0 || matchingReply !== null || transportFailed;
-  if (!hasAnalysis) return { phase: 'ready' };
+  if (!hasAnalysis) return { phase: 'ready', optimizer: optimizerSection };
 
   // Live-setting precedence again (VAL-DRAFT-021): with jevForDrafts off the panel is local-only —
   // the verdict and the analyzer's hybrid headline are suppressed no matter what settled.
@@ -117,5 +118,32 @@ export function deriveOverlayView(inputs: OverlayViewInputs): OverlayView {
       : composeHeadline(local.headline, verdict?.ordinal),
     headlineSource: verdict ? 'hybrid' : 'local',
     jev,
+    optimizer: optimizerSection,
   };
+}
+
+/**
+ * Derives the Optimize-half section (m4-optimizer). LIVE SETTINGS TAKE PRECEDENCE, mirroring the
+ * Jev half: with `jevForDrafts` off the section says so (the optimizer is an AI feature), and
+ * without a key it renders the disabled state whose guidance points to Options (VAL-OPT-001).
+ * Otherwise the draft's own slot decides: loading -> done/error, matched by draft identity so a
+ * stale reply never paints a newer draft.
+ */
+function deriveOptimizerSection(
+  settings: Settings,
+  keyPresent: boolean,
+  slot: OptimizerSlot | null,
+  hash: string,
+): OptimizerSection {
+  if (!settings.jevForDrafts) return { state: 'off' };
+  if (!keyPresent) return { state: 'no-key' };
+  if (!slot || slot.hash !== hash) return { state: 'idle' };
+  switch (slot.phase) {
+    case 'loading':
+      return { state: 'loading' };
+    case 'done':
+      return { state: 'done', optimization: slot.optimization };
+    case 'error':
+      return { state: 'error', reason: failureReason(slot.failure) };
+  }
 }

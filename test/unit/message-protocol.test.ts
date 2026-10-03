@@ -34,6 +34,7 @@ const handlers: Handlers = {
   'analyze-draft': ({ draft }) =>
     typeof draft.text === 'string' ? analysisResult : { kind: 'below-min-length', minDraftLength: 10 },
   'analyze-target': () => ({ kind: 'unavailable' }),
+  'optimize-draft': () => ({ kind: 'unavailable' }),
   'open-options-page': () => ({ opened: true }),
 };
 
@@ -94,7 +95,10 @@ describe('message protocol', () => {
         throw new Error('boom');
       },
       'analyze-target': () => ({ kind: 'unavailable' }),
-  'open-options-page': () => {
+      'optimize-draft': () => {
+        throw new Error('boom');
+      },
+      'open-options-page': () => {
         throw new Error('boom');
       },
     };

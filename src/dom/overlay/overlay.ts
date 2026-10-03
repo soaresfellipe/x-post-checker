@@ -18,12 +18,20 @@ import type { DraftSnapshot } from '@/core/draft-snapshot';
 import { JEV_BAND_LABELS, type JevVerdict } from '@/core/heuristic-engine';
 import { DEFAULT_SETTINGS, type Settings } from '@/core/settings-store';
 import type { DraftAnalysis, DraftAnalysisResult } from '@/core/analyzer';
+import { VARIANT_LABELS, type HookVariant, type OptimizationResult } from '@/core/optimizer';
 import type { SignalEntry } from '@/core/heuristic-engine';
 import { findComposerRegion } from '@/dom/composer-watcher';
-import { OVERLAY_COPY, OVERLAY_HEADLINE_TIERS, OVERLAY_HOST_ID, OVERLAY_PLACEMENT, OVERLAY_TESTIDS } from './config';
+import {
+  OPTIMIZER_COPY_RESET_MS,
+  OVERLAY_COPY,
+  OVERLAY_HEADLINE_TIERS,
+  OVERLAY_HOST_ID,
+  OVERLAY_PLACEMENT,
+  OVERLAY_TESTIDS,
+} from './config';
 import { computeAnchorPosition } from './position';
 import { deriveOverlayView, draftIdentity } from './view-model';
-import type { OverlayView, ScoreOverlay, ScoreOverlayOptions } from './types';
+import type { OptimizerSection, OptimizerSlot, OverlayView, ScoreOverlay, ScoreOverlayOptions } from './types';
 
 const STYLE = `
   /*
@@ -82,6 +90,18 @@ const STYLE = `
     border: 0; border-radius: 999px; cursor: pointer;
     background: #1d9bf0; color: #ffffff; font: 600 12px/1.4 system-ui, sans-serif;
   }
+  button:disabled { background: #d0d9de; cursor: default; }
+  .variant-kind { display: block; font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+    text-transform: uppercase; color: #536471; margin-top: 6px; }
+  .variant-text { margin: 2px 0; color: #0f1419; }
+  .variant-chars { display: block; color: #536471; font-size: 11px; margin: 0 0 2px; }
+  .variant-chars[data-over-limit="true"] { color: #d64545; font-weight: 600; }
+  .optimizer-variant { display: block; border-top: 1px solid #eff3f4; padding: 4px 0 6px; }
+  .optimizer-variant li, .optimizer-hashtag { display: block; }
+  .optimizer-hashtag { padding: 2px 0; }
+  .hashtag-tag { font-weight: 600; margin-right: 6px; }
+  .hashtag-rationale { color: #536471; }
+  .drop-advice { color: #536471; margin: 4px 0 0; }
 `;
 
 function headlineTier(headline: number): 'good' | 'ok' | 'weak' {
@@ -99,6 +119,13 @@ function formatPoints(points: number): string {
 export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
   const doc = options.doc ?? document;
   const win = doc.defaultView ?? window;
+  // VAL-OPT-004: the clipboard transfer for variant copy actions (user-gesture driven). Tests
+  // inject a spy; the default uses the page clipboard the button's user activation licenses.
+  const copyVariant = options.copyVariant ?? ((text: string) => {
+    if (!navigator.clipboard) return Promise.reject(new Error('Clipboard unavailable.'));
+    return navigator.clipboard.writeText(text);
+  });
+  const requestOptimize = options.requestOptimize;
 
   let settings: Settings = { ...DEFAULT_SETTINGS };
   let composer: Element | null = null;
@@ -109,6 +136,10 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
   // failure, so a settling dispatch can never displace another draft's terminal state (a single
   // slot let an older failing draft erase the current draft's error and downgrade it to ready).
   const transportFailures = new Set<string>();
+  // The Optimize lifecycle slot (m4-optimizer): per-draft, matched by identity, reset on every
+  // draft change — re-clicking Optimize on an identical draft is then served by the background's
+  // optimizer cache with zero API calls (VAL-OPT-009).
+  let optimizerSlot: OptimizerSlot | null = null;
 
   let mounted = false;
   let destroyed = false;
@@ -178,6 +209,146 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     return JEV_BAND_LABELS[verdict.band] ?? JEV_BAND_LABELS.weak!;
   }
 
+  // ---- optimizer rendering (m4-optimizer; English-only surface, VAL-CROSS-016) ----
+
+  function copyButton(variant: HookVariant): HTMLElement {
+    const button = el('button', { testid: OVERLAY_TESTIDS.optimizerCopy, text: OVERLAY_COPY.copyButton }) as HTMLButtonElement;
+    // VAL-OPT-004: the button puts EXACTLY the variant text on the clipboard — no labels, no
+    // extra text — and never touches the composer (VAL-OPT-005: copy is the transfer mechanism).
+    button.addEventListener('click', () => {
+      void copyVariant(variant.text)
+        .then(() => {
+          button.textContent = OVERLAY_COPY.copiedLabel;
+          button.disabled = true;
+          setTimeout(() => {
+            if (button.isConnected) {
+              button.textContent = OVERLAY_COPY.copyButton;
+              button.disabled = false;
+            }
+          }, OPTIMIZER_COPY_RESET_MS);
+        })
+        .catch(() => undefined);
+    });
+    return button;
+  }
+
+  function variantItem(variant: HookVariant): HTMLElement {
+    const item = el('li', { className: 'optimizer-variant', testid: OVERLAY_TESTIDS.optimizerVariant });
+    item.dataset.variantKind = variant.kind;
+    // VAL-OPT-007: an over-limit variant is explicitly flagged (never presented as ready).
+    item.dataset.overLimit = String(variant.overLimit);
+    item.append(el('span', { className: 'variant-kind', text: VARIANT_LABELS[variant.kind] }));
+    item.append(
+      el('p', { className: 'variant-text', testid: OVERLAY_TESTIDS.optimizerVariantText, text: variant.text }),
+    );
+    item.append(
+      el('span', {
+        className: 'variant-chars',
+        testid: OVERLAY_TESTIDS.optimizerVariantChars,
+        text: variant.overLimit
+          ? OVERLAY_COPY.overLimitFlag.replace('{n}', String(variant.weightedChars))
+          : OVERLAY_COPY.charNote.replace('{n}', String(variant.weightedChars)),
+      }),
+    );
+    if (variant.overLimit) item.querySelector('.variant-chars')?.setAttribute('data-over-limit', 'true');
+    item.append(copyButton(variant));
+    return item;
+  }
+
+  function hashtagsBlock(optimization: Extract<OptimizerSlot, { phase: 'done' }>['optimization']): HTMLElement {
+    const box = el('div', { testid: OVERLAY_TESTIDS.optimizerHashtags });
+    box.append(el('h4', { className: 'subheading', text: OVERLAY_COPY.hashtagHeading }));
+    const advice = optimization.hashtags;
+    if (advice.suggestions.length === 0) {
+      box.append(el('p', { className: 'notice', text: OVERLAY_COPY.noHashtags }));
+    } else {
+      const list = el('ul');
+      for (const suggestion of advice.suggestions) {
+        const item = el('li', { className: 'optimizer-hashtag', testid: OVERLAY_TESTIDS.optimizerHashtag });
+        item.dataset.tag = suggestion.tag;
+        item.append(el('span', { className: 'hashtag-tag', text: `#${suggestion.tag}` }));
+        item.append(el('span', { className: 'hashtag-rationale', text: suggestion.rationale }));
+        list.append(item);
+      }
+      box.append(list);
+    }
+    // VAL-OPT-006: when the draft already carries excess hashtags, name which to drop.
+    if (advice.dropAdvice !== undefined) {
+      box.append(el('p', { className: 'drop-advice', testid: OVERLAY_TESTIDS.optimizerDropAdvice, text: advice.dropAdvice }));
+    }
+    return box;
+  }
+
+  function optimizeButton(enabled: boolean): HTMLElement {
+    const button = el('button', { testid: OVERLAY_TESTIDS.optimize, text: OVERLAY_COPY.optimizeButton }) as HTMLButtonElement;
+    button.dataset.state = enabled ? 'enabled' : 'disabled';
+    if (!enabled) {
+      button.disabled = true;
+      return button;
+    }
+    button.addEventListener('click', () => optimizeNow());
+    return button;
+  }
+
+  /** The Optimize lifecycle: eligible-draft gate -> loading slot -> dispatch -> reply/failure. */
+  function optimizeNow(): void {
+    if (!capture || !requestOptimize) return;
+    if (!settings.jevForDrafts || !options.getKeyPresence()) return;
+    const hash = draftIdentity(capture);
+    if (optimizerSlot?.hash === hash && optimizerSlot.phase === 'loading') return; // already in flight
+    optimizerSlot = { hash, phase: 'loading' };
+    render();
+    requestOptimize(capture);
+  }
+
+  function optimizerSection(view: { optimizer: OptimizerSection }): HTMLElement {
+    const section = el('section', { testid: OVERLAY_TESTIDS.optimizer });
+    section.dataset.optimizerState = view.optimizer.state;
+    section.append(el('h3', { text: OVERLAY_COPY.optimizerHeading }));
+    switch (view.optimizer.state) {
+      case 'idle':
+        section.append(optimizeButton(true));
+        break;
+      case 'off':
+        // VAL-OPT-001: disabled with a clear reason (the AI lane is off in Settings).
+        section.append(optimizeButton(false));
+        section.append(el('p', { className: 'notice', testid: OVERLAY_TESTIDS.optimizerNotice, text: OVERLAY_COPY.optimizerOff }));
+        break;
+      case 'no-key': {
+        // VAL-OPT-001: disabled and the guidance points to Options — made actionable with the
+        // same Connect Jev control the AI-judgment section uses.
+        section.append(optimizeButton(false));
+        section.append(
+          el('p', { className: 'notice', testid: OVERLAY_TESTIDS.optimizerNotice, text: OVERLAY_COPY.optimizerNoKey }),
+        );
+        const connect = el('button', { testid: OVERLAY_TESTIDS.optimizerConnect, text: OVERLAY_COPY.connectJev });
+        connect.addEventListener('click', () => options.openOptions());
+        section.append(connect);
+        break;
+      }
+      case 'loading':
+        section.append(el('p', { className: 'pending', testid: OVERLAY_TESTIDS.optimizerPending, text: OVERLAY_COPY.optimizerPending }));
+        break;
+      case 'done': {
+        section.append(optimizeButton(true)); // re-click serves the cached result (VAL-OPT-009)
+        const list = el('ul', { testid: OVERLAY_TESTIDS.optimizerVariants });
+        for (const variant of view.optimizer.optimization.variants) list.append(variantItem(variant));
+        section.append(list);
+        section.append(hashtagsBlock(view.optimizer.optimization));
+        break;
+      }
+      case 'error':
+        // VAL-OPT-010: explicit non-blocking error; local scoring and the composer untouched.
+        section.append(
+          el('p', { className: 'notice', testid: OVERLAY_TESTIDS.optimizerNotice, text: OVERLAY_COPY.optimizerError }),
+        );
+        section.append(el('p', { className: 'error-reason', text: view.optimizer.reason }));
+        section.append(optimizeButton(true));
+        break;
+    }
+    return section;
+  }
+
   function verdictBlock(verdict: JevVerdict): HTMLElement {
     const box = el('div');
     box.append(el('span', { className: 'band', testid: OVERLAY_TESTIDS.jevBand, text: bandLabel(verdict) }));
@@ -225,6 +396,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       analyze.addEventListener('click', () => options.requestAnalysis());
       box.append(analyze);
       panel.append(box);
+      panel.append(optimizerSection(view));
       return;
     }
 
@@ -279,6 +451,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
         break;
     }
     panel.append(jev);
+    panel.append(optimizerSection(view));
   }
 
   function render(): void {
@@ -294,6 +467,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       pending,
       reply,
       transportFailures,
+      optimizer: optimizerSlot,
     });
     const panel = el('div', { className: 'panel', testid: OVERLAY_TESTIDS.panel });
     renderViewInto(panel, view);
@@ -387,6 +561,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     pending.clear();
     reply = null;
     transportFailures.clear();
+    optimizerSlot = null;
   }
 
   function pendingCount(hash: string): number {
@@ -485,6 +660,29 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       settlePending(hash);
       transportFailures.add(hash);
       render();
+    },
+    onOptimizeResult(result: OptimizationResult, dispatched: DraftSnapshot) {
+      const hash = draftIdentity(dispatched);
+      // A reply for anything but the CURRENT draft is stale (the user kept typing) — discard.
+      if (capture === null || draftIdentity(capture) !== hash) return;
+      if (result.kind === 'optimized') {
+        optimizerSlot = { hash, phase: 'done', optimization: result.optimization };
+      } else if (result.kind === 'error') {
+        optimizerSlot = { hash, phase: 'error', failure: result.failure };
+      } else {
+        // Honest refusals (disabled/unavailable/no-key): the section derives its gate states live
+        // from settings and key presence, so just retire the loading slot.
+        optimizerSlot = null;
+      }
+      render();
+    },
+    onOptimizeFailed(dispatched: DraftSnapshot) {
+      const hash = draftIdentity(dispatched);
+      if (capture === null || draftIdentity(capture) !== hash) return;
+      if (optimizerSlot?.hash === hash && optimizerSlot.phase === 'loading') {
+        optimizerSlot = { hash, phase: 'error', failure: { kind: 'network', reason: 'unreachable' } };
+        render();
+      }
     },
     destroy() {
       destroyed = true;

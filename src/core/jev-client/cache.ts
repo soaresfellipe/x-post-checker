@@ -5,6 +5,7 @@
  * (Chrome suspends MV3 workers after ~30s idle; a retyped identical draft must still be free).
  */
 import type { JevVerdict } from '@/core/heuristic-engine';
+import type { HookKind } from '@/core/optimizer/types';
 import { JEV_CACHE_MAX_ENTRIES, type MainWeaknessId, type ReplyAngleId } from './config';
 
 /** One cached verdict: the parsed outcome of an earlier analysis of an identical request. */
@@ -233,5 +234,97 @@ export function createStorageTargetVerdictCache(
     TARGET_VERDICT_CACHE_STORAGE_KEY,
     maxEntries,
     isTargetCachedVerdict,
+  );
+}
+
+/**
+ * One cached OPTIMIZATION (m4-optimizer, VAL-OPT-009): the ranked noul evaluations for one
+ * draft's rewrites and hashtag candidates. Only Jev-produced facts are stored — the derived UI
+ * facts (X-weighted char flag, drop advice) are recomputed by the service on every read, so a
+ * config change re-derives them without a new API call.
+ */
+export interface OptimizerCachedEntry {
+  readonly variants: ReadonlyArray<{
+    readonly id: HookKind;
+    readonly kind: HookKind;
+    readonly text: string;
+    readonly probability: number;
+  }>;
+  readonly hashtags: ReadonlyArray<{
+    readonly tag: string;
+    readonly rationale: string;
+    readonly probability: number;
+  }>;
+  /** Epoch milliseconds of the optimization that produced this result. */
+  readonly at: number;
+}
+
+/** Structural validation: a corrupt entry is a cache miss, never a fabricated optimization. */
+export function isOptimizerCachedEntry(value: unknown): value is OptimizerCachedEntry {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as Record<string, unknown>;
+  if (typeof candidate.at !== 'number' || !Number.isFinite(candidate.at)) return false;
+  const lists = [
+    ['variants', ['id', 'text'] as const],
+    ['hashtags', ['tag', 'rationale'] as const],
+  ] as const;
+  for (const [key, stringFields] of lists) {
+    const list = candidate[key];
+    if (!Array.isArray(list)) return false;
+    for (const item of list) {
+      if (typeof item !== 'object' || item === null) return false;
+      const record = item as Record<string, unknown>;
+      for (const field of stringFields) {
+        if (typeof record[field] !== 'string') return false;
+      }
+      if (typeof record.probability !== 'number' || !Number.isFinite(record.probability)) return false;
+    }
+  }
+  return true;
+}
+
+export interface OptimizerVerdictCache {
+  get(key: string): Promise<OptimizerCachedEntry | undefined>;
+  set(key: string, entry: OptimizerCachedEntry): Promise<void>;
+}
+
+/** In-memory LRU cache; the default for tests and short-lived sessions. */
+export function createMemoryOptimizerCache(maxEntries: number = JEV_CACHE_MAX_ENTRIES): OptimizerVerdictCache {
+  const entries = new Map<string, OptimizerCachedEntry>();
+  return {
+    async get(key) {
+      return entries.get(key);
+    },
+    async set(key, entry) {
+      if (!isOptimizerCachedEntry(entry)) return; // never store garbage
+      entries.delete(key);
+      entries.set(key, entry);
+      while (entries.size > maxEntries) {
+        const oldest = entries.keys().next().value;
+        if (oldest === undefined) break;
+        entries.delete(oldest);
+      }
+    },
+  };
+}
+
+/** The `storage.local` key holding the persisted optimizer cache (no draft text, only results). */
+export const OPTIMIZER_CACHE_STORAGE_KEY = 'jevOptimizerCache';
+
+/**
+ * Persistent OPTIMIZER cache over a storage area. Same semantics as the other adapters:
+ * defensive reads (corrupt data -> miss), serialized writes, capacity by age. Survives MV3
+ * service-worker suspension, so "repeatedly clicking Optimize on an unchanged draft" stays a
+ * zero-API-call operation even across a worker restart (VAL-OPT-009).
+ */
+export function createStorageOptimizerCache(
+  area: VerdictCacheArea,
+  maxEntries: number = JEV_CACHE_MAX_ENTRIES,
+): OptimizerVerdictCache {
+  return createStorageCacheStore<OptimizerCachedEntry>(
+    area,
+    OPTIMIZER_CACHE_STORAGE_KEY,
+    maxEntries,
+    isOptimizerCachedEntry,
   );
 }

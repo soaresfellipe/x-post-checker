@@ -5,7 +5,8 @@ import { handleRequest, isRequest } from '@/core/message-protocol';
 import { createBackgroundHandlers } from '@/core/message-protocol/handlers';
 import { createAnalyzerService } from '@/core/analyzer';
 import { createTargetAnalysisService } from '@/core/target-analysis';
-import { createJevClient, createStorageVerdictCache, createStorageTargetVerdictCache } from '@/core/jev-client';
+import { createOptimizerService } from '@/core/optimizer';
+import { createJevClient, createStorageVerdictCache, createStorageTargetVerdictCache, createStorageOptimizerCache } from '@/core/jev-client';
 
 export default defineBackground(() => {
   // ONE store instance for the whole background: it is the extension's SINGLE settings writer.
@@ -23,14 +24,17 @@ export default defineBackground(() => {
   const jevClient = createJevClient({
     cache: createStorageVerdictCache(browser.storage.local),
     targetCache: createStorageTargetVerdictCache(browser.storage.local),
+    optimizerCache: createStorageOptimizerCache(browser.storage.local),
     rateWindowArea: browser.storage.local,
   });
   const analyzer = createAnalyzerService({ store, jev: jevClient });
   const targetAnalyzer = createTargetAnalysisService({ store, jev: jevClient });
+  const optimizer = createOptimizerService({ store, jev: jevClient });
   const handlers = createBackgroundHandlers({
     store,
     analyzer,
     targetAnalyzer,
+    optimizer,
     // Content scripts cannot call runtime.openOptionsPage; their "Connect Jev" prompt routes here.
     openOptionsPage: () => browser.runtime.openOptionsPage(),
   });
