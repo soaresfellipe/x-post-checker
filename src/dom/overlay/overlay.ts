@@ -28,7 +28,8 @@ import { DEFAULT_SETTINGS, type Settings } from '@/core/settings-store';
 import type { DraftAnalysis, DraftAnalysisResult } from '@/core/analyzer';
 import { VARIANT_LABELS, type HookVariant, type OptimizationResult } from '@/core/optimizer';
 import type { SignalEntry } from '@/core/heuristic-engine';
-import { findComposerRegion } from '@/dom/composer-watcher';
+import { findComposerAnchorRegion } from '@/dom/composer-watcher';
+import { SELECTORS } from '@/selectors';
 import {
   OPTIMIZER_COPY_RESET_MS,
   OVERLAY_COPY,
@@ -37,7 +38,7 @@ import {
   OVERLAY_PLACEMENT,
   OVERLAY_TESTIDS,
 } from './config';
-import { computeAnchorPosition, computePillPosition } from './position';
+import { clampPillClearOfControl, computeAnchorPosition, computePillPosition } from './position';
 import { deriveOverlayView, draftIdentity } from './view-model';
 import type { OptimizerSection, OptimizerSlot, OverlayView, ScoreOverlay, ScoreOverlayOptions } from './types';
 
@@ -588,7 +589,11 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
   function reposition(): void {
     const host = hostElement();
     if (!host || !composer) return;
-    const region = findComposerRegion(composer);
+    // PLACEMENT anchors to the furniture-containing region (m5-overlay-scroll-reach): the real
+    // site's extraction region is a tight text-row wrapper whose bottom sits ABOVE the furniture
+    // row, so anchoring there covered the media controls, the counter and the Post button. The
+    // climb degrades to the extraction region wherever the furniture is not found.
+    const region = findComposerAnchorRegion(composer);
     // happy-dom's zero rects have no `right`; treat a missing edge as unmeasured so placement
     // falls back to the left-anchored branch.
     const regionBox =
@@ -615,9 +620,37 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     // The COLLAPSED pill lives in the composer furniture row; the EXPANDED panel keeps the
     // below-the-region placement so it never covers the composer at all (VAL-DRAFT-033).
     const position = expanded ? computeAnchorPosition(placement) : computePillPosition(placement);
+    let top = position.top;
+    let left = position.left;
+    if (!expanded) {
+      // The real x.com furniture row puts the Post button at the region's RIGHT edge — exactly
+      // where the pill's right-aligned inset lands — so when the pill's box would cover a
+      // MEASURABLE Post button, it slides left of it (clearing the counter too). Where no layout
+      // engine runs (happy-dom zero rects) or the button sits elsewhere, the pure math stands.
+      const post = SELECTORS.composerPostButton
+        .map((selector) => region.querySelector(selector))
+        .find((match): match is Element => match !== null);
+      const postBox = post?.getBoundingClientRect();
+      const cleared = clampPillClearOfControl(
+        { top, left },
+        { width, height },
+        postBox && postBox.width > 0 && postBox.height > 0
+          ? {
+              top: postBox.top + win.scrollY,
+              bottom: postBox.bottom + win.scrollY,
+              left: postBox.left + win.scrollX,
+              right: postBox.right + win.scrollX,
+            }
+          : null,
+        OVERLAY_PLACEMENT.pillPostClearance,
+        placement.scroll.x + OVERLAY_PLACEMENT.viewportMargin,
+      );
+      top = cleared.top;
+      left = cleared.left;
+    }
     host.style.position = 'absolute';
-    host.style.top = `${position.top}px`;
-    host.style.left = `${position.left}px`;
+    host.style.top = `${top}px`;
+    host.style.left = `${left}px`;
     // The height cap (null = natural size): the surface scrolls internally while capped, so it
     // stays inside the viewport at short-window geometry.
     if (position.maxHeight === null) panel?.style.removeProperty('max-height');

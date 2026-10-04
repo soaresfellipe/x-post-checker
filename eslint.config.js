@@ -17,9 +17,14 @@ export default tseslint.config(
     languageOptions: { globals: globals.node },
   },
   {
-    // Node scripts whose page.evaluate callbacks run in the BROWSER context (real-x inspection
-    // and the real-x smoke harness).
-    files: ['scripts/real-x-inspect.mjs', 'scripts/real-x-smoke.mjs'],
+    // Node scripts whose page.evaluate callbacks run in the BROWSER context (real-x inspection,
+    // the real-x smoke harness, and the m5-overlay-scroll-reach live probes).
+    files: [
+      'scripts/real-x-inspect.mjs',
+      'scripts/real-x-smoke.mjs',
+      'scripts/overlay-scroll-probe.mjs',
+      'scripts/real-x-dom-survey.mjs',
+    ],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },
   {

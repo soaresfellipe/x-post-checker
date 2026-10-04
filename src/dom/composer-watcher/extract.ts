@@ -66,6 +66,41 @@ export function findComposerRegion(composer: Element): ParentNode {
 }
 
 /**
+ * Bounded climb while looking for the furniture-containing ancestor: the real composer block is
+ * a handful of nesting levels above the editor (19 measured live), and the cap keeps a
+ * furniture-less page from walking into the document root.
+ */
+const MAX_FURNITURE_CLIMB = 24;
+
+/**
+ * The region overlay PLACEMENT anchors to (m5-overlay-scroll-reach): the lowest ancestor of the
+ * composer's extraction region that ALSO contains the composer furniture row (media control,
+ * character counter, Post button — `SELECTORS.composerFurniture`).
+ *
+ * Verified live on logged-in x.com (2026-10-04 survey): the home composer's extraction region is
+ * a TIGHT text-row wrapper and the furniture row (`toolBar`) is a SIBLING subtree of the common
+ * composer block — anchoring placement to the tight wrapper made the expanded panel cover the
+ * Post button, the character counter and the media controls. The climb fixes placement while
+ * EXTRACTION keeps its tight region (`findComposerRegion`): media/reply chips must never be read
+ * from foreign subtrees the climb adds (a status page's primary post is not composer content).
+ *
+ * Where the extraction region already contains the furniture (the fixture's home composer, the
+ * reply composer containers) this returns it unchanged, and with no furniture anywhere it falls
+ * back to the extraction region — placement degrades, never breaks.
+ */
+export function findComposerAnchorRegion(composer: Element): ParentNode {
+  const start = findComposerRegion(composer);
+  let region: ParentNode = start;
+  for (let levels = 0; levels < MAX_FURNITURE_CLIMB; levels += 1) {
+    if (SELECTORS.composerFurniture.some((selector) => region.querySelector(selector) !== null)) return region;
+    const parent = region.parentElement;
+    if (parent === null) break;
+    region = parent;
+  }
+  return start;
+}
+
+/**
  * The handle of the visible reply context ("replying to @x") without the `@`, or undefined.
  * Primary: the registered testid chain. Structural fallback: a profile link whose visible text
  * starts with `@` (the `@` glyph is not localized) — this cannot match timeline profile rows

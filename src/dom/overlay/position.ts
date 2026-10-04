@@ -107,6 +107,31 @@ export function computeAnchorPosition(inputs: {
 }
 
 /**
+ * Slides the COLLAPSED PILL left of a measurable control its right-aligned box would cover
+ * (m5-overlay-scroll-reach). The real x.com furniture row puts the Post button at the region's
+ * right edge — exactly where the pill's right-aligned inset lands — so when the placement math's
+ * pill box overlaps the (measurable) Post button, the pill moves to sit `clearance` short of the
+ * button's left edge, which also clears the character counter that precedes it. Everything is in
+ * ONE coordinate frame (the caller converts; the overlay's positions are document-absolute).
+ * `minLeft` floors the result so a narrow region can never push the pill out of the viewport.
+ * A null, non-overlapping, or non-measurable control leaves the position untouched — placement
+ * degrades to the pure math where no layout engine runs (happy-dom's zero rects).
+ */
+export function clampPillClearOfControl(
+  position: { top: number; left: number },
+  pillSize: OverlaySize,
+  control: (RegionRect & { right: number; bottom: number }) | null,
+  clearance: number,
+  minLeft: number,
+): { top: number; left: number } {
+  if (!control) return position;
+  const overlapsHorizontally = control.left < position.left + pillSize.width && position.left < control.right;
+  const overlapsVertically = control.top < position.top + pillSize.height && position.top < control.bottom;
+  if (!overlapsHorizontally || !overlapsVertically) return position;
+  return { top: position.top, left: Math.max(minLeft, control.left - clearance - pillSize.width) };
+}
+
+/**
  * The COLLAPSED PILL's placement (VAL-DRAFT-032/033): its bottom-right corner sits inside the
  * composer REGION — right-aligned `pillInsetRight` short of the region's right edge (clear of the
  * Post button) and `pillInsetBottom` above the region's bottom edge, which is the top of the

@@ -411,4 +411,88 @@ test.describe('optimizer (m4-optimizer)', () => {
     const errorText = await page.getByTestId('overlay-optimizer').innerText();
     expect(errorText).toMatch(english);
   });
+
+  test('the too-tall expanded panel wheels and trackpads to its very end; the LAST variant Copy is reachable and copies exactly (VAL-DRAFT-039, VAL-OPT-004)', async ({ context }) => {
+    const { calls } = await interceptJev(context, ({ isOptimize }) =>
+      isOptimize ? { action: 'fulfill', body: RANKED_FIXTURE } : { action: 'fulfill', body: VERIFIED_JEV_RESPONSE },
+    );
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: FIXTURE_URL });
+    await saveKeyViaOptions(context);
+    const page = await openFixture(context);
+    await typeDraftAndAwaitCapture(page, FIXED_DRAFT);
+    await expand(page);
+
+    // The Optimizer section is the panel's LAST block: its final variant's Copy button is the
+    // deepest control the scroll must reach (this round's user complaint, verbatim).
+    await page.getByTestId('overlay-optimize').click();
+    await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'done');
+    await expect.poll(() => optimizeCalls(calls).length, { timeout: 10_000 }).toBe(1);
+    const variants = page.getByTestId('overlay-optimizer-variant');
+    await expect(variants).toHaveCount(3);
+
+    // Short viewport: the panel must cap to the available space and scroll internally.
+    await page.setViewportSize({ width: 900, height: 500 });
+    const panelMetrics = async (): Promise<{ scrollTop: number; clientHeight: number; scrollHeight: number } | null> =>
+      page.evaluate(() => {
+        const panel = document
+          .querySelector('#amplifyx-overlay-host')
+          ?.shadowRoot?.querySelector('[data-testid="amplifyx-overlay"]');
+        if (!panel) return null;
+        return { scrollTop: panel.scrollTop, clientHeight: panel.clientHeight, scrollHeight: panel.scrollHeight };
+      });
+    await expect
+      .poll(async () => {
+        const m = await panelMetrics();
+        return m !== null && m.scrollHeight > m.clientHeight;
+      }, { timeout: 5_000 })
+      .toBe(true); // the cap engaged: more content than the capped box shows
+
+    // WHEEL pass: notches over the panel's center must be redirected INTO the panel until its
+    // very end, while the page beneath stays put (the redirect only yields at the panel's edge).
+    const panelBox = await panelOf(page).boundingBox();
+    await page.mouse.move(panelBox!.x + panelBox!.width / 2, panelBox!.y + panelBox!.height / 2);
+    for (let notch = 0; notch < 25; notch += 1) {
+      await page.mouse.wheel(0, 300);
+      await page.waitForTimeout(60);
+      const state = await panelMetrics();
+      if (state && state.scrollTop + state.clientHeight >= state.scrollHeight - 1) break;
+    }
+    const atEnd = await panelMetrics();
+    expect(atEnd!.scrollTop + atEnd!.clientHeight).toBeGreaterThanOrEqual(atEnd!.scrollHeight - 1);
+    expect(await page.evaluate(() => window.scrollY)).toBe(0);
+
+    // The LAST variant's Copy button is fully inside the viewport RIGHT NOW — reachable by the
+    // scroll alone, not by Playwright's automatic scroll-into-view on click.
+    const lastVariant = variants.last();
+    await expect(lastVariant).toHaveAttribute('data-variant-kind', 'story');
+    const copyBox = await lastVariant.getByTestId('overlay-optimizer-copy').boundingBox();
+    expect(copyBox).not.toBeNull();
+    expect(copyBox!.y).toBeGreaterThanOrEqual(0);
+    expect(copyBox!.y + copyBox!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+
+    // Clicking it copies EXACTLY that variant's text — and the composer is byte-identical
+    // (VAL-OPT-004's exact transfer and VAL-OPT-005's untouched composer, at the panel's end).
+    const composerBefore = await page.locator(HOME_COMPOSER).innerText();
+    const lastText = await lastVariant.getByTestId('overlay-optimizer-variant-text').innerText();
+    await lastVariant.getByTestId('overlay-optimizer-copy').click();
+    const clipboard = await page.evaluate(() => navigator.clipboard.readText());
+    expect(clipboard).toBe(lastText);
+    expect(await page.locator(HOME_COMPOSER).innerText()).toBe(composerBefore);
+
+    // TRACKPAD pass: back to the top, then a stream of small low-speed deltas must also carry
+    // the panel to its very end (the same wheel pipeline a real trackpad feeds).
+    for (let back = 0; back < 12; back += 1) {
+      await page.mouse.wheel(0, -400);
+    }
+    await page.waitForTimeout(120);
+    expect((await panelMetrics())!.scrollTop).toBeLessThan(atEnd!.scrollTop); // back at the top
+    for (let swipe = 0; swipe < 120; swipe += 1) {
+      await page.mouse.wheel(0, 40);
+      await page.waitForTimeout(20);
+      const m = await panelMetrics();
+      if (m && m.scrollTop + m.clientHeight >= m.scrollHeight - 1) break;
+    }
+    const trackpadEnd = await panelMetrics();
+    expect(trackpadEnd!.scrollTop + trackpadEnd!.clientHeight).toBeGreaterThanOrEqual(trackpadEnd!.scrollHeight - 1);
+  });
 });

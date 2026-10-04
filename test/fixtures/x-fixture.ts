@@ -177,19 +177,32 @@ export function renderFixtureHtml(now: number = Date.now()): string {
 </nav>
 <main role="main">
   <div data-testid="primaryColumn">
-    <div data-testid="toolBar">
-      <div data-testid="tweetTextarea_0RichTextInputContainer">
-        <div class="DraftEditor-root">
-          <div data-testid="tweetTextarea_0" role="textbox" contenteditable="true" aria-label="Texto do post" aria-multiline="true" spellcheck="true" class="notranslate public-DraftEditor-content"></div>
+    <!-- REAL x.com home-composer nesting (verified live 2026-10-04, m5-overlay-scroll-reach
+         survey): the editor's RichTextInputContainer's PARENT is a tight text-row wrapper, and
+         the furniture row ("toolBar": media, counter, Post) is a SIBLING subtree of the common
+         composer block - NOT an ancestor of the editor. Anchoring overlay placement to the tight
+         wrapper covered the furniture row on the real site; the overlay's PLACEMENT anchor must
+         climb to the furniture-containing block (findComposerAnchorRegion), while EXTRACTION
+         keeps the tight region. -->
+    <div>
+      <div>
+        <div data-testid="tweetTextarea_0RichTextInputContainer">
+          <div class="DraftEditor-root">
+            <div data-testid="tweetTextarea_0" role="textbox" contenteditable="true" aria-label="Texto do post" aria-multiline="true" spellcheck="true" class="notranslate public-DraftEditor-content"></div>
+          </div>
+          <label data-testid="tweetTextarea_0_label">O que está acontecendo?</label>
         </div>
-        <label data-testid="tweetTextarea_0_label">O que está acontecendo?</label>
       </div>
-      <!-- The composer furniture row, left to right: media control, character counter, Post
-           button (x.com's real order; the real counter exposes no stable data-testid, so the
-           fixture names it explicitly for the pill-placement geometry assertions). -->
-      <button type="button" data-testid="addMedia" aria-label="Adicionar midia"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M0 0h24v24H0z" fill="none"/></svg></button>
-      <span data-testid="charCounter">0</span>
-      <button type="button" data-testid="tweetButtonInline" aria-disabled="true">Postar</button>
+      <div data-testid="toolBar" style="padding: 12px 8px;">
+        <!-- The composer furniture row, left to right: media control, character counter, Post
+             button (x.com's real order; the real counter exposes no stable data-testid, so the
+             fixture names it explicitly for the pill-placement geometry assertions). The padding
+             mirrors the real row's 48px band (measured live 2026-10-04): the collapsed pill sits
+             inside that band, so the row must be tall enough to hold it. -->
+        <button type="button" data-testid="addMedia" aria-label="Adicionar midia"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M0 0h24v24H0z" fill="none"/></svg></button>
+        <span data-testid="charCounter">0</span>
+        <button type="button" data-testid="tweetButtonInline" aria-disabled="true">Postar</button>
+      </div>
     </div>
     <div role="tablist" data-testid="homeTabs">
       <div role="tab" data-testid="tabForYou" aria-selected="true"><span>Para voce</span></div>

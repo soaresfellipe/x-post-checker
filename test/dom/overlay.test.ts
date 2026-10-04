@@ -12,6 +12,7 @@ import {
   OVERLAY_PILL_TESTID,
   OVERLAY_TESTID,
   createScoreOverlay,
+  clampPillClearOfControl,
   computeAnchorPosition,
   computePillPosition,
   type ScoreOverlay,
@@ -1284,6 +1285,44 @@ describe('composer and posting interference (VAL-DRAFT-022, VAL-DRAFT-038)', () 
     expect(css).toMatch(/\.pill \{[^}]*pointer-events: auto/);
     // The expanded panel is the single, documented exception.
     expect(css).toMatch(/\.panel \{[^}]*pointer-events: auto/);
+  });
+});
+
+describe('clampPillClearOfControl (pill clearance from the Post button — m5-overlay-scroll-reach)', () => {
+  const pill = { width: 44, height: 22 };
+  // The REAL-site geometry (live-measured): the pill's right-aligned box lands on the Post
+  // button because the real furniture row puts the Post button at the region's right edge.
+  const realPost = { top: 261, bottom: 297, left: 784, right: 866 };
+  const realPillPosition = { top: 279, left: 796 };
+
+  it('slides the pill left of a measurable Post button its right-aligned box would cover', () => {
+    const clamped = clampPillClearOfControl(realPillPosition, pill, realPost, 56, 8);
+    expect(clamped.left).toBe(784 - 56 - pill.width); // clear of the Post button AND the counter
+    expect(clamped.top).toBe(realPillPosition.top); // the band never moves
+  });
+
+  it('leaves the pill alone when the control sits elsewhere (fixture inline row)', () => {
+    const fixturePost = { top: 261, bottom: 297, left: 399, right: 470 };
+    expect(clampPillClearOfControl(realPillPosition, pill, fixturePost, 56, 8)).toEqual(realPillPosition);
+  });
+
+  it('leaves the pill alone when the control is not measurable (happy-dom zero rects)', () => {
+    expect(clampPillClearOfControl(realPillPosition, pill, null, 56, 8)).toEqual(realPillPosition);
+    const zero = { top: 0, bottom: 0, left: 0, right: 0 };
+    expect(clampPillClearOfControl(realPillPosition, pill, zero, 56, 8)).toEqual(realPillPosition);
+  });
+
+  it('leaves the pill alone when only the vertical bands are disjoint', () => {
+    const above = { top: 100, bottom: 140, left: 784, right: 866 };
+    expect(clampPillClearOfControl(realPillPosition, pill, above, 56, 8)).toEqual(realPillPosition);
+  });
+
+  it('never pushes the pill left of the viewport edge', () => {
+    const post = { top: 261, bottom: 297, left: 800, right: 900 };
+    const clamped = clampPillClearOfControl(realPillPosition, pill, post, 56, 8);
+    expect(clamped.left).toBe(800 - 56 - pill.width); // still right of the minLeft floor
+    const spanning = { top: 261, bottom: 297, left: 30, right: 900 }; // overlaps the pill box
+    expect(clampPillClearOfControl(realPillPosition, pill, spanning, 56, 8).left).toBe(8);
   });
 });
 

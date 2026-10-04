@@ -2,6 +2,7 @@ export { DRAFT_DEBOUNCE_MS, isDraftEligible, statusRouteHandle, type AnalysisTri
 export {
   extractDraftSnapshot,
   findComposer,
+  findComposerAnchorRegion,
   findComposerRegion,
   findComposers,
   findReplyToHandle,

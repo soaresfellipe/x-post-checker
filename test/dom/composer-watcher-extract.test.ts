@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { isDraftEligible } from '../../src/core/draft-snapshot';
-import { extractDraftSnapshot, findComposer, findComposers, getComposerText } from '../../src/dom/composer-watcher/extract';
+import {
+  extractDraftSnapshot,
+  findComposer,
+  findComposerAnchorRegion,
+  findComposerRegion,
+  findComposers,
+  getComposerText,
+} from '../../src/dom/composer-watcher/extract';
 
 /** Reply composer mirroring x.com's DraftEditor structure with rich context around it. */
 const RICH_REPLY_COMPOSER_HTML = `
@@ -443,5 +450,64 @@ describe('t.co expansion (VAL-DRAFT-030 urls contract)', () => {
       { now: 1 },
     );
     expect(snapshot.urls).toEqual(['https://example.com/one', 'https://t.co/plain', 'https://example.com/two']);
+  });
+});
+
+/**
+ * The REAL home-composer nesting, verified live on logged-in x.com (2026-10-04,
+ * m5-overlay-scroll-reach survey, scripts/real-x-dom-survey.mjs): the editor's
+ * RichTextInputContainer parent is a TIGHT text-row wrapper (76px, only the editor inside), and
+ * the furniture row (`toolBar`: media control, character counter, Post button) is a SIBLING
+ * subtree of the common composer block. Anchoring overlay PLACEMENT to the tight wrapper made
+ * the expanded panel cover the furniture row on the real site (measured: the panel box overlapped
+ * the Post button's box), while the fixture's old nesting (toolBar wrapping the editor) hid the
+ * defect from every E2E geometry pin.
+ */
+const REAL_HOME_COMPOSER_HTML = `
+<div data-testid="primaryColumn">
+  <div>
+    <div>
+      <div data-testid="tweetTextarea_0RichTextInputContainer">
+        <div class="DraftEditor-root">
+          <div data-testid="tweetTextarea_0" role="textbox" contenteditable="true" aria-label="Texto do post" class="public-DraftEditor-content"></div>
+        </div>
+        <label data-testid="tweetTextarea_0_label">O que está acontecendo?</label>
+      </div>
+    </div>
+    <div data-testid="toolBar">
+      <button type="button" data-testid="addMedia" aria-label="Adicionar midia">Midia</button>
+      <span data-testid="charCounter">0</span>
+      <button type="button" data-testid="tweetButtonInline" aria-disabled="true">Postar</button>
+    </div>
+  </div>
+</div>`;
+
+describe('composer anchor region for overlay placement (m5-overlay-scroll-reach)', () => {
+  it('climbs to the furniture-containing block on the REAL nesting; extraction stays tight', () => {
+    document.body.innerHTML = REAL_HOME_COMPOSER_HTML;
+    const composer = findComposer(document)!;
+    const anchor = findComposerAnchorRegion(composer) as Element;
+    // The PLACEMENT anchor contains the furniture row, so the expanded panel anchors below it
+    // and the collapsed pill lands in the furniture row's band (VAL-DRAFT-033 on the real DOM).
+    expect(anchor.querySelector('[data-testid="toolBar"]')).not.toBeNull();
+    expect(anchor.querySelector('[data-testid="tweetButtonInline"]')).not.toBeNull();
+    expect(anchor.contains(composer)).toBe(true);
+
+    // EXTRACTION keeps the tight region: media chips and reply chips must never be read from
+    // foreign subtrees the climb adds (a status page's primary post is NOT composer content).
+    const extraction = findComposerRegion(composer) as Element;
+    expect(extraction.querySelector('[data-testid="toolBar"]')).toBeNull();
+  });
+
+  it('returns the same region as extraction when the furniture row already wraps the editor (fixture nesting)', () => {
+    document.body.innerHTML = MAIN_COMPOSER_HTML;
+    const composer = findComposer(document)!;
+    expect(findComposerAnchorRegion(composer)).toBe(findComposerRegion(composer));
+  });
+
+  it('falls back to the extraction region when no furniture exists anywhere above (reply dialog)', () => {
+    document.body.innerHTML = REPLY_DIALOG_HTML;
+    const composer = findComposer(document)!;
+    expect(findComposerAnchorRegion(composer)).toBe(findComposerRegion(composer));
   });
 });

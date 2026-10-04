@@ -8,6 +8,6 @@ export { OVERLAY_HOST_ID, OVERLAY_TESTID, OVERLAY_TESTIDS, OVERLAY_COPY, OVERLAY
 export { OVERLAY_PILL_TESTID } from './config';
 export { createScoreOverlay } from './overlay';
 export { deriveOverlayView, draftIdentity, failureReason } from './view-model';
-export { computeAnchorPosition, computePillPosition } from './position';
+export { clampPillClearOfControl, computeAnchorPosition, computePillPosition } from './position';
 export type { AnchorPosition, OverlaySize, RegionRect, ScrollOffset, Viewport } from './position';
 export type { JevSection, JevSectionState, OverlayView, OverlayViewInputs, ScoreOverlay, ScoreOverlayOptions } from './types';

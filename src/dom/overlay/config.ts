@@ -60,6 +60,13 @@ export const OVERLAY_PLACEMENT = Object.freeze({
    */
   pillInsetRight: 44,
   pillInsetBottom: 6,
+  /**
+   * The gap (px) the collapsed pill keeps from the Post button's LEFT edge when the pure
+   * right-aligned placement would cover it (the real x.com furniture row puts the Post button at
+   * the region's right edge; live-measured m5-overlay-scroll-reach). 56 = one pill width plus
+   * breathing room, which also clears the character counter that precedes the button.
+   */
+  pillPostClearance: 56,
   /** The pill's compact footprint, used for measurement fallback where no layout engine runs. */
   pillWidth: 44,
   pillHeight: 22,

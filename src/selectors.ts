@@ -19,6 +19,16 @@ export const SELECTORS = {
    * (VAL-DRAFT-029).
    */
   composerContainer: ['[data-testid$="RichTextInputContainer"]', '[data-testid="toolBar"]'],
+  /**
+   * The composer FURNITURE row (media control, character counter, Post button) and the Post
+   * button itself — PLACEMENT anchors only, never extraction scope. Real x.com (verified live
+   * 2026-10-04, m5-overlay-scroll-reach survey) nests the editor in a tight text-row wrapper and
+   * keeps the furniture row (`toolBar`) in a SIBLING subtree of the common composer block, so
+   * overlay placement must anchor to a region that CONTAINS one of these (the expanded panel
+   * anchors below it; the collapsed pill keeps clear of the Post button).
+   */
+  composerFurniture: ['[data-testid="toolBar"]', '[data-testid="tweetButtonInline"]', '[data-testid="tweetButton"]'],
+  composerPostButton: ['[data-testid="tweetButtonInline"]', '[data-testid="tweetButton"]'],
   /** Media chips attached to a composer; always queried scoped to the composer region. */
   composerMedia: [
     '[data-testid="attachments"] [data-testid="tweetPhoto"]',

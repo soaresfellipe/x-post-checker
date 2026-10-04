@@ -841,6 +841,38 @@ test.describe('overlay coexistence and lifecycle', () => {
     await expect(page.locator(OVERLAY_HOST)).toHaveCount(1);
   });
 
+  test('the expanded panel anchors below the composer furniture row and never covers the counter, media control or Post button (m5-overlay-scroll-reach)', async ({ context }) => {
+    await interceptJev(context, () => ({ action: 'fulfill', body: jevResponse({ ordinal: 3 }) }));
+    await saveKeyViaOptions(context);
+    const page = await openFixture(context);
+    await typeDraft(page, 'A draft whose expanded panel must clear every composer control');
+    await expect(pillOf(page)).toBeVisible({ timeout: 10_000 });
+
+    // The REAL x.com home-composer nesting (live-verified 2026-10-04): the editor's container
+    // parent is a tight text-row wrapper and the furniture row (toolBar) is a SIBLING subtree of
+    // the common block — the fixture mirrors it, so these geometry pins guard the real defect:
+    // anchored to the tight wrapper, the panel covered the furniture row (measured live).
+    for (const size of [
+      { width: 1280, height: 900 },
+      { width: 900, height: 700 },
+    ]) {
+      await page.setViewportSize(size);
+      await expand(page);
+      await expect(page.getByTestId('overlay-gauge')).toBeVisible();
+      const panelBox = await panelOf(page).boundingBox();
+      const toolBarBox = await page.locator('[data-testid="toolBar"]').boundingBox();
+      expect(panelBox).not.toBeNull();
+      expect(toolBarBox).not.toBeNull();
+      // The panel ANCHORS BELOW the furniture row (its top is at/below the row's bottom edge).
+      expect(panelBox!.y).toBeGreaterThanOrEqual(toolBarBox!.y + toolBarBox!.height - 1);
+      // Zero overlap with every furniture control, at every size.
+      for (const selector of [MEDIA_BUTTON, COUNTER, POST_BUTTON]) {
+        const box = await page.locator(selector).boundingBox();
+        expect(overlaps(panelBox, box), `the expanded panel must not cover ${selector}`).toBe(false);
+      }
+    }
+  });
+
   test('the popup master switch removes and restores the overlay in the open tab without a reload (VAL-SETUP-016)', async ({ context }) => {
     await interceptJev(context, () => ({ action: 'fulfill', body: jevResponse({ ordinal: 3 }) }));
     await saveKeyViaOptions(context);
