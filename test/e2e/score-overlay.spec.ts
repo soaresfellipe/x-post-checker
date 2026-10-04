@@ -629,6 +629,25 @@ test.describe('overlay coexistence and lifecycle', () => {
     ]) {
       await page.setViewportSize(size);
       await expect(pillOf(page)).toBeVisible();
+      // The overlay re-anchors the pill on resize via a requestAnimationFrame pass; sampling
+      // the box immediately after setViewportSize can observe the PREVIOUS viewport's
+      // placement under host load (observed once: right edge 896 at the 900px iteration).
+      // Poll the pill against the CURRENTLY MEASURED toolBar region — the same wait
+      // discipline as the debounce waits above — so the measurement below only ever sees
+      // the re-anchored placement.
+      await expect
+        .poll(async () => {
+          const box = await pillOf(page).boundingBox();
+          const regionBox = await page.locator('[data-testid="toolBar"]').boundingBox();
+          if (!box || !regionBox) return false;
+          return (
+            box.x > regionBox.x &&
+            box.x + box.width < regionBox.x + regionBox.width + 1 &&
+            box.y > regionBox.y &&
+            box.y + box.height <= regionBox.y + regionBox.height + 1
+          );
+        }, { timeout: 5_000 })
+        .toBe(true);
       const pill = await pillOf(page).boundingBox();
       const region = await page.locator('[data-testid="toolBar"]').boundingBox();
       const composerBox = await page.locator(HOME_COMPOSER).boundingBox();

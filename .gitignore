@@ -17,6 +17,9 @@ playwright-report/
 .playwright-profile/
 profiles/
 
+# real-x smoke evidence (persistent across gate runs — outside Playwright's output dir)
+evidence/
+
 # research notes (mission artifacts, kept out of the product repo)
 research/
 

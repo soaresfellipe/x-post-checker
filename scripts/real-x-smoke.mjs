@@ -33,7 +33,9 @@
  *
  * Exit codes: 0 pass, 2 missing cookies, 3 session challenged/expired (surface to the
  * orchestrator — do NOT retry aggressively), 4 smoke assertion failed, 1 error.
- * Evidence dir: $REALX_EVIDENCE_DIR (default <repo>/test-results/real-x-smoke, gitignored).
+ * Evidence dir: $REALX_EVIDENCE_DIR (default <repo>/evidence/real-x-smoke, gitignored —
+ * deliberately OUTSIDE Playwright's test-results/, which is wiped at the start of every
+ * `pnpm test:e2e` / `pnpm test` run, which destroyed the m5 14/14 live artifacts once).
  */
 import { chromium } from '@playwright/test';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -45,7 +47,7 @@ const REPO = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const EXTENSION_DIR = join(REPO, '.output', 'chrome-mv3');
 const EVIDENCE_DIR = process.env.REALX_EVIDENCE_DIR
   ? resolve(process.env.REALX_EVIDENCE_DIR)
-  : join(REPO, 'test-results', 'real-x-smoke');
+  : join(REPO, 'evidence', 'real-x-smoke');
 
 /** The synthetic, non-sensitive draft this smoke types (never submitted, never a real opinion). */
 const SMOKE_DRAFT = 'Testing AmplifyX on a real timeline: does this draft earn a score? #smoketest';
