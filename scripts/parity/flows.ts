@@ -131,6 +131,11 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
       if (Number(overlay['signals']) < 1) return `signals: ${String(overlay['signals'])}`;
       const headline = Number(overlay['headline']);
       if (!(headline >= 0 && headline <= 100)) return `headline out of range: ${String(overlay['headline'])}`;
+      // The collapsed pill's number and the expanded panel's headline are the same local score.
+      const collapsedText = String((overlay['collapsed'] as Record<string, unknown> | null)?.['text'] ?? '');
+      if (collapsedText !== String(overlay['headline'])) {
+        return `collapsed pill "${collapsedText}" != expanded headline "${String(overlay['headline'])}"`;
+      }
       return null;
     },
   },
@@ -169,6 +174,12 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
       if (settled['headlineSource'] !== 'hybrid') return `settled headline source: ${String(settled['headlineSource'])}`;
       if (String(settled['jevBand'] ?? '').length === 0) return 'settled band missing';
       if (!String(settled['jevConfidence'] ?? '').includes('65')) return `settled confidence: ${String(settled['jevConfidence'])}`;
+      // The re-collapsed pill sampled AFTER the verdict carries the hybrid headline — the
+      // field-comparable number this flow contributes to the cross-browser score comparison.
+      const settledCollapsed = (settled['collapsed'] as Record<string, unknown> | null) ?? null;
+      if (settledCollapsed === null || String(settledCollapsed['text']) !== String(settled['headline'])) {
+        return `settled collapsed pill: ${JSON.stringify(settledCollapsed)}`;
+      }
       return null;
     },
   },
@@ -282,25 +293,11 @@ export function stripVolatile(outcome: FlowOutcome): FlowOutcome {
     for (const badge of badges as Array<Record<string, unknown>>) delete badge['score'];
   }
   delete clone['mockCalls']; // call-log reads race with in-flight slow exchanges by ±1 entry
-  // `collapsed.text` is the pill's headline sampled at the moment of the click: a local score
-  // while the AI exchange is in flight, a hybrid one once it lands. Which of the two a click
-  // lands on is a race between the click and the exchange (the slower browser leg legitimately
-  // samples the local number), so the NUMBER is not cross-browser-comparable — while its SHAPE
-  // still is, and every flow's own expectation pins it (a bare 1-3 digit headline, no panel).
-  const stripCollapsedText = (node: unknown): void => {
-    if (Array.isArray(node)) {
-      for (const child of node) stripCollapsedText(child);
-      return;
-    }
-    if (node === null || typeof node !== 'object') return;
-    const record = node as Record<string, unknown>;
-    const collapsed = record['collapsed'] as Record<string, unknown> | null;
-    if (collapsed !== null && collapsed !== undefined && typeof collapsed === 'object') {
-      delete collapsed['text'];
-    }
-    for (const child of Object.values(record)) stripCollapsedText(child);
-  };
-  stripCollapsedText(clone);
+  // `collapsed.text` (the pill's headline number) IS compared: the driver samples it only after
+  // the pill's AI half has settled, so the number is deterministic for the draft (local when no
+  // verdict can land, the hybrid one once it has) and equal across browsers for the same draft +
+  // mock verdict. Cross-browser score equivalence is part of the parity evidence
+  // (VAL-DRAFT-025 / VAL-CROSS-010) — do not strip it.
   // `epoch` is a random per-document session id (used for teardown/remount detection): never
   // comparable across browsers. It can appear at the top level or nested in sub-probes.
   const stripEpoch = (node: unknown): void => {

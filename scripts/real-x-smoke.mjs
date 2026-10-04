@@ -11,9 +11,12 @@
  *      within a bounded window (m4-fix-real-site-clear-reset — the real editor performs the
  *      deletion through its own DOM writes with NO input event, so the watcher must pick the
  *      reset up from composer content mutations);
- *   5. an extension-owned badge click opens the popover WITHOUT activating/navigating the post;
- *   6. ZERO requests to api.typesafe.ai (fresh profile = no key = AI structurally off);
- *   7. ZERO post-submission requests (CreateTweet/…); the session stays logged in at the end.
+ *   5. with the scored draft present, typing an '@' mention opens X's OWN autocomplete dropdown
+ *      fully visible and usable — geometry + hit tests prove no AmplifyX surface covers it
+ *      (VAL-DRAFT-040, the exact defect the user reported) — and Escape dismisses it untouched;
+ *   6. an extension-owned badge click opens the popover WITHOUT activating/navigating the post;
+ *   7. ZERO requests to api.typesafe.ai (fresh profile = no key = AI structurally off);
+ *   8. ZERO post-submission requests (CreateTweet/…); the session stays logged in at the end.
  *
  * Read-only guarantees (AGENTS.md boundaries — same discipline as scripts/real-x-inspect.mjs):
  *   - The ONLY page interactions are: navigating, reading the DOM, focusing/clicking the composer
@@ -313,7 +316,156 @@ async function main() {
       .screenshot({ path: join(EVIDENCE_DIR, 'overlay-analyzed-redacted.png') })
       .catch(() => {});
 
-    // ---- 4b. Clear-and-reset (m4-fix-real-site-clear-reset): the real editor performs
+    // ---- 4b. Mention-autocomplete non-occlusion (VAL-DRAFT-040 — the exact defect the user
+    // reported): with a scored draft present (collapsed pill), typing an '@' mention must show
+    // X's OWN autocomplete dropdown fully visible and usable — never covered by any AmplifyX
+    // surface. Proven by geometry (dropdown union box vs pill/host boxes) plus a HIT TEST (the
+    // top-most element at sample points inside the dropdown must live in the dropdown's own
+    // tree, never at an extension host). Escape then dismisses it WITHOUT selecting anyone.
+    let mentionOk = false;
+    let mentionDetail = 'step not reached';
+    let mentionFacts = null;
+    try {
+      await page.keyboard.press('Escape'); // the evidence panel collapses back to the pill
+      const collapsedAgain = await waitFor(
+        async () => ((await page.locator('#amplifyx-overlay-host [data-testid="amplifyx-overlay"]').count()) === 0 ? true : null),
+        5_000,
+      );
+      // Focus the TEXTBOX to keep typing (never a post control). focus() — the sanctioned
+      // read-only interaction, same as scripts/real-x-inspect.mjs — rather than a hit-tested
+      // click: a click here races X's own composer chrome (actionability retries), while focus()
+      // puts the caret in the editor deterministically.
+      await composer.focus();
+      await page.keyboard.press('End'); // caret to the end of the single-line draft
+      await page.keyboard.type(' @amplifyx', { delay: 90 });
+      // X's own mention-typeahead ROWS (observed live 2026-10-04: `typeaheadResult` items with
+      // `TypeaheadUser` rows; the wrapped-container testids seen in earlier probes belong to the
+      // search typeahead, not the composer dropdown).
+      const typeaheadLoc = '[data-testid="typeaheadResult"]';
+      const dropdownAppeared = await page
+        .locator(typeaheadLoc)
+        .first()
+        .waitFor({ state: 'visible', timeout: 8_000 })
+        .then(() => true, () => false);
+      if (!collapsedAgain || !dropdownAppeared) {
+        // Structural diagnostics only: presence facts + typeahead-ish testids (no page text).
+        // Shadow-root content is read through shadowRoot so presence is honest.
+        const diag = await page.evaluate(() => {
+          const composer = document.querySelector('div[data-testid="tweetTextarea_0"]');
+          const host = document.getElementById('amplifyx-overlay-host');
+          const root = host?.shadowRoot ?? null;
+          return {
+            composerPresent: composer !== null,
+            composerCharCount: composer === null ? null : (composer.textContent ?? '').length,
+            overlayHostPresent: host !== null,
+            panelPresent: root?.querySelector('[data-testid="amplifyx-overlay"]') !== null,
+            pillPresent: root?.querySelector('[data-testid="amplifyx-overlay-pill"]') !== null,
+            typeaheadTestids: [...new Set([...document.querySelectorAll('[data-testid]')].map((el) => el.getAttribute('data-testid') ?? '').filter((t) => /typeahead|dropdown|autocomplete/i.test(t)))].slice(0, 10),
+          };
+        });
+        mentionDetail = `collapsed=${collapsedAgain === true} dropdownAppeared=${dropdownAppeared} diag=${JSON.stringify(diag)}`;
+        await page.keyboard.press('Escape'); // never leave X's typeahead open for later steps
+      } else {
+        mentionFacts = await page.evaluate((loc) => {
+          const overlapArea = (a, b) =>
+            Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) *
+            Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+          const items = [...document.querySelectorAll(loc)];
+          if (items.length === 0) return { found: false };
+          // The dropdown's own tree: the items' common list container plus the items themselves.
+          const container = items[0].parentElement;
+          const inDropdownTree = (el) =>
+            items.some((item) => item === el || item.contains(el)) ||
+            (container !== null && (el === container || container.contains(el)));
+          // Union box of every visible result row = the dropdown as the user sees it.
+          let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+          for (const item of items) {
+            const box = item.getBoundingClientRect();
+            if (box.width <= 0 || box.height <= 0) continue;
+            left = Math.min(left, box.left);
+            top = Math.min(top, box.top);
+            right = Math.max(right, box.right);
+            bottom = Math.max(bottom, box.bottom);
+          }
+          const box = { left, top, right, bottom, width: right - left, height: bottom - top };
+          const hostEl = document.getElementById('amplifyx-overlay-host');
+          const pillEl = hostEl?.shadowRoot?.querySelector('[data-testid="amplifyx-overlay-pill"]') ?? null;
+          const pillBox = pillEl?.getBoundingClientRect() ?? null;
+          const hostBox = hostEl?.getBoundingClientRect() ?? null;
+          // Sample points: the union box's center and corners (inset), and — when an extension
+          // surface's box intersects the dropdown's — that overlap's centroid, where only the
+          // DROPDOWN being on top proves it is not occluded (X's own dropdown covering the pill
+          // is fine; the pill covering X's dropdown is the defect).
+          const points = [
+            [box.left + box.width / 2, box.top + box.height / 2],
+            [box.left + box.width * 0.1, box.top + box.height * 0.1],
+            [box.right - box.width * 0.1, box.top + box.height * 0.1],
+            [box.left + box.width * 0.1, box.bottom - box.height * 0.1],
+            [box.right - box.width * 0.1, box.bottom - box.height * 0.1],
+          ];
+          for (const surface of [pillBox, hostBox]) {
+            if (!surface || overlapArea(surface, box) <= 0) continue;
+            const ix0 = Math.max(surface.left, box.left);
+            const iy0 = Math.max(surface.top, box.top);
+            const ix1 = Math.min(surface.right, box.right);
+            const iy1 = Math.min(surface.bottom, box.bottom);
+            points.push([(ix0 + ix1) / 2, (iy0 + iy1) / 2]);
+          }
+          const hits = points.map(([x, y]) => {
+            const el = document.elementFromPoint(x, y);
+            if (!el) return 'outside-viewport';
+            const composedRoot = el.getRootNode();
+            if (inDropdownTree(el) || (composedRoot !== document && inDropdownTree(composedRoot.host))) return 'dropdown';
+            if (el.id === 'amplifyx-overlay-host' || el.id === 'amplifyx-marker-host' || el.hasAttribute('data-amplifyx-host')) {
+              return 'extension';
+            }
+            return 'other';
+          });
+          return {
+            found: true,
+            itemCount: items.length,
+            boxLeft: box.left,
+            boxTop: box.top,
+            width: Math.round(box.width),
+            height: Math.round(box.height),
+            pillOverlap: pillBox ? Math.round(overlapArea(pillBox, box)) : 0,
+            hits,
+          };
+        }, typeaheadLoc);
+        const hitsOk = Array.isArray(mentionFacts.hits) && mentionFacts.hits.length > 0 && mentionFacts.hits.every((h) => h === 'dropdown');
+        mentionOk = mentionFacts.found === true && mentionFacts.width > 0 && mentionFacts.height > 0 && hitsOk;
+        mentionDetail = `items=${mentionFacts.itemCount} dropdown=${mentionFacts.width}x${mentionFacts.height} pillOverlap=${mentionFacts.pillOverlap} hitTests=[${(mentionFacts.hits ?? []).join(',')}]`;
+        // Evidence of the OPEN dropdown, clipped to it (the page-redaction stylesheet is already
+        // applied), then dismiss it WITHOUT selecting anyone.
+        const clipX = Math.max(0, mentionFacts.boxLeft - 8);
+        const clipY = Math.max(0, mentionFacts.boxTop - 8);
+        await page
+          .screenshot({
+            path: join(EVIDENCE_DIR, 'mention-typeahead-open-redacted.png'),
+            clip: {
+              x: clipX,
+              y: clipY,
+              width: Math.min(mentionFacts.width + 16, 1280 - clipX),
+              height: Math.min(mentionFacts.height + 16, 1400 - clipY),
+            },
+          })
+          .catch(() => {});
+        await page.keyboard.press('Escape');
+        const dismissed = await waitFor(
+          async () => ((await page.locator(typeaheadLoc).count()) === 0 ? true : null),
+          5_000,
+        );
+        mentionOk = mentionOk && dismissed === true;
+        mentionDetail += ` dismissed=${dismissed === true}`;
+      }
+    } catch (error) {
+      const lines = String(error).split('\n').filter((line) => line.trim() !== '').slice(0, 3);
+      mentionDetail = `error: ${lines.join(' | ').slice(0, 300)}`;
+    }
+    record('mention-autocomplete-not-occluded', mentionOk, mentionDetail);
+
+
+    // ---- 4c. Clear-and-reset (m4-fix-real-site-clear-reset): the real editor performs
     // select-all deletion through its own DOM writes with NO input event (verified live
     // 2026-10-03: the clear produced childList mutations with the text dropping to empty and
     // zero beforeinput/input events), so the watcher must pick the reset up from composer
@@ -356,14 +508,61 @@ async function main() {
     // ---- 5. Extension-owned badge click -> popover, WITHOUT activating the post ----
     if (badgeCount > 0) {
       const urlBefore = page.url();
-      await page.locator('button[data-testid="amplifyx-target-badge"]').first().click();
-      const popoverAppeared = await page
-        .locator('#amplifyx-target-popover-host [data-testid="amplifyx-target-popover"]')
-        .waitFor({ state: 'visible', timeout: 8_000 })
-        .then(() => true, () => false);
+      // Re-establish a badge AT CLICK TIME: the virtualized feed recycles articles during the
+      // draft steps (runs 2-3 on 2026-10-04 lost every badge between the phase-3 count and this
+      // click), and badges re-attach on rescans — so re-wait, surfacing more feed if needed.
+      let badgeAtClickTime = await waitFor(async () => {
+        const n = await page.locator('button[data-testid="amplifyx-target-badge"]').count();
+        return n > 0 ? n : null;
+      }, 10_000);
+      for (let scroll = 0; scroll < 2 && badgeAtClickTime === null; scroll += 1) {
+        await page.mouse.wheel(0, 900);
+        await page.waitForTimeout(4_000);
+        badgeAtClickTime = await waitFor(async () => {
+          const n = await page.locator('button[data-testid="amplifyx-target-badge"]').count();
+          return n > 0 ? n : null;
+        }, 6_000);
+      }
+      const badge = page.locator('button[data-testid="amplifyx-target-badge"]').first();
+      const popoverLoc = page.locator('#amplifyx-target-popover-host [data-testid="amplifyx-target-popover"]');
+      let popoverAppeared = false;
+      if (badgeAtClickTime === null) {
+        // No badge came back even after surfacing more feed: nothing to click; the diagnostics
+        // below still record the structural state. Never a reason to touch a post control.
+        console.log('      badge-step diagnostics: no badge re-appeared within the re-wait window');
+      } else {
+        await badge.click();
+        popoverAppeared = await popoverLoc
+          .waitFor({ state: 'visible', timeout: 8_000 })
+          .then(() => true, () => false);
+      }
       const popoverAi = popoverAppeared
         ? await page.locator('#amplifyx-target-popover-host [data-testid="amplifyx-popover-ai-notice"]').innerText().catch(() => '')
         : '';
+      if (!popoverAppeared) {
+        // Structural diagnostics only: badge geometry + what the badge's own click point resolves
+        // to (id/testid/tag names — never page text).
+        const diag = await page.evaluate(() => {
+          const badgeEl = document.querySelector('button[data-testid="amplifyx-target-badge"]');
+          const box = badgeEl?.getBoundingClientRect() ?? null;
+          const hit =
+            box && box.width > 0
+              ? (() => {
+                  const el = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+                  if (!el) return 'outside-viewport';
+                  const testid = el.getAttribute?.('data-testid') ?? '(none)';
+                  return `${el.tagName.toLowerCase()}#=${el.id || '-'} testid=${testid}`;
+                })()
+              : 'no-box';
+          return {
+            badgeCount: document.querySelectorAll('button[data-testid="amplifyx-target-badge"]').length,
+            badgeBox: box ? { x: Math.round(box.left), y: Math.round(box.top), w: Math.round(box.width), h: Math.round(box.height) } : null,
+            hitAtBadgeCenter: hit,
+            popoverHostPresent: document.getElementById('amplifyx-target-popover-host') !== null,
+          };
+        });
+        console.log(`      badge-step diagnostics: ${JSON.stringify(diag)}`);
+      }
       record(
         'badge-click-popover-no-navigation',
         popoverAppeared && page.url() === urlBefore,
@@ -394,6 +593,7 @@ async function main() {
           headlineScore: Number.isInteger(headlineScore) ? headlineScore : null,
           signalCount,
           aiNotice: jevNotice,
+          mention: mentionFacts,
         },
         null,
         2,

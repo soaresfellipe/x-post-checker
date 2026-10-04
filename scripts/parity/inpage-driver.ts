@@ -66,10 +66,9 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
    * survive expansion — the panel replaces it — so this is the only honest record of the state
    * the user actually sees while typing (VAL-DRAFT-032).
    *
-   * Only the TIMING-STABLE facts are recorded. The AI half-state rides on the pill too, but which
-   * half-state a click happens to land on is a race between the click and the exchange (a slower
-   * browser leg legitimately observes `pending` where the faster one already saw `error`), and
-   * that settled value is compared in the EXPANDED panel below instead.
+   * `expandPanel` awaits a SETTLED pill before sampling (default), so the headline number is
+   * deterministic for the draft — local when no verdict can land, the hybrid one once it has —
+   * and is therefore field-comparable across browsers (VAL-DRAFT-025 / VAL-CROSS-010).
    */
   let collapsedSeen: Record<string, unknown> | null = null;
 
@@ -85,12 +84,31 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
     };
   }
 
-  /** Expands the collapsed panel with a real click on the pill — the only way it comes to exist. */
-  async function expandPanel(): Promise<void> {
+  /**
+   * Expands the collapsed panel with a real click on the pill — the only way it comes to exist.
+   * By default the pill's AI half is awaited to a SETTLED state first: while a Jev exchange is in
+   * flight the pill carries the LOCAL headline number, and once a verdict lands it carries the
+   * HYBRID one — which of the two a click samples is otherwise a race between the click and the
+   * exchange (a slower browser leg legitimately samples the local number), so only the settled
+   * number is field-comparable across browsers. Pass false to expand immediately, for the flows
+   * that must observe a PENDING state in the panel itself.
+   */
+  async function expandPanel(settledCollapsed = true): Promise<void> {
     if (overlayPanel() !== null) return;
-    const pill = await waitFor(() => overlayPill() ?? undefined, 15_000, 'collapsed score pill');
+    await waitFor(() => overlayPill() ?? undefined, 15_000, 'collapsed score pill');
+    if (settledCollapsed) {
+      // Re-queried per attempt: render() replaces the pill node on every analysis update.
+      await waitFor(
+        () => {
+          const state = overlayPill()?.getAttribute('data-jev-state');
+          return state !== null && state !== undefined && state !== 'pending' ? state : null;
+        },
+        30_000,
+        'the collapsed pill AI state to settle',
+      );
+    }
     collapsedSeen = readCollapsed();
-    (pill as HTMLElement).click();
+    (overlayPill() as HTMLElement).click();
     await waitFor(() => (overlayPanel() !== null ? true : null), 5_000, 'expanded detail panel');
   }
 
@@ -279,10 +297,21 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
       case 'jev-pending-success': {
         await typeDraft('tweetTextarea_0', TEXTS['pending']!);
         await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'analyzed with pending AI');
-        await expandPanel();
+        // The PENDING half-state must be observed in the expanded panel, so this expansion cannot
+        // wait for the exchange to settle. The collapsed sample it leaves behind is racy by
+        // construction (the verdict lands ~1.2s in) and is dropped from the outcome below.
+        await expandPanel(false);
         const pending = panelSummary();
         await waitFor(() => (jevSection()?.getAttribute('data-jev-state') === 'verdict' ? true : null), 15_000, 'jev verdict');
-        return { pending, settled: panelSummary(), epoch: epoch() };
+        // Collapse back to the pill and re-expand with a SETTLED collapsed sample: the verdict
+        // has landed, so the pill now carries the hybrid headline — the field-comparable number
+        // (both engines compute it from the same local score and the same mock verdict).
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await waitFor(() => (overlayPanel() === null ? true : null), 5_000, 'panel collapsed by Escape');
+        await expandPanel(true);
+        const settled = panelSummary();
+        delete pending['collapsed'];
+        return { pending, settled, epoch: epoch() };
       }
 
       case 'jev-failure': {

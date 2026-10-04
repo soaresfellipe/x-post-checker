@@ -586,6 +586,26 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     return hostElement()?.shadowRoot?.querySelector<HTMLElement>('.panel') ?? null;
   }
 
+  function pillElement(): HTMLElement | null {
+    return hostElement()?.shadowRoot?.querySelector<HTMLElement>('.pill') ?? null;
+  }
+
+  /**
+   * True while X's OWN composer mention typeahead (autocomplete dropdown) is open for the
+   * WATCHED composer: the user is mid-mention, so the watched composer holds focus AND at least
+   * one typeahead row is rendered. Presence is the honest signal — X's React tree unmounts the
+   * rows when the dropdown closes — and it is the only check that also works without a layout
+   * engine (happy-dom rects are all-zero). The focus scoping keeps unrelated typeaheads (the
+   * top-bar search) from ever hiding the pill.
+   */
+  function composerTypeaheadOpen(): boolean {
+    if (composer === null) return false;
+    const active = doc.activeElement;
+    const composerFocused = active !== null && (active === composer || composer.contains(active));
+    if (!composerFocused) return false;
+    return SELECTORS.composerTypeahead.some((selector) => doc.querySelector(selector) !== null);
+  }
+
   function reposition(): void {
     const host = hostElement();
     if (!host || !composer) return;
@@ -655,6 +675,14 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     // stays inside the viewport at short-window geometry.
     if (position.maxHeight === null) panel?.style.removeProperty('max-height');
     else panel?.style.setProperty('max-height', `${position.maxHeight}px`);
+    // VAL-DRAFT-040 (the user-reported defect, reproduced live 2026-10-04): the collapsed pill
+    // sits in the furniture row where X's own mention dropdown extends, and with the host's
+    // top-most z-index the pill COVERED a sliver of the dropdown — hit-tested live. While X's
+    // composer typeahead is open the pill therefore YIELDS (hidden entirely); it returns when
+    // the dropdown closes. The expanded panel never coexists with the typeahead: the '@'
+    // keystroke is a composer edit and collapses the panel first (VAL-DRAFT-036).
+    const pill = pillElement();
+    if (pill !== null) pill.style.visibility = !expanded && composerTypeaheadOpen() ? 'hidden' : '';
   }
 
   /** Coalesces mutation/resize-driven repositions into one rAF callback (idempotent placement). */
@@ -671,6 +699,10 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
 
   const onResize = (): void => scheduleReposition();
   win.addEventListener('resize', onResize);
+  // Focus changes re-evaluate the typeahead yield (its check requires the watched composer to
+  // hold focus), so focus moving in or out of the composer re-runs the placement pass.
+  const onFocusIn = (): void => scheduleReposition();
+  doc.addEventListener('focusin', onFocusIn, true);
 
   /** Escape collapses the expanded panel back to the pill (VAL-DRAFT-035). */
   const onKeyDown = (event: Event): void => {
@@ -897,6 +929,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       destroyed = true;
       manualCapture = false;
       win.removeEventListener('resize', onResize);
+      doc.removeEventListener('focusin', onFocusIn, true);
       doc.removeEventListener('wheel', onWheel);
       doc.removeEventListener('keydown', onKeyDown, true);
       doc.removeEventListener('click', onOutsideClick, true);

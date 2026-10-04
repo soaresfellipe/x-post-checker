@@ -1589,3 +1589,47 @@ describe('structural fallback composer (VAL-DRAFT-029 overlay leg)', () => {
     overlay.destroy();
   });
 });
+
+describe('mention typeahead yield (VAL-DRAFT-040)', () => {
+  /** Adds/removes X's own mention-typeahead rows in the light DOM (as x.com renders them). */
+  function openTypeahead(): HTMLElement {
+    const row = document.createElement('div');
+    row.dataset.testid = 'typeaheadResult';
+    document.body.append(row);
+    return row;
+  }
+
+  it('hides the collapsed pill while X\'s composer mention typeahead is open and restores it after', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft long enough to be analyzed, then typed @into');
+    await settleCapture();
+    const pill = harness.pill();
+    expect(pill.style.visibility).not.toBe('hidden');
+
+    // The mention typeahead opens while the COMPOSER holds focus (mid-mention typing).
+    (composer() as HTMLElement).focus();
+    const row = openTypeahead();
+    await vi.advanceTimersByTimeAsync(16); // the open/close detection coalesces through rAF
+    expect(pill.style.visibility).toBe('hidden');
+
+    // Dismissing (Escape / selection) removes the rows: the pill returns.
+    row.remove();
+    await vi.advanceTimersByTimeAsync(16);
+    expect(pill.style.visibility).not.toBe('hidden');
+  });
+
+  it('keeps the pill visible for an unrelated typeahead (the watched composer lacks focus)', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft long enough to be analyzed');
+    await settleCapture();
+    const pill = harness.pill();
+
+    const row = openTypeahead(); // e.g. the top-bar search typeahead — no composer focus
+    await vi.advanceTimersByTimeAsync(16);
+    expect(pill.style.visibility).not.toBe('hidden');
+    row.remove();
+    await vi.advanceTimersByTimeAsync(16);
+  });
+});

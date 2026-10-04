@@ -39,6 +39,20 @@ export const SELECTORS = {
   ],
   /** Primary "replying to" handle chip in a composer region (structural fallback is scan-based). */
   replyToHandle: ['[data-testid="replyToHandle"]'],
+  /**
+   * X's OWN composer mention typeahead (the autocomplete dropdown the overlay must never cover —
+   * VAL-DRAFT-040). Verified live 2026-10-04 (read-only real-x smoke): mention results render as
+   * light-DOM `typeaheadResult` rows containing `TypeaheadUser` entries. The wrapped-container
+   * testids seen in earlier probes (`typeaheadDropdownWrapped-*`, `DropdownWrapper-*`) are kept
+   * as lower-priority fallbacks; callers MUST scope the match to the focused composer so the
+   * top-bar search typeahead never crosses over.
+   */
+  composerTypeahead: [
+    '[data-testid="typeaheadResult"]',
+    '[data-testid="TypeaheadUser"]',
+    '[data-testid^="typeaheadDropdownWrapped"]',
+    '[data-testid^="DropdownWrapper"]',
+  ],
   // NOTE: no follow-state selector is registered. The real reply composer exposes NO marker that
   // the viewer follows the reply target (verified read-only inspection 2026-10-03, see
   // library/x-dom.md); `socialContext` is generic context and `userFollowIndicator` means the
