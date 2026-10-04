@@ -9,11 +9,23 @@ import type { AnalysisDispatch, DraftEvent } from '../../src/dom/composer-watche
 import { createComposerWatcher } from '../../src/dom/composer-watcher';
 import {
   OVERLAY_HOST_ID,
+  OVERLAY_PILL_TESTID,
   OVERLAY_TESTID,
   createScoreOverlay,
   computeAnchorPosition,
+  computePillPosition,
   type ScoreOverlay,
 } from '../../src/dom/overlay';
+
+/**
+ * ScoreOverlay DOM tier, M5 COLLAPSED-FIRST model: the compact pill is the default surface, the
+ * detail panel exists only after an explicit pill click, no qualifying draft renders NO extension
+ * UI at all, and the panel collapses on outside click (not forwarded to the page), on Escape and
+ * on any new composer edit. Every pre-existing guarantee (local-before-Jev, the six algorithm
+ * signals, the band table, stale discard, no-key/off/failure notices, per-draft transport-failure
+ * ownership, clear-reset, settings teardown/remount, English-only copy) is re-pinned at its new
+ * location — the PILL for the headline, the EXPANDED PANEL for everything else.
+ */
 
 const HOME_HTML = `
 <div id="react-root">
@@ -45,6 +57,16 @@ const HOST_SELECTOR = `#${OVERLAY_HOST_ID}`;
 function composer(): Element {
   return (document.querySelector('[data-testid="tweetTextarea_1"]') ??
     document.querySelector('[data-testid="tweetTextarea_0"]'))!;
+}
+
+/**
+ * A bubbling click whose `composed` flag survived happy-dom's normalization. Used for every
+ * click INSIDE the overlay's shadow DOM (the pill, the panel's own buttons): happy-dom drops
+ * `composed` on a click init object, and the overlay's "is this click mine?" check relies on
+ * composedPath crossing the shadow boundary — exactly as it does in a real browser.
+ */
+function clickInside(target: HTMLElement): void {
+  target.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
 }
 
 function typeText(element: Element, text: string): void {
@@ -79,8 +101,19 @@ interface Harness {
   reply(result: DraftAnalysisResult, request?: AnalysisDispatch): void;
   replyFor(request: AnalysisDispatch, overrides?: ReplyOverrides): void;
   failTransport(request?: AnalysisDispatch): void;
+  /** The collapsed pill (the default surface). Throws when no UI is rendered at all. */
+  pill(): HTMLElement;
+  /** Clicks the pill to expand the detail panel, and returns the panel. */
+  expand(): HTMLElement;
+  /** The expanded panel, WITHOUT expanding (throws when collapsed, as production would). */
   panel(): HTMLElement;
+  /** Collapses the panel the way a user's Escape does, then returns the pill. */
+  collapseNow(): HTMLElement;
+  /** Tears the harness down (stops the watcher and destroys the overlay). */
+  teardown(): void;
   host(): HTMLElement | null;
+  /** True while the panel is expanded. */
+  isExpanded(): boolean;
 }
 
 interface ReplyOverrides {
@@ -90,6 +123,21 @@ interface ReplyOverrides {
   jevFailure?: DraftAnalysis['meta']['jevFailure'];
   analyzedAt?: number;
 }
+
+function shadowOf<T extends HTMLElement>(testid: string): T | null {
+  return (
+    document
+      .querySelector<HTMLElement>(HOST_SELECTOR)
+      ?.shadowRoot?.querySelector<T>(`[data-testid="${testid}"]`) ?? null
+  );
+}
+
+/**
+ * Every harness built by `startHarness`, so `afterEach` can stop its watcher and destroy its
+ * overlay: a leaked overlay keeps DOCUMENT-level capture listeners (the expanded-state outside
+ * click) alive and would intercept the next test's page clicks.
+ */
+const harnesses: Harness[] = [];
 
 function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: boolean } = {}): Harness {
   document.body.innerHTML = HOME_HTML;
@@ -123,7 +171,7 @@ function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: bo
   overlay.onSettings(settings, 1);
   watcher.start();
 
-  return {
+  const harness: Harness = {
     overlay,
     requests,
     draftEvents,
@@ -181,35 +229,93 @@ function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: bo
       const target = request ?? requests.at(-1)!;
       overlay.onAnalysisFailed(target.snapshot);
     },
-    panel(): HTMLElement {
-      const panel = document
-        .querySelector<HTMLElement>(HOST_SELECTOR)
-        ?.shadowRoot?.querySelector<HTMLElement>(`[data-testid="${OVERLAY_TESTID}"]`);
-      if (!panel) throw new Error('overlay panel is not mounted');
+    pill(): HTMLElement {
+      const pill = shadowOf(OVERLAY_PILL_TESTID);
+      if (!pill) throw new Error('the score pill is not rendered');
+      return pill;
+    },
+    expand(): HTMLElement {
+      if (shadowOf(OVERLAY_TESTID) === null) clickInside(this.pill());
+      const panel = shadowOf(OVERLAY_TESTID);
+      if (!panel) throw new Error('the pill click did not expand the detail panel');
       return panel;
+    },
+    panel(): HTMLElement {
+      const panel = shadowOf(OVERLAY_TESTID);
+      if (!panel) throw new Error('the overlay panel is not expanded');
+      return panel;
+    },
+    collapseNow(): HTMLElement {
+      pressEscape();
+      return this.pill();
+    },
+    teardown(): void {
+      watcher.stop();
+      overlay.destroy();
     },
     host(): HTMLElement | null {
       return document.querySelector<HTMLElement>(HOST_SELECTOR);
     },
+    isExpanded(): boolean {
+      return shadowOf(OVERLAY_TESTID) !== null;
+    },
   };
+  harnesses.push(harness);
+  return harness;
 }
 
 const find = (root: ParentNode, testid: string): HTMLElement | null =>
   root.querySelector<HTMLElement>(`[data-testid="${testid}"]`);
+
+/** A page element an outside click can land on, with a listener the test can count. */
+function pageTarget(testid = 'tweetButtonInline'): { element: HTMLElement; reached: () => number } {
+  const element = document.querySelector<HTMLElement>(`[data-testid="${testid}"]`)!;
+  let reached = 0;
+  element.addEventListener('click', () => {
+    reached += 1;
+  });
+  return { element, reached: () => reached };
+}
+
+/** A real bubbling, composed click — what a browser delivers for a user click. */
+function clickOutside(target: HTMLElement): void {
+  target.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true, cancelable: true }));
+}
+
+function pressEscape(): void {
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+}
 
 beforeEach(() => {
   vi.useFakeTimers();
 });
 
 afterEach(() => {
+  for (const harness of harnesses) {
+    harness.overlay.destroy();
+  }
+  harnesses.length = 0;
   vi.useRealTimers();
   document.body.innerHTML = '';
 });
 
 describe('overlay host lifecycle', () => {
+  it('renders NO extension UI until a qualifying draft exists', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // VAL-DRAFT-005/032: no draft, no host at all — no pill, no panel, no awaiting balloon.
+    expect(harness.host()).toBeNull();
+    expect(shadowOf(OVERLAY_PILL_TESTID)).toBeNull();
+    expect(shadowOf(OVERLAY_TESTID)).toBeNull();
+    expect(find(document, 'overlay-empty')).toBeNull();
+  });
+
   it('mounts exactly one Shadow-DOM host on document.body, outside the React tree', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft long enough to be analyzed');
+    await settleCapture();
 
     const host = harness.host();
     expect(host).not.toBeNull();
@@ -218,12 +324,13 @@ describe('overlay host lifecycle', () => {
     // Never inside the React-managed app subtree.
     expect(document.getElementById('react-root')!.contains(host!)).toBe(false);
     expect(document.querySelectorAll(HOST_SELECTOR)).toHaveLength(1);
-    expect(harness.panel().dataset.state).toBe('empty');
   });
 
   it('unmounts when the composer dies after SPA navigation and remounts idempotently', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft long enough to be analyzed');
+    await settleCapture();
     expect(harness.host()).not.toBeNull();
 
     await settleDom(); // flush the watcher's post-mount rescan before surgery
@@ -233,25 +340,12 @@ describe('overlay host lifecycle', () => {
 
     document.body.innerHTML = REPLY_VIEW_HTML;
     await settleDom();
-    expect(document.querySelectorAll(HOST_SELECTOR)).toHaveLength(1);
-    expect(harness.panel().dataset.state).toBe('empty'); // fresh view, no stale score
-  });
+    expect(harness.host()).toBeNull(); // a fresh view with no draft renders nothing at all
 
-  it('resets to the empty state and drops stale analysis when the composer changes', async () => {
-    const harness = startHarness();
-    await vi.advanceTimersByTimeAsync(0);
-    typeText(composer(), 'A draft long enough to be analyzed');
+    typeText(composer(), 'A reply draft that is long enough to score');
     await settleCapture();
-    harness.replyFor(harness.requests[0]!);
-    expect(harness.panel().dataset.state).toBe('analyzed');
-
-    await settleDom();
-    document.body.innerHTML = REPLY_VIEW_HTML;
-    await settleDom();
-    const panel = harness.panel();
-    expect(panel.dataset.state).toBe('empty');
-    expect(find(panel, 'overlay-gauge')).toBeNull();
-    expect(find(panel, 'overlay-jev')).toBeNull();
+    expect(document.querySelectorAll(HOST_SELECTOR)).toHaveLength(1);
+    expect(harness.pill()).not.toBeNull(); // fresh view, collapsed pill, no stale score carried
   });
 
   it('keeps exactly one host across repeated renders and re-attach cycles', async () => {
@@ -265,101 +359,320 @@ describe('overlay host lifecycle', () => {
   });
 });
 
-describe('empty state (VAL-DRAFT-005, VAL-DRAFT-014)', () => {
-  it('shows the empty/awaiting state on load with no score elements', async () => {
+describe('no extension UI without a qualifying draft (VAL-DRAFT-005, VAL-DRAFT-014)', () => {
+  it('renders nothing for an empty draft and nothing for a below-minimum one', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
-    const panel = harness.panel();
-    expect(panel.dataset.state).toBe('empty');
-    expect(find(panel, 'overlay-empty')!.textContent).toContain('Type a post to see its viral-potential score.');
-    expect(find(panel, 'overlay-gauge')).toBeNull();
-    expect(find(panel, 'overlay-signals')).toBeNull();
-    expect(find(panel, 'overlay-jev')).toBeNull();
-  });
+    expect(harness.host()).toBeNull();
 
-  it('keeps drafts below minDraftLength in the empty state with no analysis request', async () => {
-    const harness = startHarness();
-    await vi.advanceTimersByTimeAsync(0);
     typeText(composer(), '123456789'); // 9 raw chars; default min is 10
     await settleCapture();
-    const panel = harness.panel();
-    expect(panel.dataset.state).toBe('empty');
-    expect(find(panel, 'overlay-gauge')).toBeNull();
+    expect(harness.host()).toBeNull();
+    expect(shadowOf(OVERLAY_PILL_TESTID)).toBeNull();
+    expect(shadowOf(OVERLAY_TESTID)).toBeNull();
     expect(harness.requests).toHaveLength(0);
   });
 
-  it('returns to the empty state when an analyzed draft is cleared', async () => {
+  it('removes every extension surface when an analyzed draft is cleared', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
     typeText(composer(), 'An analyzed draft that is long enough');
     await settleCapture();
     harness.replyFor(harness.requests[0]!);
-    expect(harness.panel().dataset.state).toBe('analyzed');
+    expect(harness.pill()).not.toBeNull();
 
     typeText(composer(), '');
     await settleCapture();
-    const panel = harness.panel();
-    expect(panel.dataset.state).toBe('empty');
-    expect(find(panel, 'overlay-gauge')).toBeNull(); // neither the score...
-    expect(find(panel, 'overlay-signals')).toBeNull();
-    expect(find(panel, 'overlay-jev')).toBeNull(); // ...nor the verdict may linger
+    // Neither the pill nor a panel may remain — the composer area is left completely free.
+    expect(harness.host()).toBeNull();
+    expect(shadowOf(OVERLAY_PILL_TESTID)).toBeNull();
+    expect(shadowOf(OVERLAY_TESTID)).toBeNull();
+    expect(find(document, 'overlay-gauge')).toBeNull();
+    expect(find(document, 'overlay-signals')).toBeNull();
+    expect(find(document, 'overlay-jev')).toBeNull();
+  });
+
+  it('never renders the removed empty-state balloon', async () => {
+    startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'short');
+    await settleCapture();
+    // The old "type a post" balloon is gone: no such element exists anywhere in the DOM.
+    expect(find(document, 'overlay-empty')).toBeNull();
+    expect(document.body.textContent).not.toContain('Type a post');
   });
 });
 
-describe('manual Analyze affordance when autoAnalyze is off (VAL-SETUP-010)', () => {
-  it('shows the ready state with an Analyze button and no score, and never dispatches', async () => {
-    const harness = startHarness({ settings: { autoAnalyze: false } });
-    await vi.advanceTimersByTimeAsync(0);
-    typeText(composer(), 'A draft typed with autoAnalyze off');
-    await settleCapture();
-
-    const panel = harness.panel();
-    expect(panel.dataset.state).toBe('ready');
-    const analyze = find(panel, 'overlay-analyze');
-    expect(analyze).not.toBeNull();
-    expect(analyze!.textContent).toBe('Analyze');
-    expect(find(panel, 'overlay-gauge')).toBeNull(); // no analysis UI before activation
-    expect(find(panel, 'overlay-signals')).toBeNull();
-    expect(find(panel, 'overlay-jev')).toBeNull();
-    expect(harness.requests).toHaveLength(0);
-  });
-
-  it('analyzes on the button click: manual dispatch, local score, Jev pending', async () => {
-    const harness = startHarness({ settings: { autoAnalyze: false } });
-    await vi.advanceTimersByTimeAsync(0);
-    typeText(composer(), 'A draft typed with autoAnalyze off');
-    await settleCapture();
-
-    find(harness.panel(), 'overlay-analyze')!.click();
-    expect(harness.requests).toHaveLength(1);
-    expect(harness.requests[0]!.trigger).toBe('manual');
-
-    const panel = harness.panel();
-    expect(panel.dataset.state).toBe('analyzed');
-    expect(find(panel, 'overlay-gauge')).not.toBeNull();
-    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('pending');
-  });
-});
-
-describe('optimistic local render before Jev (VAL-DRAFT-006, VAL-DRAFT-010)', () => {
-  it('renders the local score and breakdown immediately at capture, with the Jev half pending', async () => {
+describe('collapsed pill and expansion (VAL-DRAFT-032, VAL-DRAFT-034)', () => {
+  it('renders only the headline number while typing, with no panel anywhere in the shadow DOM', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
     typeText(composer(), 'What is the one tool you stopped using this year, and why?');
     await settleCapture();
 
-    const panel = harness.panel();
+    const expectedLocal = scoreDraft(harness.draftEvents.at(-1)!.snapshot);
+    const pill = harness.pill();
+    expect(pill.textContent).toBe(String(expectedLocal.headline));
+    expect(pill.textContent).toMatch(/^\d{1,3}$/); // the headline number ALONE
+    expect(pill.dataset.headlineSource).toBe('local');
+    expect(pill.getAttribute('aria-expanded')).toBe('false');
+    expect(pill.getAttribute('aria-label')).toContain(String(expectedLocal.headline));
+    // The detail panel is absent — not merely hidden — before the pill is activated.
+    expect(shadowOf(OVERLAY_TESTID)).toBeNull();
+    const shadow = harness.host()!.shadowRoot!;
+    for (const testid of ['overlay-gauge', 'overlay-signals', 'overlay-jev', 'overlay-optimizer']) {
+      expect(find(shadow, testid), `${testid} must not exist while collapsed`).toBeNull();
+    }
+  });
+
+  it('a single pill click expands the full panel with all three sections', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'What changed my year? A daily checklist #focus https://example.com/post');
+    await settleCapture();
+    expect(harness.isExpanded()).toBe(false);
+
+    const panel = harness.expand();
     expect(panel.dataset.state).toBe('analyzed');
+    expect(harness.host()!.dataset.expanded).toBe('true');
+    expect(find(panel, 'overlay-gauge')).not.toBeNull(); // score gauge
+    expect(find(panel, 'overlay-signals')).not.toBeNull(); // algorithm signals
+    expect(find(panel, 'overlay-jev')).not.toBeNull(); // AI judgment
+    expect(find(panel, 'overlay-optimizer')).not.toBeNull(); // optimizer
+    expect(shadowOf(OVERLAY_PILL_TESTID)).toBeNull(); // the pill is replaced by the panel
+  });
+
+  it('keeps the same headline in the pill and in the expanded gauge', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft whose pill and panel headline must agree exactly');
+    await settleCapture();
+    const pillHeadline = harness.pill().textContent;
+    const panel = harness.expand();
+    expect(find(panel, 'overlay-headline')!.textContent).toBe(pillHeadline);
+  });
+});
+
+describe('collapse triggers (VAL-DRAFT-035, VAL-DRAFT-036, VAL-DRAFT-037)', () => {
+  it('Escape collapses the panel and keeps the pill with its headline (VAL-DRAFT-035)', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft analyzed before the Escape collapse is exercised');
+    await settleCapture();
+    const headline = harness.pill().textContent;
+    harness.expand();
+
+    pressEscape();
+    expect(harness.isExpanded()).toBe(false);
+    expect(harness.pill().textContent).toBe(headline); // the pill remains, with the current score
+    expect(harness.host()).not.toBeNull();
+  });
+
+  it('any new composer edit collapses the panel back to the pill (VAL-DRAFT-036)', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft whose panel is expanded while the user keeps typing');
+    await settleCapture();
+    harness.replyFor(harness.requests[0]!);
+    harness.expand();
+    expect(harness.isExpanded()).toBe(true);
+
+    // The edit lands, then the debounce settles the new capture.
+    typeText(composer(), 'A draft whose panel is expanded while the user keeps typing further');
+    await settleCapture();
+    expect(harness.isExpanded()).toBe(false); // collapsed BEFORE/AS the new draft paints
+    expect(shadowOf(OVERLAY_TESTID)).toBeNull();
+    expect(harness.pill()).not.toBeNull(); // only the pill exists while typing
+  });
+
+  it('a first outside click closes the panel WITHOUT reaching the page, the second click reaches it (VAL-DRAFT-037)', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft analyzed before the outside-click collapse');
+    await settleCapture();
+    harness.expand();
+
+    const target = pageTarget();
+    clickOutside(target.element);
+    expect(harness.isExpanded()).toBe(false);
+    expect(harness.pill()).not.toBeNull();
+    expect(target.reached()).toBe(0); // the first outside click is NOT forwarded to the page
+
+    // The next identical click behaves natively: the panel is collapsed, nothing intercepts.
+    clickOutside(target.element);
+    expect(target.reached()).toBe(1);
+    expect(harness.isExpanded()).toBe(false);
+  });
+
+  it('a real outside-click GESTURE (pointerdown...click) is captured end to end', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft analyzed before a full outside-click gesture');
+    await settleCapture();
+    harness.expand();
+
+    const target = pageTarget('addMedia');
+    // A browser delivers pointerdown -> mouseup -> click; a handler on the first of those cannot
+    // stop the click itself, so the overlay captures the whole gesture.
+    target.element.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, composed: true, cancelable: true }),
+    );
+    target.element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, composed: true, cancelable: true }));
+    clickOutside(target.element);
+    expect(harness.isExpanded()).toBe(false);
+    expect(target.reached()).toBe(0); // neither the pointer lane nor the click reached the page
+  });
+
+  it('the collapsed state swallows nothing: the next click outside the gesture reaches the page', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft whose collapse window must expire for the next click');
+    await settleCapture();
+    harness.expand();
+
+    const target = pageTarget();
+    target.element.dispatchEvent(
+      new MouseEvent('pointerdown', { bubbles: true, composed: true, cancelable: true }),
+    );
+    clickOutside(target.element);
+    expect(target.reached()).toBe(0); // the captured gesture never reached the page
+
+    // Outside the captured gesture's window a click behaves natively (VAL-DRAFT-037's "a second,
+    // identical click behaves natively"). Vitest's fake timers do not move Date.now() on their own.
+    vi.setSystemTime(Date.now() + 1_000);
+    clickOutside(target.element);
+    expect(target.reached()).toBe(1);
+  });
+
+  it('clicks INSIDE the expanded panel are never intercepted', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft whose panel own controls stay interactive');
+    await settleCapture();
+    const panel = harness.expand();
+    let reached = 0;
+    panel.addEventListener('click', () => {
+      reached += 1;
+    });
+    panel.dispatchEvent(new MouseEvent('click', { bubbles: true, composed: true, cancelable: true }));
+    expect(reached).toBe(1); // the panel handles its own clicks
+    expect(harness.isExpanded()).toBe(true); // and stays open: it was not an outside click
+  });
+
+  it('collapsing is idempotent: outside clicks with nothing expanded reach the page', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft that stays collapsed through ordinary page clicks');
+    await settleCapture();
+
+    const target = pageTarget();
+    clickOutside(target.element);
+    expect(target.reached()).toBe(1);
+    expect(harness.isExpanded()).toBe(false);
+  });
+
+  it('a fresh composer (SPA navigation) always starts collapsed', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft expanded right before the route change happens');
+    await settleCapture();
+    harness.expand();
+
+    await settleDom();
+    document.body.innerHTML = REPLY_VIEW_HTML;
+    await settleDom();
+    typeText(composer(), 'A reply draft that is long enough to score');
+    await settleCapture();
+    expect(harness.isExpanded()).toBe(false); // never opens by itself
+    expect(harness.pill()).not.toBeNull();
+  });
+});
+
+describe('autoAnalyze gates only the AI call (VAL-SETUP-010)', () => {
+  it('shows the local-score pill with zero Jev calls while autoAnalyze is off', async () => {
+    const harness = startHarness({ settings: { autoAnalyze: false } });
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft typed with autoAnalyze off');
+    await settleCapture();
+
+    // The local score is ALWAYS computed (no network) and ALWAYS shown in the pill.
+    const expectedLocal = scoreDraft(harness.draftEvents.at(-1)!.snapshot);
+    expect(harness.pill().textContent).toBe(String(expectedLocal.headline));
+    expect(harness.isExpanded()).toBe(false);
+    expect(harness.requests).toHaveLength(0);
+  });
+
+  it('the expanded panel exposes the explicit AI action, and activating it analyzes exactly once', async () => {
+    const harness = startHarness({ settings: { autoAnalyze: false } });
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft typed with autoAnalyze off');
+    await settleCapture();
+
+    const panel = harness.expand();
+    const jev = find(panel, 'overlay-jev')!;
+    expect(jev.dataset.jevState).toBe('ready');
+    expect(find(jev, 'overlay-jev-pending')).toBeNull(); // nothing implies a request is running
+    expect(find(jev, 'overlay-jev-band')).toBeNull();
+    // The local half is fully available even though the AI half never ran.
+    expect(find(panel, 'overlay-signals')).not.toBeNull();
+    expect(find(panel, 'overlay-optimizer')).not.toBeNull();
+
+    const analyze = find(jev, 'overlay-analyze')!;
+    expect(analyze.textContent).toBe('Analyze with AI');
+    clickInside(analyze);
+    expect(harness.requests).toHaveLength(1);
+    expect(harness.requests[0]!.trigger).toBe('manual');
+    // The action's own click is not an outside click: the panel the user opened stays open.
+    expect(harness.isExpanded()).toBe(true);
+
+    // Exactly one analysis: the local half is untouched and the reply (which is not a user edit)
+    // repaints the SAME open panel with the verdict.
+    expect(find(harness.panel(), 'overlay-signals')).not.toBeNull();
+    expect(harness.requests).toHaveLength(1);
+
+    harness.replyFor(harness.requests[0]!);
+    expect(harness.requests).toHaveLength(1);
+    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('verdict');
+  });
+
+  it('switching autoAnalyze back on restores the automatic AI half', async () => {
+    const harness = startHarness({ settings: { autoAnalyze: false } });
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft typed while the automatic AI lane was off');
+    await settleCapture();
+    expect(harness.requests).toHaveLength(0);
+
+    await harness.pushSettings({ autoAnalyze: true }, 2);
+    typeText(composer(), 'A second draft typed once the automatic AI lane is back on');
+    await settleCapture();
+    expect(harness.requests).toHaveLength(1);
+    expect(harness.requests[0]!.trigger).toBe('auto');
+  });
+});
+
+describe('optimistic local render before Jev (VAL-DRAFT-006, VAL-DRAFT-010)', () => {
+  it('the pill shows the local score immediately at capture, with the Jev half pending inside the panel', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'What is the one tool you stopped using this year, and why?');
+    await settleCapture();
+
+    const expectedLocal = scoreDraft(harness.draftEvents.at(-1)!.snapshot);
+    const panel = harness.expand();
     // Local half: headline equals the pure engine's local headline, labeled as local-only.
     const gauge = find(panel, 'overlay-gauge')!;
     expect(gauge.dataset.headlineSource).toBe('local');
-    const expectedLocal = scoreDraft(harness.draftEvents.at(-1)!.snapshot);
     expect(find(panel, 'overlay-headline')!.textContent).toBe(String(expectedLocal.headline));
     expect(find(panel, 'overlay-signals')).not.toBeNull();
-    // Jev half: visibly pending, local score retained.
-    const jev = find(panel, 'overlay-jev')!;
+    // The collapsed pill carries the very same number (VAL-DRAFT-032: headline only).
+    expect(harness.collapseNow().textContent).toBe(String(expectedLocal.headline));
+    // Jev half: visibly pending inside the panel, and the collapsed pill still keeps the usable
+    // local score instead of dropping it (VAL-DRAFT-010).
+    harness.expand();
+    const jev = find(harness.panel(), 'overlay-jev')!;
     expect(jev.dataset.jevState).toBe('pending');
     expect(find(jev, 'overlay-jev-pending')!.textContent).toContain('Analyzing with AI');
+    expect(harness.collapseNow().dataset.jevState).toBe('pending');
   });
 
   it('needs no analyze-draft reply at all to show the local breakdown (independence)', async () => {
@@ -367,8 +680,7 @@ describe('optimistic local render before Jev (VAL-DRAFT-006, VAL-DRAFT-010)', ()
     await vi.advanceTimersByTimeAsync(0);
     typeText(composer(), 'Five lessons from scaling to 1M users: measure, cache, delete, hire slowly, write it down');
     await settleCapture();
-    // No reply has been delivered; the overlay still shows the complete local half.
-    expect(find(harness.panel(), 'overlay-signals')!.querySelectorAll('li')).not.toHaveLength(0);
+    expect(find(harness.expand(), 'overlay-signals')!.querySelectorAll('li')).not.toHaveLength(0);
   });
 });
 
@@ -379,7 +691,7 @@ describe('algorithm signal breakdown (VAL-DRAFT-007)', () => {
     typeText(composer(), 'What changed my year? A daily checklist #focus https://example.com/post #systems');
     await settleCapture();
 
-    const signals = find(harness.panel(), 'overlay-signals')!;
+    const signals = find(harness.expand(), 'overlay-signals')!;
     expect(signals.querySelector('h3')!.textContent).toBe('Algorithm signals');
     const required = ['reply-magnet', 'length', 'hashtags', 'external-link', 'media', 'reply-mutual'];
     for (const id of required) {
@@ -394,7 +706,7 @@ describe('algorithm signal breakdown (VAL-DRAFT-007)', () => {
     await vi.advanceTimersByTimeAsync(0);
     typeText(composer(), 'A plain draft with exactly two tags #one #two');
     await settleCapture();
-    const signals = find(harness.panel(), 'overlay-signals')!;
+    const signals = find(harness.expand(), 'overlay-signals')!;
     expect(signals.querySelector('li[data-signal-id="hashtags"] .value')!.textContent).toContain('2');
     expect(signals.querySelector('li[data-signal-id="length"] .value')!.textContent).toMatch(/chars/);
   });
@@ -415,7 +727,7 @@ describe('asynchronous Jev verdict (VAL-DRAFT-008, VAL-DRAFT-009)', () => {
         suggestions: [],
       },
     });
-    return harness.panel();
+    return harness.expand();
   }
 
   it('adds the verdict beside the unchanged algorithm breakdown and switches the headline to hybrid', async () => {
@@ -425,10 +737,10 @@ describe('asynchronous Jev verdict (VAL-DRAFT-008, VAL-DRAFT-009)', () => {
     await settleCapture();
     const request = harness.requests[0]!;
     const localBefore = scoreDraft(request.snapshot);
-    const before = harness.panel();
+    const before = harness.expand();
     const signalsHeadingBefore = find(before, 'overlay-signals')!.querySelector('h3')!.textContent;
 
-    harness.replyFor(request);
+    harness.replyFor(request); // the panel stays expanded; the reply repaints it in place
     const panel = harness.panel();
 
     // The local breakdown stays, under its own unchanged heading (sources distinguished).
@@ -444,12 +756,12 @@ describe('asynchronous Jev verdict (VAL-DRAFT-008, VAL-DRAFT-009)', () => {
     expect(find(jev, 'overlay-jev-confidence')!.textContent).toBe('Confidence: 65%');
     expect(find(jev, 'overlay-jev-weaknesses')!.textContent).toContain(WEAKNESS_LABELS.not_specific_enough);
 
-    // Hybrid headline: round(0.6*local + 0.4*(ordinal/5*100)).
+    // Hybrid headline: round(0.6*local + 0.4*(ordinal/5*100)), mirrored in the pill.
     const gauge = find(panel, 'overlay-gauge')!;
     expect(gauge.dataset.headlineSource).toBe('hybrid');
-    expect(find(panel, 'overlay-headline')!.textContent).toBe(
-      String(Math.round(0.6 * localBefore.headline + 0.4 * ((3.44 / 5) * 100))),
-    );
+    const hybrid = String(Math.round(0.6 * localBefore.headline + 0.4 * ((3.44 / 5) * 100)));
+    expect(find(panel, 'overlay-headline')!.textContent).toBe(hybrid);
+    expect(harness.collapseNow().textContent).toBe(hybrid); // the pill carries the same number
   });
 
   it('maps every exact rubric ordinal to its band label', async () => {
@@ -467,6 +779,9 @@ describe('asynchronous Jev verdict (VAL-DRAFT-008, VAL-DRAFT-009)', () => {
       const panel = await analyzedWithVerdict(harness, ordinal);
       expect(find(panel, 'overlay-jev-band')!.textContent).toBe(label);
       expect(find(panel, 'overlay-jev-confidence')!.textContent).toBe('Confidence: 71%');
+      // Collapse again: typing the next draft must leave only the pill (VAL-DRAFT-036).
+      pressEscape();
+      expect(harness.isExpanded()).toBe(false);
     }
   });
 
@@ -485,7 +800,7 @@ describe('asynchronous Jev verdict (VAL-DRAFT-008, VAL-DRAFT-009)', () => {
         suggestions: ['Open with the number to earn the first line.'],
       },
     });
-    const jev = find(harness.panel(), 'overlay-jev')!;
+    const jev = find(harness.expand(), 'overlay-jev')!;
     expect(find(jev, 'overlay-jev-suggestions')!.textContent).toContain('Open with the number');
   });
 });
@@ -515,8 +830,10 @@ describe('stale response discard (VAL-DRAFT-011)', () => {
         suggestions: [],
       },
     });
-    let panel = harness.panel();
+    let panel = harness.expand();
     expect(find(panel, 'overlay-jev-band')!.textContent).toBe('Exceptional');
+    const headlineForB = harness.collapseNow().textContent;
+    harness.expand();
 
     // A's stale reply arrives LAST: discarded, B's result stays.
     harness.replyFor(requestA, {
@@ -529,9 +846,11 @@ describe('stale response discard (VAL-DRAFT-011)', () => {
         suggestions: [],
       },
     });
-    panel = harness.panel();
+    panel = harness.panel(); // still expanded: a reply is not a user edit
     expect(find(panel, 'overlay-jev-band')!.textContent).toBe('Exceptional');
     expect(find(panel, 'overlay-jev')!.textContent).not.toContain('Weak hook');
+    // A never repaints B's pill either.
+    expect(harness.collapseNow().textContent).toBe(headlineForB);
   });
 
   it('drops the settled result when the draft changes, showing the new draft locally', async () => {
@@ -540,26 +859,31 @@ describe('stale response discard (VAL-DRAFT-011)', () => {
     typeText(composer(), 'First eligible draft with a settled verdict');
     await settleCapture();
     harness.replyFor(harness.requests[0]!);
-    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('verdict');
+    expect(find(harness.expand(), 'overlay-jev')!.dataset.jevState).toBe('verdict');
 
+    // Typing collapses to the pill for the NEW draft, whose own analysis is in flight.
     typeText(composer(), 'Second, longer draft that differs from the first one');
     await settleCapture();
-    const panel = harness.panel();
+    expect(harness.isExpanded()).toBe(false);
+    expect(harness.pill().dataset.jevState).toBe('pending');
+    const panel = harness.expand();
     expect(find(panel, 'overlay-gauge')!.dataset.headlineSource).toBe('local');
-    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('pending'); // its own analysis is in flight
+    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('pending');
   });
 });
 
 describe('no key configured (VAL-DRAFT-017)', () => {
-  it('keeps local scoring usable and shows the Connect Jev prompt, never pending', async () => {
+  it('keeps the local score usable in the pill and shows the Connect Jev prompt in the panel', async () => {
     const harness = startHarness({ keyPresent: false });
     await vi.advanceTimersByTimeAsync(0);
     typeText(composer(), 'A local-only draft long enough to be scored');
     await settleCapture();
 
-    let panel = harness.panel();
-    expect(panel.dataset.state).toBe('analyzed');
-    expect(find(panel, 'overlay-gauge')!.dataset.headlineSource).toBe('local');
+    const pill = harness.pill();
+    expect(pill.dataset.headlineSource).toBe('local');
+    expect(pill.dataset.jevState).toBe('no-key'); // the pill implies no AI verdict exists
+
+    let panel = harness.expand();
     let jev = find(panel, 'overlay-jev')!;
     expect(jev.dataset.jevState).toBe('no-key');
     expect(find(jev, 'overlay-jev-pending')).toBeNull(); // nothing implies a request is running
@@ -579,7 +903,7 @@ describe('no key configured (VAL-DRAFT-017)', () => {
     await vi.advanceTimersByTimeAsync(0);
     typeText(composer(), 'A local-only draft long enough to be scored');
     await settleCapture();
-    find(find(harness.panel(), 'overlay-jev')!, 'overlay-connect-jev')!.click();
+    clickInside(find(find(harness.expand(), 'overlay-jev')!, 'overlay-connect-jev')!);
     expect(harness.optionsOpened).toBe(1);
   });
 });
@@ -591,7 +915,8 @@ describe('jevForDrafts off (VAL-DRAFT-021)', () => {
     typeText(composer(), 'A draft analyzed while AI for drafts is disabled');
     await settleCapture();
 
-    let panel = harness.panel();
+    expect(harness.pill().dataset.jevState).toBe('off');
+    let panel = harness.expand();
     let jev = find(panel, 'overlay-jev')!;
     expect(jev.dataset.jevState).toBe('off');
     expect(find(jev, 'overlay-jev-pending')).toBeNull();
@@ -611,12 +936,13 @@ describe('jevForDrafts off (VAL-DRAFT-021)', () => {
     typeText(composer(), 'A draft analyzed and answered while AI for drafts is on');
     await settleCapture();
     harness.replyFor(harness.requests[0]!);
-    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('verdict');
-    expect(find(harness.panel(), 'overlay-gauge')!.dataset.headlineSource).toBe('hybrid');
+    let panel = harness.expand();
+    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('verdict');
+    expect(find(panel, 'overlay-gauge')!.dataset.headlineSource).toBe('hybrid');
 
     await harness.pushSettings({ jevForDrafts: false }, 2);
 
-    const panel = harness.panel();
+    panel = harness.panel(); // a settings change is not a user edit: the panel stays open
     expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('off'); // the off state, not the verdict
     expect(find(panel, 'overlay-jev-notice')!.textContent).toContain('AI analysis is off');
     expect(find(panel, 'overlay-jev-band')).toBeNull(); // the AI verdict left the panel
@@ -624,6 +950,7 @@ describe('jevForDrafts off (VAL-DRAFT-021)', () => {
     const local = scoreDraft(harness.requests[0]!.snapshot);
     expect(find(panel, 'overlay-headline')!.textContent).toBe(String(local.headline));
     expect(find(panel, 'overlay-signals')).not.toBeNull(); // local scoring stays available
+    expect(harness.collapseNow().textContent).toBe(String(local.headline));
   });
 
   it('a late reply cannot re-introduce the verdict once jevForDrafts is off', async () => {
@@ -636,7 +963,7 @@ describe('jevForDrafts off (VAL-DRAFT-021)', () => {
     await harness.pushSettings({ jevForDrafts: false }, 2); // the user disables AI mid-flight
     harness.replyFor(request); // the verdict lands AFTER the setting flipped
 
-    const panel = harness.panel();
+    const panel = harness.expand();
     expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('off');
     expect(find(panel, 'overlay-jev-band')).toBeNull();
     expect(find(panel, 'overlay-gauge')!.dataset.headlineSource).toBe('local');
@@ -649,6 +976,7 @@ describe('jevForDrafts off (VAL-DRAFT-021)', () => {
     typeText(composer(), 'A draft whose settled verdict survives the setting round-trip');
     await settleCapture();
     harness.replyFor(harness.requests[0]!);
+    harness.expand();
     await harness.pushSettings({ jevForDrafts: false }, 2);
     expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('off');
 
@@ -663,7 +991,7 @@ describe('Jev failure degradation (VAL-DRAFT-018)', () => {
     ['failed-network', 'Could not reach the AI service.'],
     ['failed-malformed', 'The AI service returned an unreadable response.'],
     ['rate-limited', 'AI analysis is rate-limited right now'],
-  ] as const)('keeps the local score usable and shows an explicit notice for %s', async (status, reason) => {
+  ] as const)('keeps the pill usable and shows an explicit notice in the panel for %s', async (status, reason) => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
     typeText(composer(), `A draft that fails the Jev half with ${status}`);
@@ -678,9 +1006,10 @@ describe('Jev failure degradation (VAL-DRAFT-018)', () => {
       ...(status === 'rate-limited' ? { jevFailure: { kind: 'rate-limited' } } : {}),
     });
 
-    const panel = harness.panel();
-    expect(panel.dataset.state).toBe('analyzed');
-    expect(find(panel, 'overlay-gauge')).not.toBeNull();
+    // The collapsed pill keeps the usable local score (never a fabricated verdict).
+    expect(harness.pill()).not.toBeNull();
+    expect(harness.pill().dataset.jevState).toBe('error');
+    const panel = harness.expand();
     expect(find(panel, 'overlay-signals')).not.toBeNull();
     const jev = find(panel, 'overlay-jev')!;
     expect(jev.dataset.jevState).toBe('error');
@@ -694,12 +1023,12 @@ describe('Jev failure degradation (VAL-DRAFT-018)', () => {
     typeText(composer(), 'A first draft whose AI half will fail');
     await settleCapture();
     harness.replyFor(harness.requests[0]!, { jev: undefined, jevStatus: 'failed-network', jevFailure: { kind: 'network', reason: 'unreachable' } });
-    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('error');
+    expect(find(harness.expand(), 'overlay-jev')!.dataset.jevState).toBe('error');
 
     typeText(composer(), 'A second draft whose AI half will succeed');
     await settleCapture();
     harness.replyFor(harness.requests.at(-1)!);
-    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('verdict');
+    expect(find(harness.expand(), 'overlay-jev')!.dataset.jevState).toBe('verdict');
   });
 
   it('clears the pending state when the analyze-draft transport itself fails', async () => {
@@ -707,13 +1036,13 @@ describe('Jev failure degradation (VAL-DRAFT-018)', () => {
     await vi.advanceTimersByTimeAsync(0);
     typeText(composer(), 'A draft whose analysis message never gets a reply');
     await settleCapture();
-    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('pending');
+    expect(harness.pill().dataset.jevState).toBe('pending');
 
     harness.failTransport();
-    const panel = harness.panel();
-    expect(find(panel, 'overlay-gauge')).not.toBeNull(); // the local score stays usable
-    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('error');
-    expect(find(panel, 'overlay-jev')!.textContent).toContain('AI judgment unavailable');
+    expect(harness.pill()).not.toBeNull(); // the local score stays usable
+    const jev = find(harness.expand(), 'overlay-jev')!;
+    expect(jev.dataset.jevState).toBe('error');
+    expect(jev.textContent).toContain('AI judgment unavailable');
   });
 });
 
@@ -732,18 +1061,16 @@ describe('transport-failure identity: out-of-order dispatches (VAL-DRAFT-018)', 
     harness.failTransport(requestB);
 
     // B (the current draft) reaches a terminal render: local score + explicit transport error.
-    const panel = harness.panel();
+    expect(harness.pill().textContent).toBe(String(scoreDraft(requestB.snapshot).headline));
+    const panel = harness.expand();
     expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('error'); // never an infinite spinner
     expect(find(panel, 'overlay-jev')!.textContent).toContain('did not respond');
-    expect(find(panel, 'overlay-gauge')).not.toBeNull();
     expect(find(panel, 'overlay-gauge')!.dataset.headlineSource).toBe('local');
 
     // A's late success is unrelated to B: it neither repaints B nor lifts B's error.
     harness.replyFor(requestA, { jev: undefined, jevStatus: 'skipped-no-key' });
     expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('error');
-    expect(find(harness.panel(), 'overlay-headline')!.textContent).toBe(
-      String(scoreDraft(requestB.snapshot).headline),
-    );
+    expect(harness.collapseNow().textContent).toBe(String(scoreDraft(requestB.snapshot).headline));
   });
 
   it('failing the older dispatch leaves the newer draft pending; that draft still settles on its own failure', async () => {
@@ -757,8 +1084,9 @@ describe('transport-failure identity: out-of-order dispatches (VAL-DRAFT-018)', 
     const requestB = harness.requests.at(-1)!;
 
     harness.failTransport(requestA); // only the OLDEST dispatch fails
-    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('pending'); // B unaffected
-    expect(find(harness.panel(), 'overlay-jev-band')).toBeNull(); // no error is shown for B either
+    const panel = harness.expand();
+    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('pending'); // B unaffected
+    expect(find(panel, 'overlay-jev-band')).toBeNull(); // no error is shown for B either
 
     harness.failTransport(requestB); // B's own transport failure settles B
     expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('error');
@@ -775,13 +1103,11 @@ describe('transport-failure identity: out-of-order dispatches (VAL-DRAFT-018)', 
     const requestB = harness.requests.at(-1)!;
 
     harness.failTransport(requestB); // the current draft fails first
-    harness.failTransport(requestA); // then the OLDER dispatch fails too
+    harness.failTransport(requestA); // then the OLDER dispatch's transport fails too
 
-    // A's failure owns A only: it must not overwrite B's terminal state. B keeps its local score
-    // and its explicit transport error (never a silent downgrade to the ready phase).
-    const panel = harness.panel();
-    expect(panel.dataset.state).toBe('analyzed');
-    expect(find(panel, 'overlay-gauge')).not.toBeNull();
+    // A's failure owns A only: it must not overwrite B's terminal state.
+    expect(harness.pill()).not.toBeNull();
+    const panel = harness.expand();
     expect(find(panel, 'overlay-gauge')!.dataset.headlineSource).toBe('local');
     expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('error');
     expect(find(panel, 'overlay-jev')!.textContent).toContain('did not respond');
@@ -798,15 +1124,13 @@ describe('transport-failure identity: out-of-order dispatches (VAL-DRAFT-018)', 
     const requestB = harness.requests.at(-1)!;
 
     harness.replyFor(requestB); // B (current) settles with a verdict first
-    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('verdict');
+    const panel = harness.expand();
+    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('verdict');
 
     harness.failTransport(requestA); // the older dispatch's transport fails LAST
 
-    const panel = harness.panel();
-    expect(panel.dataset.state).toBe('analyzed');
-    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('verdict'); // B's verdict intact
-    expect(find(panel, 'overlay-jev-band')).not.toBeNull();
-    expect(find(panel, 'overlay-gauge')).not.toBeNull();
+    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('verdict'); // B intact
+    expect(find(harness.panel(), 'overlay-jev-band')).not.toBeNull();
   });
 
   it('clears the draft failure when its own re-dispatch succeeds (success after failure)', async () => {
@@ -816,7 +1140,7 @@ describe('transport-failure identity: out-of-order dispatches (VAL-DRAFT-018)', 
     typeText(composer(), draftText);
     await settleCapture();
     harness.failTransport(harness.requests[0]!);
-    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('error');
+    expect(find(harness.expand(), 'overlay-jev')!.dataset.jevState).toBe('error');
 
     // The user retypes the identical draft: a fresh dispatch for the SAME identity (same hash).
     typeText(composer(), draftText);
@@ -824,12 +1148,10 @@ describe('transport-failure identity: out-of-order dispatches (VAL-DRAFT-018)', 
     expect(harness.requests).toHaveLength(2);
     harness.replyFor(harness.requests[1]!);
 
-    const panel = harness.panel();
-    expect(panel.dataset.state).toBe('analyzed');
-    expect(find(panel, 'overlay-jev')!.dataset.jevState).toBe('verdict'); // the failure is gone
+    expect(find(harness.expand(), 'overlay-jev')!.dataset.jevState).toBe('verdict'); // failure gone
   });
 
-  it('an honest refusal settles its own dispatch, not the oldest one', async () => {
+  it('an honest refusal settles its own dispatch without regressing the local score', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
     typeText(composer(), 'Draft A: what is your favorite database and why does it matter?');
@@ -841,10 +1163,8 @@ describe('transport-failure identity: out-of-order dispatches (VAL-DRAFT-018)', 
     // B is refused (e.g. the min-length gate moved mid-flight) while A is still in flight.
     harness.reply({ kind: 'below-min-length', minDraftLength: 400 }, requestB);
 
-    // B's pending state cleared, so with nothing in flight the overlay leaves the analyzed spin
-    // for its now-unowned capture: the ready state with the explicit Analyze affordance.
-    expect(harness.panel().dataset.state).toBe('ready');
-    expect(find(harness.panel(), 'overlay-analyze')).not.toBeNull();
+    // The pill keeps B's local score: a refusal settles the AI half, never the local one.
+    expect(harness.pill().textContent).toBe(String(scoreDraft(requestB.snapshot).headline));
   });
 });
 
@@ -855,15 +1175,16 @@ describe('settings and key-presence updates without reload (VAL-CROSS-002, VAL-S
     typeText(composer(), 'Draft one, typed while no key was configured');
     await settleCapture();
     harness.replyFor(harness.requests[0]!, { jev: undefined, jevStatus: 'skipped-no-key' });
-    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('no-key');
+    expect(harness.pill().dataset.jevState).toBe('no-key');
 
     // The key is configured elsewhere (Options); presence reaches the tab live.
     harness.setKeyPresent(true);
     typeText(composer(), 'Draft two, typed after the key was configured');
     await settleCapture();
-    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('pending');
+    expect(harness.pill().dataset.jevState).toBe('pending');
     harness.replyFor(harness.requests.at(-1)!);
-    expect(find(harness.panel(), 'overlay-jev')!.dataset.jevState).toBe('verdict');
+    expect(harness.pill().dataset.jevState).toBe('verdict');
+    expect(find(harness.expand(), 'overlay-jev-band')).not.toBeNull();
   });
 
   it('removes the overlay when the master switch turns off and remounts once on re-enable', async () => {
@@ -884,32 +1205,46 @@ describe('settings and key-presence updates without reload (VAL-CROSS-002, VAL-S
     expect(harness.requests).toHaveLength(1); // only the earlier draft
     expect(harness.host()).toBeNull();
 
-    await harness.pushSettings({ enabled: true }, 3);
-    expect(document.querySelectorAll(HOST_SELECTOR)).toHaveLength(1); // no duplicate overlays
-    expect(harness.panel().dataset.state).toBe('empty'); // fresh state after re-enable
+    // A FRESH document for the re-enable leg: stopping and restarting a watcher across a
+    // `document.body` reset leaves the old observer alive (library/environment.md), and a leaked
+    // watcher would steal the new composer's captures. This mirrors the real enable cycle, which
+    // always starts from a clean lifecycle.
+    harness.teardown();
+    document.body.innerHTML = HOME_HTML;
+    const remounted = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(document.querySelectorAll(HOST_SELECTOR)).toHaveLength(0); // still no UI without a draft
 
     typeText(composer(), 'A draft typed after re-enabling');
     await settleCapture();
-    expect(harness.requests).toHaveLength(2);
-    harness.replyFor(harness.requests.at(-1)!);
-    expect(harness.panel().dataset.state).toBe('analyzed');
+    expect(remounted.requests).toHaveLength(1);
+    remounted.replyFor(remounted.requests[0]!);
+    expect(remounted.pill()).not.toBeNull();
+    expect(document.querySelectorAll(HOST_SELECTOR)).toHaveLength(1); // no duplicate overlays
   });
 
   it('stamps the applied settings revision on its host for observability', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
-    await harness.pushSettings({ minDraftLength: 40 }, 7);
+    // The initial revision is stamped when the host first exists (the draft brings it in).
+    typeText(composer(), 'A draft long enough to bring a host into existence');
+    await settleCapture();
+    expect(harness.host()!.dataset.settingsRevision).toBe('1');
+
+    // A setting change that keeps the draft eligible restamps the SAME host (no remount).
+    await harness.pushSettings({ minDraftLength: 12 }, 7);
     expect(harness.host()!.dataset.settingsRevision).toBe('7');
 
-    // The raised threshold applies to the current draft without any reload.
-    typeText(composer(), 'Only thirty characters remain');
-    await settleCapture();
-    expect(harness.panel().dataset.state).toBe('empty'); // 30 < 40
-    expect(harness.requests).toHaveLength(0);
+    // Raising the threshold past the current draft's length applies without any reload: the UI
+    // disappears entirely (no pill, no panel).
+    await harness.pushSettings({ minDraftLength: 400 }, 8);
+    expect(harness.host()).toBeNull();
+    expect(harness.requests).toHaveLength(1); // no new dispatch for the now-ineligible draft
   });
 });
 
-describe('composer and posting interference (VAL-DRAFT-022)', () => {
+describe('composer and posting interference (VAL-DRAFT-022, VAL-DRAFT-038)', () => {
   it('never nests inside the composer subtree and keeps page controls outside the host', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
@@ -922,12 +1257,42 @@ describe('composer and posting interference (VAL-DRAFT-022)', () => {
     expect(document.querySelector('[data-testid="tweetButtonInline"]')!.getAttribute('aria-disabled')).toBe('true');
     expect(document.querySelector('[data-testid="addMedia"]')).not.toBeNull();
   });
+
+  it('while collapsed, only the pill is interactive: page clicks pass through untouched', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft whose collapsed state must not intercept the page');
+    await settleCapture();
+    expect(harness.isExpanded()).toBe(false);
+
+    // Every native control still receives its click while only the pill is rendered.
+    for (const testid of ['tweetButtonInline', 'addMedia']) {
+      const control = pageTarget(testid);
+      clickOutside(control.element);
+      expect(control.reached(), `${testid} must still be clickable`).toBe(1);
+    }
+  });
+
+  it('the host keeps pointer-events:none; only the pill button re-enables hits', async () => {
+    const harness = startHarness();
+    await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft whose pointer discipline is inspected');
+    await settleCapture();
+
+    const css = harness.host()!.shadowRoot!.querySelector<HTMLStyleElement>('style')!.textContent ?? '';
+    expect(css).toMatch(/:host \{[^}]*pointer-events: none/);
+    expect(css).toMatch(/\.pill \{[^}]*pointer-events: auto/);
+    // The expanded panel is the single, documented exception.
+    expect(css).toMatch(/\.panel \{[^}]*pointer-events: auto/);
+  });
 });
 
 describe('repositioning (VAL-DRAFT-023)', () => {
-  it('positions the host absolutely below the composer region with viewport clamping', async () => {
+  it('positions the host absolutely with viewport clamping', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft that is anchored to the composer region');
+    await settleCapture();
     const host = harness.host()!;
     expect(host.style.position).toBe('absolute');
     expect(host.style.top).toMatch(/px$/);
@@ -937,10 +1302,12 @@ describe('repositioning (VAL-DRAFT-023)', () => {
   it('recomputes the position on window resize without duplicating the host', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft that stays scored across a window resize');
+    await settleCapture();
     const host = harness.host()!;
     const before = { top: host.style.top, left: host.style.left };
 
-    window.innerWidth = 320; // narrower than the panel: clamping must engage
+    window.innerWidth = 320; // narrower than the surface: clamping must engage
     window.dispatchEvent(new Event('resize'));
     await vi.advanceTimersByTimeAsync(16); // the resize path coalesces through rAF
 
@@ -949,14 +1316,14 @@ describe('repositioning (VAL-DRAFT-023)', () => {
     expect(document.querySelectorAll(HOST_SELECTOR)).toHaveLength(1);
   });
 
-  it('caps the panel to the viewport with internal scrolling when the window is too short (VAL-DRAFT-023)', async () => {
+  it('caps the expanded panel to the viewport with internal scrolling when the window is too short (VAL-DRAFT-023)', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
     typeText(composer(), 'A draft that is analyzed before the viewport shrinks');
     await settleCapture();
     harness.replyFor(harness.requests[0]!);
-    expect(find(harness.panel(), 'overlay-gauge')).not.toBeNull();
-    expect(harness.panel().style.maxHeight).toBe(''); // no cap at full height
+    const panel = harness.expand();
+    expect(panel.style.maxHeight).toBe(''); // no cap at full height
 
     // happy-dom reports no layout: the panel measures at its 240px design fallback, which no
     // longer fits a 120px viewport. The cap must clamp the panel INSIDE the viewport.
@@ -965,7 +1332,6 @@ describe('repositioning (VAL-DRAFT-023)', () => {
     await vi.advanceTimersByTimeAsync(16);
 
     expect(harness.panel().style.maxHeight).toBe('104px'); // 120 - 2*8 margin - 8 gap
-    expect(harness.host()!.style.top).toBe('8px'); // still anchored below the region
     expect(document.querySelectorAll(HOST_SELECTOR)).toHaveLength(1); // never a second host
 
     window.innerHeight = 700;
@@ -977,6 +1343,8 @@ describe('repositioning (VAL-DRAFT-023)', () => {
   it('stops listening after destroy()', async () => {
     const harness = startHarness();
     await vi.advanceTimersByTimeAsync(0);
+    typeText(composer(), 'A draft present when the overlay is destroyed');
+    await settleCapture();
     harness.overlay.destroy();
     expect(harness.host()).toBeNull();
     window.dispatchEvent(new Event('resize'));
@@ -985,7 +1353,7 @@ describe('repositioning (VAL-DRAFT-023)', () => {
   });
 });
 
-describe('computeAnchorPosition (pure placement math)', () => {
+describe('computeAnchorPosition (expanded panel placement math)', () => {
   const base = {
     regionRect: { top: 100, bottom: 200, left: 40 },
     overlaySize: { width: 340, height: 240 },
@@ -1022,8 +1390,6 @@ describe('computeAnchorPosition (pure placement math)', () => {
       viewport: { width: 1280, height: 500 },
       scroll: { x: 0, y: 0 },
     });
-    // Below space = 492 - 128 = 364; above space is zero. Below-first precedence holds and the
-    // capped panel ends exactly at the viewport's bottom margin.
     expect(position).toEqual({ top: 128, left: 40, maxHeight: 364 });
   });
 
@@ -1051,13 +1417,77 @@ describe('computeAnchorPosition (pure placement math)', () => {
       viewport: { width: 1280, height: 720 },
       scroll: { x: 0, y: 4000 },
     });
-    expect(position.top).toBe(4352); // folds above the region: 600 + 4000 - 8 - 240, inside the window
+    expect(position.top).toBe(4352); // folds above the region, inside the window
     expect(position.left).toBe(40);
   });
 });
 
+describe('computePillPosition (collapsed pill placement math — VAL-DRAFT-032/033)', () => {
+  const region = { top: 100, bottom: 200, left: 40, right: 640 };
+  const pill = { width: 30, height: 20 };
+  const viewport = { width: 1280, height: 720 };
+
+  it('anchors the pill inside the composer region, bottom-right, clear of the Post button', () => {
+    const position = computePillPosition({ regionRect: region, overlaySize: pill, viewport, scroll: { x: 0, y: 0 } });
+    // Right edge = region.right - 44 (clear of the Post button); bottom = region.bottom - 6.
+    expect(position.left).toBe(566); // 640 - 30 - 44
+    expect(position.top).toBe(174); // 200 - 20 - 6
+    // The pill's whole box is INSIDE the region, i.e. never over the text area above it.
+    expect(position.top).toBeGreaterThanOrEqual(region.top);
+    expect(position.top + pill.height).toBeLessThanOrEqual(region.bottom);
+  });
+
+  it('leaves the whole space BELOW the region free — where X popups grow', () => {
+    const position = computePillPosition({ regionRect: region, overlaySize: pill, viewport, scroll: { x: 0, y: 0 } });
+    expect(position.top + pill.height).toBeLessThanOrEqual(region.bottom);
+  });
+
+  it('adds the scroll offset so the pill stays anchored while the page scrolls', () => {
+    const position = computePillPosition({ regionRect: region, overlaySize: pill, viewport, scroll: { x: 0, y: 3000 } });
+    expect(position.top).toBe(3174);
+  });
+
+  it('keeps the pill inside the viewport when the composer is wider than the window', () => {
+    const position = computePillPosition({
+      regionRect: { top: 100, bottom: 200, left: 0, right: 900 },
+      overlaySize: pill,
+      viewport: { width: 320, height: 720 },
+      scroll: { x: 0, y: 0 },
+    });
+    // 900 - 30 - 44 overshoots a 320px window: the viewport clamp wins, keeping the pill on
+    // screen (right edge at 320 - 8 = 312, its documented gap from the Post button's side).
+    expect(position.left).toBe(282);
+  });
+
+  it('falls back to the panel placement when the region is too short to hold the pill', () => {
+    const position = computePillPosition({
+      regionRect: { top: 100, bottom: 110, left: 40, right: 640 },
+      overlaySize: pill,
+      viewport,
+      scroll: { x: 0, y: 0 },
+    });
+    expect(position.pillTop).toBeUndefined();
+    expect(position.top).toBe(118); // the below-the-region fallback (110 + 8 gap)
+  });
+
+  it('caps the pill when the viewport is shorter than its preferred band', () => {
+    const position = computePillPosition({
+      regionRect: { top: 100, bottom: 400, left: 40, right: 640 },
+      overlaySize: pill,
+      viewport: { width: 1280, height: 200 },
+      scroll: { x: 0, y: 0 },
+    });
+    expect(position.maxHeight).toBe(0); // clamped to stay inside the window
+  });
+
+  it('leaves the pill uncapped when the band fits the viewport', () => {
+    const position = computePillPosition({ regionRect: region, overlaySize: pill, viewport, scroll: { x: 0, y: 0 } });
+    expect(position.maxHeight).toBeNull();
+  });
+});
+
 describe('English-only copy (VAL-CROSS-016)', () => {
-  it('renders only English text across the exercised states', async () => {
+  it('renders only English text across the pill, the expanded panel and both transitions', async () => {
     const harness = startHarness({ keyPresent: false });
     await vi.advanceTimersByTimeAsync(0);
     const english = /^[A-Za-z0-9 .,:;!?%'"()\-–—/+·…]*$/;
@@ -1065,19 +1495,22 @@ describe('English-only copy (VAL-CROSS-016)', () => {
     const visibleText = (root: ParentNode): string =>
       [...root.querySelectorAll('*')].map((node) => node.textContent ?? '').join(' ');
 
-    let text = visibleText(harness.panel());
-    expect(text).toMatch(english);
-
     typeText(composer(), 'What is the one tool you stopped using this year? #focus https://example.com/x');
     await settleCapture();
-    text = visibleText(harness.panel());
-    expect(text).toMatch(english);
-    expect(text).not.toContain('Postar');
-    expect(text).not.toContain('Respondendo');
+    // The collapsed pill: the number only, plus an English accessible name.
+    expect(harness.pill().textContent).toMatch(/^\d{1,3}$/);
+    expect(harness.pill().getAttribute('aria-label')).toMatch(english);
+
+    const panel = harness.expand();
+    expect(visibleText(panel)).toMatch(english);
+    expect(visibleText(panel)).not.toContain('Postar');
+
+    // The expanded -> collapsed transition surfaces the same English pill again.
+    pressEscape();
+    expect(harness.pill().getAttribute('aria-label')).toMatch(english);
 
     harness.replyFor(harness.requests[0]!);
-    text = visibleText(harness.panel());
-    expect(text).toMatch(english);
+    expect(visibleText(harness.expand())).toMatch(english);
   });
 });
 
@@ -1105,7 +1538,11 @@ describe('structural fallback composer (VAL-DRAFT-029 overlay leg)', () => {
     watcher.start();
     await vi.advanceTimersByTimeAsync(0);
     await settleDom();
-    expect(document.querySelector(HOST_SELECTOR)).not.toBeNull();
+    expect(document.querySelector(HOST_SELECTOR)).toBeNull(); // no draft yet: no UI
+
+    typeText(document.querySelector('[role="textbox"]')!, 'A structural fallback draft long enough to score');
+    await settleCapture();
+    expect(shadowOf(OVERLAY_PILL_TESTID)).not.toBeNull();
 
     document.body.innerHTML = '<div data-testid="primaryColumn"><p>nothing editable</p></div>';
     await settleDom();

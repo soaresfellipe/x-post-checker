@@ -104,14 +104,68 @@ function collectErrors(page: Page): string[] {
   return errors;
 }
 
+const panelOf = (page: Page) => page.getByTestId('amplifyx-overlay');
+const pillOf = (page: Page) => page.getByTestId('amplifyx-overlay-pill');
+
+/**
+ * Clears the composer (select-all + backspace) and types `text`, so sequential drafts in one test
+ * are independent (a leftover previous draft would change the draft hash and the request state).
+ *
+ * Collapses first when the panel is open: the first click outside an expanded panel is
+ * deliberately captured to close it (VAL-DRAFT-037) and never reaches the composer, so the
+ * select-all shortcut only lands once the pill (collapsed state) is the surface again.
+ */
 async function typeDraft(page: Page, text: string): Promise<void> {
+  if ((await panelOf(page).count()) > 0) {
+    await page.keyboard.press('Escape');
+    await expect(panelOf(page)).toHaveCount(0);
+  }
   await page.locator(HOME_COMPOSER).click();
   await page.keyboard.press('Control+A');
   await page.keyboard.press('Backspace');
   await page.keyboard.type(text);
 }
 
-const panelOf = (page: Page) => page.getByTestId('amplifyx-overlay');
+/**
+ * Expands the collapsed panel through the score pill — the only way the detail panel (and with it
+ * the Optimizer section) comes into existence in the M5 collapsed-first model (VAL-OPT-001,
+ * VAL-DRAFT-034). Idempotent, so a flow may call it again after typing collapsed the panel.
+ *
+ * It also waits for the panel's own state to reach 'analyzed', so a panel is never read before
+ * the watcher's debounced capture (~700ms after typing) has landed.
+ */
+async function expand(page: Page): Promise<void> {
+  if ((await panelOf(page).count()) === 0) {
+    await pillOf(page).click();
+  }
+  await expect(panelOf(page)).toBeVisible();
+  await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed', { timeout: 10_000 });
+}
+
+/**
+ * Types a draft and waits until ITS capture has landed, so the panel is never read against the
+ * PREVIOUS draft.
+ *
+ * The deterministic signal is the content script's dispatch counter on the marker host: the
+ * watcher emits the capture and dispatches in the same step, and the overlay renders from that
+ * capture, so the counter reaching +1 proves the new draft is the captured one — its Optimize
+ * slot (matched by draft identity) no longer applies, and an early Optimize click could not be
+ * served from the old draft's cache (VAL-OPT-009's readiness rule, done once for every flow).
+ */
+async function typeDraftAndAwaitCapture(page: Page, text: string): Promise<void> {
+  const marker = page.locator('#amplifyx-marker-host');
+  const before = Number((await marker.getAttribute('data-watcher-dispatches')) ?? '0');
+  await typeDraft(page, text);
+  await expect(marker).toHaveAttribute('data-watcher-dispatches', String(before + 1), { timeout: 15_000 });
+  await expect(panelOf(page)).toHaveCount(0); // typing collapses the panel; only the pill is up
+}
+
+/** The fresh capture's optimizer slot: 'idle' — no Optimize result for THIS draft yet. */
+async function waitForFreshOptimizer(page: Page): Promise<void> {
+  await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'idle', {
+    timeout: 10_000,
+  });
+}
 
 test.describe('optimizer (m4-optimizer)', () => {
   test('Optimize is enabled for a qualifying draft with a key and hidden for an empty draft (VAL-OPT-001)', async ({ context }) => {
@@ -120,13 +174,15 @@ test.describe('optimizer (m4-optimizer)', () => {
     const page = await openFixture(context);
     const errors = collectErrors(page);
 
-    // Empty draft: the whole optimizer section is hidden with the panel in its empty state.
-    await expect(panelOf(page)).toHaveAttribute('data-state', 'empty');
+    // Empty draft: M5 renders NO extension UI at all, so there is no Optimize affordance.
+    await expect(page.locator('#amplifyx-overlay-host')).toHaveCount(0);
+    await expect(pillOf(page)).toHaveCount(0);
     await expect(page.getByTestId('overlay-optimizer')).toHaveCount(0);
 
-    // Qualifying draft + key: enabled Optimize.
+    // Qualifying draft + key: the collapsed pill appears, and one click reveals the enabled
+    // Optimize action inside the expanded panel.
     await typeDraft(page, FIXED_DRAFT);
-    await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed');
+    await expand(page);
     await expect(page.getByTestId('overlay-optimize')).toHaveAttribute('data-state', 'enabled');
     await expect(page.getByTestId('overlay-optimize')).toHaveText('Optimize');
     expect(errors).toEqual([]);
@@ -136,7 +192,8 @@ test.describe('optimizer (m4-optimizer)', () => {
     await interceptJev(context, () => ({ action: 'fulfill', body: VERIFIED_JEV_RESPONSE }));
     const page = await openFixture(context);
     await typeDraft(page, FIXED_DRAFT);
-    await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed');
+    await expect(pillOf(page)).toBeVisible();
+    await expand(page);
 
     const section = page.getByTestId('overlay-optimizer');
     await expect(section).toHaveAttribute('data-optimizer-state', 'no-key');
@@ -153,7 +210,8 @@ test.describe('optimizer (m4-optimizer)', () => {
     const page = await openFixture(context);
     const errors = collectErrors(page);
     await typeDraft(page, FIXED_DRAFT);
-    await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed');
+    await expect(pillOf(page)).toBeVisible();
+    await expand(page);
 
     await page.getByTestId('overlay-optimize').click();
     // The fixture replies within milliseconds, so the transient loading state can resolve before
@@ -200,7 +258,8 @@ test.describe('optimizer (m4-optimizer)', () => {
     await saveKeyViaOptions(context);
     const page = await openFixture(context);
     await typeDraft(page, FIXED_DRAFT);
-    await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed');
+    await expect(pillOf(page)).toBeVisible();
+    await expand(page);
 
     await page.getByTestId('overlay-optimize').click();
     const firstCopy = page.getByTestId('overlay-optimizer-copy').first();
@@ -229,7 +288,8 @@ test.describe('optimizer (m4-optimizer)', () => {
     await saveKeyViaOptions(context);
     const page = await openFixture(context);
     await typeDraft(page, FIXED_DRAFT);
-    await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed');
+    await expect(pillOf(page)).toBeVisible();
+    await expand(page);
 
     await page.getByTestId('overlay-optimize').click();
     await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'done');
@@ -243,14 +303,15 @@ test.describe('optimizer (m4-optimizer)', () => {
     await expect(page.getByTestId('overlay-optimizer-variant-text').first()).toHaveText(firstText);
 
     // A CHANGED draft is a new identity and pays its own (second) optimize call. The NEW capture
-    // must land before clicking: the watcher's debounce keeps the panel showing the OLD draft's
-    // analysis for ~700ms after typing, and an early Optimize click would (correctly) be served
-    // from the old draft's cache. The optimizer section flips back to 'idle' exactly when the new
-    // draft's capture invalidates the old done-slot (draft-identity match), so that attribute is
-    // the deterministic ready signal.
-    await typeDraft(page, `${FIXED_DRAFT} Try it this week.`);
-    await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'idle');
-    await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed');
+    // must land before clicking: the watcher's debounce keeps the OLD draft's analysis (and its
+    // done-slot) current for ~700ms after typing, and an early Optimize click would (correctly)
+    // be served from the old draft's cache. Typing also collapses the panel (M5 collapsed-first),
+    // so the flow re-expands it and waits for the optimizer section to flip back to 'idle' — the
+    // exact moment the new draft's capture invalidates the old done-slot (draft-identity match).
+    // That is the deterministic ready signal.
+    await typeDraftAndAwaitCapture(page, `${FIXED_DRAFT} Try it this week.`);
+    await expand(page);
+    await waitForFreshOptimizer(page);
     await page.getByTestId('overlay-optimize').click();
     await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'done');
     await expect.poll(() => optimizeCalls(calls).length, { timeout: 10_000 }).toBe(2);
@@ -265,7 +326,8 @@ test.describe('optimizer (m4-optimizer)', () => {
     // A ~270-char two-sentence draft: the story/question scaffolds push past 280 X-weighted.
     const longDraft = `${'Writing threads that people actually finish takes deliberate structure, disciplined editing, and a reason to keep reading every single line you publish online today'}. ${'The draft body continues here so the reorder variant has two sentences to work with and stays deterministic'}.`;
     await typeDraft(page, longDraft);
-    await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed');
+    await expect(pillOf(page)).toBeVisible();
+    await expand(page);
 
     await page.getByTestId('overlay-optimize').click();
     await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'done');
@@ -288,7 +350,8 @@ test.describe('optimizer (m4-optimizer)', () => {
     const page = await openFixture(context);
     const errors = collectErrors(page);
     await typeDraft(page, FIXED_DRAFT);
-    await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed');
+    await expect(pillOf(page)).toBeVisible();
+    await expand(page);
     await expect(page.getByTestId('overlay-headline')).toBeVisible(); // local score first
 
     await page.getByTestId('overlay-optimize').click();
@@ -297,13 +360,16 @@ test.describe('optimizer (m4-optimizer)', () => {
     await expect(page.getByTestId('overlay-optimizer-notice')).toContainText('untouched');
     await expect(page.getByTestId('overlay-optimize')).toHaveAttribute('data-state', 'enabled'); // retry available
 
-    // Non-blocking: local scoring stays fully rendered and the composer keeps working. The
-    // 'idle' wait proves the NEW draft's capture + analysis still ran after the failure.
+    // Non-blocking: local scoring stays fully rendered and the composer keeps working. Typing
+    // collapses the panel; the re-expanded 'idle' section proves the NEW draft's capture + local
+    // analysis still ran after the failure.
     await expect(page.getByTestId('overlay-headline')).toBeVisible();
     await expect(page.getByTestId('overlay-signals')).toBeVisible();
-    await typeDraft(page, 'Typing still works after the failure, which is what matters most here.');
-    await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'idle');
-    await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed');
+    await typeDraftAndAwaitCapture(page, 'Typing still works after the failure, which is what matters most here.');
+    await expand(page);
+    await waitForFreshOptimizer(page);
+    await expect(page.getByTestId('overlay-headline')).toBeVisible();
+    await expect(page.getByTestId('overlay-signals')).toBeVisible();
     expect(errors).toEqual([]);
   });
 
@@ -325,7 +391,8 @@ test.describe('optimizer (m4-optimizer)', () => {
     const english = /^[A-Za-z0-9 .,:;!?%'"()\-–—/+·…#\n]*$/;
 
     await typeDraft(page, FIXED_DRAFT);
-    await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed');
+    await expect(pillOf(page)).toBeVisible();
+    await expand(page);
     const sectionText = await page.getByTestId('overlay-optimizer').innerText();
     expect(sectionText).toMatch(english);
 
@@ -334,11 +401,11 @@ test.describe('optimizer (m4-optimizer)', () => {
     const doneText = await page.getByTestId('overlay-optimizer').innerText();
     expect(doneText).toMatch(english);
 
-    // A second optimize identity fails: the error state is English-only too. The 'idle' wait
-    // guarantees the new draft's capture landed first (same readiness rule as VAL-OPT-009).
-    await typeDraft(page, 'An English error-state draft that is long enough to analyze fully.');
-    await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'idle');
-    await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed');
+    // A second optimize identity fails: the error state is English-only too. Typing collapses the
+    // panel, so re-expand and wait for 'idle' — the same readiness rule as VAL-OPT-009.
+    await typeDraftAndAwaitCapture(page, 'An English error-state draft that is long enough to analyze fully.');
+    await expand(page);
+    await waitForFreshOptimizer(page);
     await page.getByTestId('overlay-optimize').click();
     await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'error');
     const errorText = await page.getByTestId('overlay-optimizer').innerText();

@@ -1,18 +1,26 @@
 /**
- * ScoreOverlay controller — the draft-analysis panel near the active composer.
+ * ScoreOverlay controller — the draft-analysis surface near the active composer.
  *
- * Ownership rules (architecture.md): the panel lives in its OWN Shadow-DOM host appended to
- * `document.body`, never inside the React-managed x.com tree; it is positioned below the
- * composer's region so it cannot cover the composer, the media control or the Post button; and it
- * captures no input — the page keeps every native behavior (VAL-DRAFT-022).
+ * COLLAPSED-FIRST (M5, user-approved after real-site testing): the always-expanded panel covered
+ * X's own mention-autocomplete and could not be scrolled, so the default surface is a COMPACT
+ * PILL showing ONLY the headline number. Clicking it expands the full detail panel; the panel
+ * collapses on an outside click (which never reaches the page), on Escape, and on ANY new user
+ * edit in the composer — that last rule is the deterministic anti-occlusion guarantee, since while
+ * typing only the pill exists and X's mention/emoji/GIF popups grow into free space below it.
+ * No qualifying draft means NO UI at all: no pill, no panel, no awaiting balloon.
  *
- * State machine (see `view-model.ts`): empty/awaiting below the minimum length, ready with the
- * explicit "Analyze" affordance when autoAnalyze is off, and analyzed with the local
- * "Algorithm signals" half rendered immediately at capture time (never waiting for Jev —
- * VAL-DRAFT-006) plus the "AI judgment" half that arrives asynchronously and is clearly
+ * Ownership rules (architecture.md): the surface lives in its OWN Shadow-DOM host appended to
+ * `document.body`, never inside the React-managed x.com tree; and pointer capture is deliberately
+ * asymmetric — the host is `pointer-events: none` always, only the pill button takes hits, and
+ * ONLY the expanded panel re-enables hits on itself (the one user-approved exception to the
+ * no-pointer-capture convention, AGENTS.md).
+ *
+ * State machine (see `view-model.ts`): `empty` below the minimum length renders nothing at all;
+ * `analyzed` renders the local "Algorithm signals" half immediately at capture time (never waiting
+ * for Jev — VAL-DRAFT-006) plus the "AI judgment" half that arrives asynchronously and is clearly
  * distinguished (VAL-DRAFT-008). Replies match drafts by hash, so the newest draft always wins
  * (VAL-DRAFT-011), and every Jev half-state (pending, verdict, no key, off, failure) renders an
- * explicit English notice while the local score stays usable.
+ * explicit English notice inside the expanded panel while the pill keeps the usable local score.
  */
 import type { DraftSnapshot } from '@/core/draft-snapshot';
 import { JEV_BAND_LABELS, type JevVerdict } from '@/core/heuristic-engine';
@@ -29,20 +37,38 @@ import {
   OVERLAY_PLACEMENT,
   OVERLAY_TESTIDS,
 } from './config';
-import { computeAnchorPosition } from './position';
+import { computeAnchorPosition, computePillPosition } from './position';
 import { deriveOverlayView, draftIdentity } from './view-model';
 import type { OptimizerSection, OptimizerSlot, OverlayView, ScoreOverlay, ScoreOverlayOptions } from './types';
 
 const STYLE = `
   /*
-   * Zero interference by construction (VAL-DRAFT-022): the host and panel never capture pointer
-   * input — clicks pass through to the page underneath — so no placement can ever block the
-   * composer, media control, Post button or any page content. The panel is a read-only surface;
-   * its buttons (Analyze, Connect Jev) are the only interactive elements and re-enable hits.
+   * Pointer discipline (AGENTS.md, the one approved exception made explicit):
+   *   - the HOST is always pointer-events: none, so it can never intercept a page click;
+   *   - the collapsed state re-enables hits ONLY on the pill itself — nothing else, so typing,
+   *     media attach, posting, timeline clicks and page scrolling pass through untouched;
+   *   - the EXPANDED panel re-enables hits on itself, because the user explicitly opened it and
+   *     the first outside click must close it without reaching the page (VAL-DRAFT-037).
    */
   :host { all: initial; position: absolute; z-index: 2147483000; pointer-events: none; }
-  .panel { pointer-events: none; }
+  .panel-root { pointer-events: none; }
+  .pill {
+    pointer-events: auto;
+    box-sizing: border-box;
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 26px; height: 20px; padding: 0 7px;
+    border: 1px solid #cfd9de; border-radius: 999px;
+    background: #ffffff; color: #0f1419;
+    font: 700 12px/1 system-ui, -apple-system, sans-serif;
+    font-variant-numeric: tabular-nums;
+    cursor: pointer; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  }
+  .pill[data-tier="good"] { color: #00876a; border-color: #00876a; }
+  .pill[data-tier="ok"] { color: #8a6400; border-color: #b58105; }
+  .pill[data-tier="weak"] { color: #c4302b; border-color: #c4302b; }
+  .pill[data-jev-state="pending"] { border-style: dashed; }
   .panel {
+    pointer-events: auto;
     box-sizing: border-box;
     width: min(340px, calc(100vw - 16px));
     max-height: none;
@@ -56,8 +82,6 @@ const STYLE = `
   .panel header { display: flex; align-items: baseline; gap: 6px; margin-bottom: 8px; }
   .panel .title { font-weight: 700; font-size: 14px; }
   .panel .subtitle { color: #536471; font-size: 12px; }
-  .empty { color: #536471; }
-  .ready { color: #0f1419; }
   .gauge { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 2px; }
   .gauge .number { font-size: 30px; font-weight: 700; line-height: 1; }
   .gauge .number[data-tier="good"] { color: #00a680; }
@@ -143,8 +167,27 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
 
   let mounted = false;
   let destroyed = false;
+  // M5: expansion is EXPLICIT (a pill click) and never happens on its own. `expanded` is
+  // per-composer-attach state, so navigating away and back always starts collapsed again.
+  let expanded = false;
+  /**
+   * True only while the panel's OWN "Analyze with AI" action is re-capturing the draft. That
+   * re-capture is not a user edit, so it must not collapse the panel the user just opened.
+   */
+  let manualCapture = false;
+  // Host dimensions by state, so a toggle never measures a stale size for the new one.
+  let collapsedSize: { width: number; height: number } = {
+    width: OVERLAY_PLACEMENT.pillWidth,
+    height: OVERLAY_PLACEMENT.pillHeight,
+  };
+  let expandedSize: { width: number; height: number } = {
+    width: OVERLAY_PLACEMENT.fallbackWidth,
+    height: OVERLAY_PLACEMENT.fallbackHeight,
+  };
   let repositionScheduled = false;
   let mutationObserver: MutationObserver | null = null;
+  /** The newest applied settings revision, restamped on every host the overlay mounts. */
+  let settingsRevision: number | undefined;
 
   // ---- host management (idempotent: exactly one host, keyed by OVERLAY_HOST_ID) ----
 
@@ -168,6 +211,9 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     }
     doc.body.append(host);
     mounted = true;
+    // Observability: the newest applied settings revision travels with whatever host exists, so
+    // a freshly mounted surface always carries the settings that produced it.
+    if (settingsRevision !== undefined) host.dataset.settingsRevision = String(settingsRevision);
     // Page layout can move the composer after mount (feed hydration, route polish): re-anchor.
     mutationObserver ??= new MutationObserver(() => scheduleReposition());
     mutationObserver.observe(doc.body ?? doc, { childList: true, subtree: true });
@@ -182,6 +228,10 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
 
   function hostElement(): HTMLElement | null {
     return mounted ? doc.getElementById(OVERLAY_HOST_ID) : null;
+  }
+
+  function panelRoot(): HTMLElement | null {
+    return hostElement()?.shadowRoot?.querySelector<HTMLElement>('.panel-root') ?? null;
   }
 
   // ---- rendering (createElement only; web-ext lint forbids innerHTML in extension code) ----
@@ -381,24 +431,10 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     );
     panel.append(header);
 
-    if (view.phase === 'empty') {
-      const box = el('div', { className: 'empty', testid: OVERLAY_TESTIDS.empty });
-      box.append(el('p', { text: OVERLAY_COPY.empty }));
-      box.append(el('p', { text: OVERLAY_COPY.emptyMinHint.replace('{n}', String(view.minDraftLength)) }));
-      panel.append(box);
-      return;
-    }
-
-    if (view.phase === 'ready') {
-      const box = el('div', { className: 'ready', testid: OVERLAY_TESTIDS.ready });
-      box.append(el('p', { text: OVERLAY_COPY.ready }));
-      const analyze = el('button', { testid: OVERLAY_TESTIDS.analyze, text: OVERLAY_COPY.analyzeButton });
-      analyze.addEventListener('click', () => options.requestAnalysis());
-      box.append(analyze);
-      panel.append(box);
-      panel.append(optimizerSection(view));
-      return;
-    }
+    // M5: the panel only ever renders the `analyzed` view — there is no awaiting/empty balloon
+    // and no score-less panel. No qualifying draft means NOTHING is mounted at all, so the
+    // composer area is left completely free (VAL-DRAFT-005/014).
+    if (view.phase !== 'analyzed') return;
 
     // analyzed: the gauge (hybrid when a verdict is in), then the two clearly separated halves.
     const gauge = el('div', { className: 'gauge', testid: OVERLAY_TESTIDS.gauge });
@@ -432,6 +468,22 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       case 'pending':
         jev.append(el('p', { className: 'pending', testid: OVERLAY_TESTIDS.jevPending, text: OVERLAY_COPY.pending }));
         break;
+      case 'ready': {
+        // VAL-SETUP-010: with autoAnalyze off, typing stayed local-only and free (zero Jev
+        // requests); the network half runs ONLY when the user activates this action, exactly once
+        // per activation.
+        jev.append(el('p', { className: 'notice', testid: OVERLAY_TESTIDS.jevNotice, text: OVERLAY_COPY.ready }));
+        const analyze = el('button', { testid: OVERLAY_TESTIDS.analyze, text: OVERLAY_COPY.analyzeButton });
+        analyze.addEventListener('click', () => {
+          // The manual trigger re-captures the draft synchronously. That re-capture is the
+          // overlay's own doing, not a user edit, so it must NOT collapse the panel the user is
+          // looking at: they asked for the verdict to appear right here (VAL-SETUP-010).
+          manualCapture = true;
+          options.requestAnalysis();
+        });
+        jev.append(analyze);
+        break;
+      }
       case 'verdict':
         if (view.jev.verdict) jev.append(verdictBlock(view.jev.verdict));
         break;
@@ -454,12 +506,33 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     panel.append(optimizerSection(view));
   }
 
+  /**
+   * The COLLAPSED PILL (VAL-DRAFT-032): the headline number and NOTHING else — no label, no
+   * breakdown, no notices. Its accessible name carries the full English sentence for assistive
+   * tech, and the AI half-state rides a data attribute plus a dashed border so the pill never
+   * grows while typing (VAL-CROSS-016 keeps the copy in the table, not here). `data-state` is
+   * always 'analyzed' — a pill exists only for a qualifying draft — and the panel carries the
+   * same attribute, so a consumer can read either surface's phase the same way.
+   */
+  function pillButton(view: Extract<OverlayView, { phase: 'analyzed' }>): HTMLElement {
+    const pill = el('button', { className: 'pill', testid: OVERLAY_TESTIDS.pill, text: String(view.headline) });
+    pill.dataset.state = 'analyzed';
+    pill.dataset.tier = headlineTier(view.headline);
+    pill.dataset.jevState = view.jev.state;
+    pill.dataset.headlineSource = view.headlineSource;
+    pill.setAttribute('aria-expanded', 'false');
+    pill.setAttribute('aria-label', OVERLAY_COPY.pillLabel.replace('{n}', String(view.headline)));
+    pill.title = OVERLAY_COPY.pillLabel.replace('{n}', String(view.headline));
+    pill.addEventListener('click', () => {
+      if (destroyed || capture === null) return;
+      expanded = true;
+      render();
+    });
+    return pill;
+  }
+
   function render(): void {
     if (!shouldMount()) return;
-    mountHost();
-    const host = hostElement();
-    if (!host) return;
-    const panelRoot = host.shadowRoot!.querySelector<HTMLElement>('.panel-root')!;
     const view = deriveOverlayView({
       settings,
       keyPresent: options.getKeyPresence(),
@@ -469,10 +542,41 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       transportFailures,
       optimizer: optimizerSlot,
     });
-    const panel = el('div', { className: 'panel', testid: OVERLAY_TESTIDS.panel });
-    renderViewInto(panel, view);
-    panelRoot.replaceChildren(panel);
+    // No qualifying draft ⇒ NO extension UI near the composer at all: the host is removed, not
+    // merely emptied (VAL-DRAFT-005/014 — no pill, no panel, no awaiting balloon).
+    if (view.phase === 'empty') {
+      if (mounted) unmountHost();
+      return;
+    }
+    mountHost();
+    const root = panelRoot();
+    const host = hostElement();
+    if (!root || !host) return;
+    host.dataset.expanded = String(expanded);
+    if (!expanded) {
+      // Remember the panel's size while it was last visible so expanding never measures a
+      // collapsed pill (the placement math measures the host box).
+      const measured = host.getBoundingClientRect();
+      if (measured.width > 0 && measured.height > 0) {
+        expandedSize = { width: measured.width, height: measured.height };
+      }
+      root.replaceChildren(pillButton(view));
+    } else {
+      const panel = el('div', { className: 'panel', testid: OVERLAY_TESTIDS.panel });
+      renderViewInto(panel, view);
+      root.replaceChildren(panel);
+    }
     reposition();
+  }
+
+  /**
+   * Collapses the expanded panel back to the pill (VAL-DRAFT-035/036/037). Idempotent and
+   * cheap: with nothing expanded it is a no-op, so the composer-edit lane can call it freely.
+   */
+  function collapse(): void {
+    if (!expanded) return;
+    expanded = false;
+    render();
   }
 
   // ---- placement ----
@@ -485,29 +589,37 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     const host = hostElement();
     if (!host || !composer) return;
     const region = findComposerRegion(composer);
+    // happy-dom's zero rects have no `right`; treat a missing edge as unmeasured so placement
+    // falls back to the left-anchored branch.
     const regionBox =
       region instanceof Element
         ? region.getBoundingClientRect()
-        : { top: 0, bottom: 0, left: 0, width: 0, height: 0 };
+        : { top: 0, bottom: 0, left: 0, width: 0, height: 0, right: 0 };
     const panel = panelElement();
-    // Measure the panel's NATURAL height: measuring a stale cap would shrink the decision input
-    // and let the cap oscillate off on the next reposition (VAL-DRAFT-023).
+    // Measure the surface's NATURAL size: the state being rendered decides which cached size is
+    // authoritative, and measuring a stale cap would shrink the decision input and let the cap
+    // oscillate off on the next reposition (VAL-DRAFT-023).
     panel?.style.removeProperty('max-height');
     const hostBox = host.getBoundingClientRect();
-    const position = computeAnchorPosition({
-      regionRect: { top: regionBox.top, bottom: regionBox.bottom, left: regionBox.left },
-      overlaySize: {
-        width: hostBox.width || OVERLAY_PLACEMENT.fallbackWidth,
-        height: hostBox.height || OVERLAY_PLACEMENT.fallbackHeight,
-      },
+    const fallbackWidth = expanded ? OVERLAY_PLACEMENT.fallbackWidth : OVERLAY_PLACEMENT.pillWidth;
+    const fallbackHeight = expanded ? OVERLAY_PLACEMENT.fallbackHeight : OVERLAY_PLACEMENT.pillHeight;
+    const width = hostBox.width || (expanded ? expandedSize.width : collapsedSize.width) || fallbackWidth;
+    const height = hostBox.height || (expanded ? expandedSize.height : collapsedSize.height) || fallbackHeight;
+    if (!expanded && hostBox.width > 0 && hostBox.height > 0) collapsedSize = { width, height };
+    const placement = {
+      regionRect: { top: regionBox.top, bottom: regionBox.bottom, left: regionBox.left, right: regionBox.right },
+      overlaySize: { width, height },
       viewport: { width: win.innerWidth, height: win.innerHeight },
       scroll: { x: win.scrollX, y: win.scrollY },
-    });
+    };
+    // The COLLAPSED pill lives in the composer furniture row; the EXPANDED panel keeps the
+    // below-the-region placement so it never covers the composer at all (VAL-DRAFT-033).
+    const position = expanded ? computeAnchorPosition(placement) : computePillPosition(placement);
     host.style.position = 'absolute';
     host.style.top = `${position.top}px`;
     host.style.left = `${position.left}px`;
-    // The height cap (null = natural size): the panel scrolls internally while capped, so the
-    // overlay stays inside the viewport at short-window geometry.
+    // The height cap (null = natural size): the surface scrolls internally while capped, so it
+    // stays inside the viewport at short-window geometry.
     if (position.maxHeight === null) panel?.style.removeProperty('max-height');
     else panel?.style.setProperty('max-height', `${position.maxHeight}px`);
   }
@@ -527,13 +639,56 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
   const onResize = (): void => scheduleReposition();
   win.addEventListener('resize', onResize);
 
+  /** Escape collapses the expanded panel back to the pill (VAL-DRAFT-035). */
+  const onKeyDown = (event: Event): void => {
+    if ((event as KeyboardEvent).key !== 'Escape') return;
+    collapse();
+  };
+  doc.addEventListener('keydown', onKeyDown, true);
+
   /**
-   * Internal scrolling for a capped panel (VAL-DRAFT-023) without breaking the zero-interference
-   * rule: the host and panel stay pointer-events:none, so a wheel over the panel targets the PAGE
-   * underneath. This listener redirects a wheel over a SCROLLABLE capped panel into the panel
-   * itself and leaves every other wheel (and every click) with the page's default behavior.
+   * The ONE user-approved exception to the extension's no-pointer-capture convention, and only
+   * while the panel is EXPANDED (VAL-DRAFT-037): the first click outside the panel collapses it
+   * and is NOT forwarded to the page, so nothing behind it activates. The next identical click
+   * finds no panel and reaches the page natively.
+   *
+   * Only the CLICK is captured, never the preceding pointerdown/mousedown: swallowing those would
+   * also cancel the default focus behaviour, so clicking the composer to keep typing (or any
+   * other focusable control) would silently do nothing. The click is where every activation
+   * actually happens — link navigation, button handlers, the Post control — so stopping it there
+   * is exactly "does not reach the page".
+   *
+   * Clicks that START inside our own shadow root (panel, its buttons, its scrolled content) are
+   * never intercepted: they are the extension's own, which is why the panel re-enables pointer
+   * events on itself while open. A click whose propagation a page handler already stopped never
+   * reaches this listener at all, so nothing is ever double-handled.
+   */
+  const onOutsideClick = (event: Event): void => {
+    if (destroyed || !expanded) return;
+    const host = hostElement();
+    if (host === null) return;
+    const root = host.shadowRoot;
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    // A composed click retargets to the host, so `path.includes(host)` is the normal case. The
+    // shadow-root check is the fallback for events that do not cross the boundary.
+    if (path.includes(host)) return;
+    if (root !== null && path.some((node) => node instanceof win.Node && root.contains(node))) return;
+    collapse();
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+  };
+  doc.addEventListener('click', onOutsideClick, true);
+
+  /**
+   * Internal scrolling for a capped panel (VAL-DRAFT-023) without breaking the pointer
+   * discipline: the host stays pointer-events:none, but while the panel is EXPANDED it takes hits,
+   * so a wheel over it naturally targets the panel and never the page. This listener only has to
+   * route the wheel for engines that do not resolve a pointer-events:none subtree from the hit
+   * test, and never while collapsed — where every wheel must belong to the page (VAL-DRAFT-038).
    */
   const onWheel = (event: WheelEvent): void => {
+    if (!expanded) return; // collapsed: the page keeps every wheel (only the pill is interactive)
     const panel = panelElement();
     if (!panel || panel.scrollHeight <= panel.clientHeight) return; // nothing to scroll (common case)
     const box = panel.getBoundingClientRect();
@@ -585,20 +740,40 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
   }
 
   return {
+    /**
+     * Collapses the expanded panel without touching the captured draft (VAL-DRAFT-036). Called on
+     * the watcher's IMMEDIATE user-edit lane, so typing collapses the panel at the keystroke
+     * instead of ~700ms later when the debounced capture lands. Idempotent: a no-op when the
+     * panel is already collapsed (or never opened).
+     */
+    collapsePanel() {
+      collapse();
+    },
     onSettings(next, revision) {
       settings = next;
+      settingsRevision = revision ?? settingsRevision;
       if (revision !== undefined) {
         const host = hostElement();
         if (host) host.dataset.settingsRevision = String(revision);
       }
       if (!next.enabled) {
         clearAnalysisState();
+        expanded = false;
         unmountHost();
         return;
       }
       render();
     },
     onDraftCaptured(event) {
+      if (manualCapture) {
+        // The user's own Analyze action: keep the panel open and let the local half repaint.
+        manualCapture = false;
+      } else {
+        // VAL-DRAFT-036 (the anti-occlusion guarantee): ANY other capture is a user edit, so the
+        // expanded panel collapses back to the pill BEFORE the new draft paints. While typing only
+        // the pill exists, which is what structurally keeps X's mention/emoji/GIF popups uncovered.
+        collapse();
+      }
       const hash = draftIdentity(event.snapshot);
       if (reply !== null && reply.hash !== hash) reply = null;
       // Failures are owned per draft: only the captured draft's own failure survives the capture
@@ -619,6 +794,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       }
       composer = event.composer;
       clearAnalysisState();
+      expanded = false; // a new composer (SPA navigation) always starts collapsed
       render();
     },
     onAnalysisDispatched(snapshot) {
@@ -686,8 +862,11 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     },
     destroy() {
       destroyed = true;
+      manualCapture = false;
       win.removeEventListener('resize', onResize);
       doc.removeEventListener('wheel', onWheel);
+      doc.removeEventListener('keydown', onKeyDown, true);
+      doc.removeEventListener('click', onOutsideClick, true);
       unmountHost();
       clearAnalysisState();
     },

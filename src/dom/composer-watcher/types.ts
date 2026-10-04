@@ -44,4 +44,12 @@ export interface ComposerWatcher {
   getSnapshot(): DraftSnapshot | null;
   onDraft(listener: (event: DraftEvent) => void): () => void;
   onComposerChange(listener: (event: ComposerChangeEvent) => void): () => void;
+  /**
+   * Synchronous notification that the user edited the composer (input / compositionend / paste),
+   * fired IMMEDIATELY on the real event — not on the debounced capture. The overlay uses it to
+   * collapse its expanded panel the instant typing starts (VAL-DRAFT-036): waiting for the
+   * ~700ms debounced capture would leave the panel covering the composer's own mention/emoji/GIF
+   * popups for the whole typing burst, which is exactly the occlusion the model forbids.
+   */
+  onUserEdit(listener: () => void): () => void;
 }

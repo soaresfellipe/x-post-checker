@@ -133,6 +133,7 @@ export default defineContentScript({
         dispatchAnalysis,
       });
       watcher.onDraft((event) => overlay.onDraftCaptured(event));
+      watcher.onUserEdit(() => overlay.collapsePanel());
       watcher.onComposerChange((event) => {
         overlay.onComposerChange(event);
         stamp();

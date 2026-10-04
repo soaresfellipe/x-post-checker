@@ -62,6 +62,8 @@ interface Harness {
   dispatches: AnalysisDispatch[];
   draftEvents: DraftEvent[];
   composerEvents: ComposerChangeEvent[];
+  /** Immediate user-edit notifications (input / compositionend / paste), pre-debounce. */
+  userEdits: number;
 }
 
 function typeText(composer: Element, text: string): void {
@@ -113,8 +115,15 @@ function composer(): Element {
     document.querySelector('[data-testid="tweetTextarea_0"]'))!;
 }
 
+/**
+ * Every watcher `start()` hands back, so afterEach can stop them. A watcher left running keeps
+ * its composer's event listeners alive across tests (the document body is reused), which would
+ * let one test's user edits be counted by the NEXT test's counters.
+ */
+const liveWatchers = new Set<ReturnType<typeof createComposerWatcher>>();
+
 function start(overrides: Partial<Parameters<typeof createComposerWatcher>[0]> = {}) {
-  const harness: Harness = { dispatches: [], draftEvents: [], composerEvents: [] };
+  const harness: Harness = { dispatches: [], draftEvents: [], composerEvents: [], userEdits: 0 };
   const watcher = createComposerWatcher({
     getMinDraftLength: () => 10,
     getAutoAnalyze: () => true,
@@ -123,7 +132,11 @@ function start(overrides: Partial<Parameters<typeof createComposerWatcher>[0]> =
   });
   watcher.onDraft((event) => harness.draftEvents.push(event));
   watcher.onComposerChange((event) => harness.composerEvents.push(event));
+  watcher.onUserEdit(() => {
+    harness.userEdits += 1;
+  });
   watcher.start();
+  liveWatchers.add(watcher);
   return { watcher, harness };
 }
 
@@ -133,6 +146,10 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Every watcher registered by `start()` must stop: `stop()` detaches the composer's listeners,
+  // and a leaked one keeps its user-edit listener attached to this document's shared body.
+  for (const watcher of liveWatchers) watcher.stop();
+  liveWatchers.clear();
   vi.useRealTimers();
   document.body.innerHTML = '';
 });
@@ -374,6 +391,134 @@ describe('paste (VAL-DRAFT-013)', () => {
     expect(harness.dispatches).toHaveLength(1);
     expect(harness.dispatches[0]!.snapshot.text).toBe('Pasted full text that is long enough to qualify here');
     expect(harness.dispatches[0]!.snapshot.charCount).toBe(52);
+  });
+});
+
+describe('immediate user-edit lane (M5 collapsed-first, VAL-DRAFT-036)', () => {
+  it('notifies synchronously on the input event, BEFORE the debounced capture fires', async () => {
+    const { harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+    const box = composer();
+
+    fire(box, 'input'); // the editor already wrote the DOM (event-after-write is the real order)
+    // The overlay collapses its expanded panel on this notification: no timer has run, so the
+    // capture (and therefore any analysis) is still pending.
+    expect(harness.userEdits).toBe(1);
+    expect(harness.draftEvents).toHaveLength(0);
+    expect(harness.dispatches).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.draftEvents).toHaveLength(1);
+    expect(harness.userEdits).toBe(1); // the debounced capture is not a second user edit
+  });
+
+  it('reports a typing burst once per edit and still debounces the capture', async () => {
+    const { harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+    const box = composer();
+
+    for (const fragment of ['Thr', 'Three ', 'Three words ', 'Three words are enough']) {
+      typeText(box, fragment); // the editor's DOM write
+      fire(box, 'input'); // ...then its input event
+      await vi.advanceTimersByTimeAsync(0); // the mutation lane absorbs this edit's own write
+    }
+    expect(harness.userEdits).toBe(4);
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.draftEvents).toHaveLength(1); // one debounced capture for the whole burst
+    expect(harness.userEdits).toBe(4);
+  });
+
+  it('reports a real paste ONCE even though paste fires input and mutates the DOM too', async () => {
+    const { harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+    const box = composer();
+
+    typeText(box, 'Pasted text that is long enough to qualify here');
+    fire(box, 'paste'); // the page's own listener then applies the text...
+    fire(box, 'input'); // ...and the editor fires its paired input event
+    await vi.advanceTimersByTimeAsync(0); // ...plus writes the DOM the mutation lane observes
+    expect(harness.userEdits).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.userEdits).toBe(1);
+    expect(harness.draftEvents).toHaveLength(1);
+    expect(harness.dispatches).toHaveLength(1);
+  });
+
+  it('still reports the real Draft.js clear, which fires NO input or paste event', async () => {
+    const { harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+    const box = composer();
+
+    typeText(box, 'A draft long enough to be analyzed and then cleared');
+    fire(box, 'input');
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.userEdits).toBe(1);
+
+    // Select-all + Backspace on real x.com: pure DOM writes, no user-edit event at all. The panel
+    // must collapse here too, otherwise it would keep covering the emptied composer.
+    draftJsClearShape(box);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(harness.userEdits).toBe(2);
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.draftEvents.at(-1)!.snapshot.charCount).toBe(0);
+    expect(harness.userEdits).toBe(2);
+  });
+
+  it('notifies on compositionend but NOT for input events during composition', async () => {
+    const { harness } = start();
+    await vi.advanceTimersByTimeAsync(0);
+    const box = composer();
+
+    fire(box, 'compositionstart');
+    typeText(box, 'composed');
+    fire(box, 'input');
+    typeText(box, 'composed text');
+    fire(box, 'input');
+    expect(harness.userEdits).toBe(0); // IME mid-composition is not a completed user edit
+
+    fire(box, 'compositionend');
+    expect(harness.userEdits).toBe(1);
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(harness.draftEvents).toHaveLength(1);
+    expect(harness.userEdits).toBe(1); // the composition's own mutations are not re-reported
+  });
+
+  it('never reports once the lane has no listeners, and stops after unsubscribe', async () => {
+    // A watcher with NO user-edit listener at all: the ambient lane must not even read the DOM
+    // (there is nothing to collapse), so a page with no overlay wired pays nothing.
+    let edits = 0;
+    const watcher = createComposerWatcher({
+      getMinDraftLength: () => 10,
+      getAutoAnalyze: () => true,
+      dispatchAnalysis: () => {},
+    });
+    watcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const box = composer();
+
+    typeText(box, 'Typed with nothing listening on the lane');
+    fire(box, 'input');
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(edits).toBe(0);
+
+    // Subscribing, then unsubscribing (teardown, or the overlay handing the lane back), stops it
+    // for good — while the capture lanes keep working throughout.
+    const count = (): void => {
+      edits += 1;
+    };
+    watcher.onUserEdit(count);
+    fire(box, 'input');
+    expect(edits).toBe(1);
+    watcher.onUserEdit(count)();
+    fire(box, 'input');
+    expect(edits).toBe(1);
+
+    // Ambient edits (no user-edit event at all) are dropped too once nothing is listening.
+    draftJsClearShape(box);
+    await vi.advanceTimersByTimeAsync(DRAFT_DEBOUNCE_MS);
+    expect(edits).toBe(1);
+    expect(watcher.getSnapshot()?.charCount).toBe(0); // the capture lanes still ran
   });
 });
 

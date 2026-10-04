@@ -47,8 +47,29 @@ export interface ParityFlow {
   expect: (outcome: FlowOutcome) => string | null;
 }
 
+/**
+ * The overlay summary a flow recorded. The surface is COLLAPSED-FIRST (M5): `pillPresent` is the
+ * default state while typing, `expanded` only after an explicit pill click, and `present` false
+ * when NO extension UI is rendered at all (empty / below-minimum draft).
+ */
 function overlayOf(outcome: FlowOutcome): Record<string, unknown> {
   return (outcome['overlay'] as Record<string, unknown>) ?? {};
+}
+
+/**
+ * The collapsed-first invariant every scored-draft overlay summary must satisfy (VAL-DRAFT-032):
+ * before the pill click the ONLY surface was a compact pill carrying the headline number alone,
+ * with no detail panel in the DOM.
+ */
+function collapsedFirstViolation(overlay: Record<string, unknown>): string | null {
+  const collapsed = (overlay['collapsed'] as Record<string, unknown> | null) ?? null;
+  if (collapsed === null) return 'the collapsed pill state was never observed before the expansion';
+  if (collapsed['present'] !== true) return 'the collapsed score pill is missing while a draft is scored';
+  if (collapsed['panelPresent'] !== false) return 'the detail panel was already rendered while typing';
+  if (collapsed['headlineOnly'] !== true) return `the pill shows more than the headline number: "${String(collapsed['text'])}"`;
+  if (overlay['state'] !== 'analyzed') return `expanded panel state: ${String(overlay['state'])}`;
+  if (overlay['expanded'] !== true) return 'the pill click did not expand the detail panel';
+  return null;
 }
 
 function badgeFor(outcome: FlowOutcome, postId: string): Record<string, unknown> | null {
@@ -65,8 +86,9 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
     expect: (outcome): string | null => {
       if (outcome['watcherState'] !== 'watching') return `watcher state: ${String(outcome['watcherState'])}`;
       if (outcome['watcherComposer'] !== 'tweetTextarea_0') return `watched composer: ${String(outcome['watcherComposer'])}`;
+      // An empty composer renders NO extension UI near it at all (M5 dropped the empty balloon).
       const overlay = overlayOf(outcome);
-      if (overlay['present'] !== true || overlay['state'] !== 'empty') return `overlay: ${JSON.stringify(overlay)}`;
+      if (overlay['present'] !== false || overlay['pillPresent'] !== false) return `overlay: ${JSON.stringify(overlay)}`;
       return null;
     },
   },
@@ -74,10 +96,12 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
     name: 'short-draft-empty-state',
     arg: { seed: seedPayload({ key: null, endpointOverride: null }), texts: { short: 'Too short' } },
     expect: (outcome): string | null => {
+      // Below minDraftLength NOTHING is rendered: no host, no pill, no panel (VAL-DRAFT-005).
       const overlay = overlayOf(outcome);
-      if (overlay['state'] !== 'empty') return `overlay state: ${String(overlay['state'])}`;
-      const text = String(overlay['emptyText'] ?? '');
-      if (!text.includes('at least 10 characters')) return `empty copy lacks the min-length hint: "${text}"`;
+      if (overlay['present'] !== false) return `overlay UI below the minimum length: ${JSON.stringify(overlay)}`;
+      if (overlay['pillPresent'] !== false || overlay['expanded'] !== false) {
+        return `overlay surfaces below the minimum length: ${JSON.stringify(overlay)}`;
+      }
       return null;
     },
   },
@@ -87,7 +111,8 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
     expect: (outcome): string | null => {
       if (outcome['watcherComposer'] !== 'tweetTextarea_1') return `watched composer: ${String(outcome['watcherComposer'])}`;
       const overlay = overlayOf(outcome);
-      if (overlay['state'] !== 'analyzed') return `overlay state: ${String(overlay['state'])}`;
+      const collapsed = collapsedFirstViolation(overlay);
+      if (collapsed !== null) return collapsed;
       if (overlay['headlineSource'] !== 'local') return `headline source: ${String(overlay['headlineSource'])}`;
       if (overlay['jevState'] !== 'no-key') return `jev state: ${String(overlay['jevState'])}`;
       if (overlay['connectJev'] !== true) return 'Connect Jev affordance missing on the reply analysis';
@@ -99,7 +124,8 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
     arg: { seed: seedPayload({ key: null, endpointOverride: null }), texts: { local: 'Local only draft: steady hands ship better software every single week.' } },
     expect: (outcome): string | null => {
       const overlay = overlayOf(outcome);
-      if (overlay['state'] !== 'analyzed') return `overlay state: ${String(overlay['state'])}`;
+      const collapsed = collapsedFirstViolation(overlay);
+      if (collapsed !== null) return collapsed;
       if (overlay['headlineSource'] !== 'local') return `headline source: ${String(overlay['headlineSource'])}`;
       if (overlay['jevState'] !== 'no-key') return `jev state: ${String(overlay['jevState'])}`;
       if (Number(overlay['signals']) < 1) return `signals: ${String(overlay['signals'])}`;
@@ -113,7 +139,8 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
     arg: { seed: seedPayload({ key: null, endpointOverride: null }), texts: { both: 'Both surfaces draft: the composer and the timeline badges coexist peacefully here.' } },
     expect: (outcome): string | null => {
       const overlay = overlayOf(outcome);
-      if (overlay['state'] !== 'analyzed') return `overlay state: ${String(overlay['state'])}`;
+      const collapsed = collapsedFirstViolation(overlay);
+      if (collapsed !== null) return collapsed;
       if (outcome['likeClickReachedPage'] !== true) return 'the native like click never reached the page (surface blocked it)';
       const post1 = badgeFor(outcome, POST_1_ID);
       if (post1 === null) return 'no badge on the question post (post 1)';
@@ -165,8 +192,11 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
     name: 'clearing',
     arg: { seed: seedPayload({ key: SYNTHETIC_KEY, endpointOverride: mockEndpoint('clearing', 'ok') }), texts: { clear: 'Clearing draft: this text will be deleted from the composer below.' } },
     expect: (outcome): string | null => {
+      // Clearing removes every extension surface near the composer (VAL-DRAFT-014).
       const overlay = overlayOf(outcome);
-      if (overlay['state'] !== 'empty') return `overlay state after clearing: ${String(overlay['state'])}`;
+      if (overlay['present'] !== false || overlay['expanded'] !== false) {
+        return `overlay after clearing: ${JSON.stringify(overlay)}`;
+      }
       return null;
     },
   },
@@ -196,12 +226,14 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
       const before = (outcome['before'] as Record<string, unknown>) ?? {};
       const tornDown = (outcome['tornDown'] as Record<string, unknown>) ?? {};
       const remounted = (outcome['remounted'] as Record<string, unknown>) ?? {};
-      if (before['overlayPresent'] !== true) return 'overlay absent before navigation';
+      if (before['overlayPresent'] !== true || before['pillPresent'] !== true) {
+        return `overlay absent before navigation: ${JSON.stringify(before)}`;
+      }
       if (tornDown['overlayGone'] !== true) return 'overlay survived the SPA teardown';
       if (tornDown['watcherState'] !== 'idle') return `watcher state after teardown: ${String(tornDown['watcherState'])}`;
       if (remounted['watcherState'] !== 'watching') return `watcher state after remount: ${String(remounted['watcherState'])}`;
       const overlay = (remounted['overlay'] as Record<string, unknown>) ?? {};
-      if (overlay['state'] !== 'empty') return `remounted overlay state: ${String(overlay['state'])}`;
+      if (overlay['present'] !== false) return `remounted overlay: ${JSON.stringify(overlay)}`;
       if (before['epoch'] !== remounted['epoch']) return 'the SPA navigation reloaded the page (epoch changed)';
       return null;
     },
@@ -250,6 +282,25 @@ export function stripVolatile(outcome: FlowOutcome): FlowOutcome {
     for (const badge of badges as Array<Record<string, unknown>>) delete badge['score'];
   }
   delete clone['mockCalls']; // call-log reads race with in-flight slow exchanges by ±1 entry
+  // `collapsed.text` is the pill's headline sampled at the moment of the click: a local score
+  // while the AI exchange is in flight, a hybrid one once it lands. Which of the two a click
+  // lands on is a race between the click and the exchange (the slower browser leg legitimately
+  // samples the local number), so the NUMBER is not cross-browser-comparable — while its SHAPE
+  // still is, and every flow's own expectation pins it (a bare 1-3 digit headline, no panel).
+  const stripCollapsedText = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const child of node) stripCollapsedText(child);
+      return;
+    }
+    if (node === null || typeof node !== 'object') return;
+    const record = node as Record<string, unknown>;
+    const collapsed = record['collapsed'] as Record<string, unknown> | null;
+    if (collapsed !== null && collapsed !== undefined && typeof collapsed === 'object') {
+      delete collapsed['text'];
+    }
+    for (const child of Object.values(record)) stripCollapsedText(child);
+  };
+  stripCollapsedText(clone);
   // `epoch` is a random per-document session id (used for teardown/remount detection): never
   // comparable across browsers. It can appear at the top level or nested in sub-probes.
   const stripEpoch = (node: unknown): void => {

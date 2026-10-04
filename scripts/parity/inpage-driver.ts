@@ -10,6 +10,11 @@
  * page-visible DOM: the open Shadow-DOM hosts (overlay, badges, popover — all attached with
  * `mode: 'open'`), the marker's data-* diagnostics, and same-origin fetches to the fixture
  * server's Jev-mock control endpoints.
+ *
+ * The overlay is COLLAPSED-FIRST (M5): the default surface is a compact pill carrying the
+ * headline alone, and the detail panel exists only after an explicit pill click. So every probe
+ * below that reads detail content EXPANDS the panel first through a real pill click — the driver
+ * exercises the same path the user does — and reads 'no UI at all' from the absent host.
  */
 
 export interface DriverArg {
@@ -43,37 +48,89 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
     }
   }
 
+  const overlayRoot = (): ShadowRoot | null => document.getElementById(HOST_ID)?.shadowRoot ?? null;
+  const overlayPill = (): Element | null =>
+    overlayRoot()?.querySelector('[data-testid="amplifyx-overlay-pill"]') ?? null;
   const overlayPanel = (): Element | null =>
-    document.getElementById(HOST_ID)?.shadowRoot?.querySelector(`[data-testid="${PANEL_TESTID}"]`) ?? null;
-  const panelState = (): string | null => overlayPanel()?.getAttribute('data-state') ?? null;
+    overlayRoot()?.querySelector(`[data-testid="${PANEL_TESTID}"]`) ?? null;
+  /** The phase of whichever overlay surface exists: the panel when expanded, else the pill. */
+  const surfaceState = (): string | null =>
+    overlayPanel()?.getAttribute('data-state') ?? overlayPill()?.getAttribute('data-state') ?? null;
+  const pillPresent = (): boolean => overlayPill() !== null;
   const marker = (): HTMLElement | null => document.getElementById(MARKER_ID);
   const markerAttr = (name: string): string | null => marker()?.getAttribute(name) ?? null;
+
+  /**
+   * The COLLAPSED surface as observed just before a flow expanded it: the headline number alone,
+   * with no panel in the DOM. Captured here (not after the click) because the pill does not
+   * survive expansion — the panel replaces it — so this is the only honest record of the state
+   * the user actually sees while typing (VAL-DRAFT-032).
+   *
+   * Only the TIMING-STABLE facts are recorded. The AI half-state rides on the pill too, but which
+   * half-state a click happens to land on is a race between the click and the exchange (a slower
+   * browser leg legitimately observes `pending` where the faster one already saw `error`), and
+   * that settled value is compared in the EXPANDED panel below instead.
+   */
+  let collapsedSeen: Record<string, unknown> | null = null;
+
+  function readCollapsed(): Record<string, unknown> {
+    const pill = overlayPill();
+    if (pill === null) return { present: false, panelPresent: overlayPanel() !== null };
+    const text = (pill.textContent ?? '').trim();
+    return {
+      present: true,
+      panelPresent: overlayPanel() !== null,
+      text,
+      headlineOnly: /^\d{1,3}$/.test(text),
+    };
+  }
+
+  /** Expands the collapsed panel with a real click on the pill — the only way it comes to exist. */
+  async function expandPanel(): Promise<void> {
+    if (overlayPanel() !== null) return;
+    const pill = await waitFor(() => overlayPill() ?? undefined, 15_000, 'collapsed score pill');
+    collapsedSeen = readCollapsed();
+    (pill as HTMLElement).click();
+    await waitFor(() => (overlayPanel() !== null ? true : null), 5_000, 'expanded detail panel');
+  }
 
   function jevSection(): Element | null {
     return overlayPanel()?.querySelector('[data-testid="overlay-jev"]') ?? null;
   }
 
+  /**
+   * The overlay's whole observable surface: the collapsed pill (the default) plus the expanded
+   * panel when a flow opened it. `present` is false when NO extension UI is rendered at all,
+   * which is what an empty or below-minimum draft produces (VAL-DRAFT-005).
+   */
   function panelSummary(): Record<string, unknown> {
+    const pill = overlayPill();
     const panel = overlayPanel();
-    if (panel === null) return { present: false };
-    const gauge = panel.querySelector('[data-testid="overlay-gauge"]');
-    const signals = panel.querySelectorAll('[data-testid="overlay-signals"] li').length;
+    if (pill === null && panel === null) {
+      return { present: false, pillPresent: false, expanded: false, collapsed: collapsedSeen };
+    }
     const jev = jevSection();
     return {
       present: true,
-      state: panel.getAttribute('data-state'),
-      headline: panel.querySelector('[data-testid="overlay-headline"]')?.textContent ?? null,
-      headlineSource: gauge?.getAttribute('data-headline-source') ?? null,
-      signals,
-      emptyText: panel.querySelector('[data-testid="overlay-empty"]')?.textContent ?? null,
-      jevState: jev?.getAttribute('data-jev-state') ?? null,
+      pillPresent,
+      expanded: panel !== null,
+      collapsed: collapsedSeen,
+      state: surfaceState(),
+      headline: panel?.querySelector('[data-testid="overlay-headline"]')?.textContent ?? pill?.textContent ?? null,
+      headlineSource:
+        panel?.querySelector('[data-testid="overlay-gauge"]')?.getAttribute('data-headline-source') ??
+        pill?.getAttribute('data-headline-source') ??
+        null,
+      signals: panel?.querySelectorAll('[data-testid="overlay-signals"] li').length ?? 0,
+      emptyText: null, // the empty balloon was REMOVED in M5: no UI at all is the empty state
+      jevState: jev?.getAttribute('data-jev-state') ?? pill?.getAttribute('data-jev-state') ?? null,
       jevNotice: jev?.querySelector('[data-testid="overlay-jev-notice"]')?.textContent ?? null,
       jevErrorReason: jev?.querySelector('.error-reason')?.textContent ?? null,
       jevPendingText: jev?.querySelector('[data-testid="overlay-jev-pending"]')?.textContent ?? null,
       jevBand: jev?.querySelector('[data-testid="overlay-jev-band"]')?.textContent ?? null,
       jevConfidence: jev?.querySelector('[data-testid="overlay-jev-confidence"]')?.textContent ?? null,
       jevWeaknesses: jev?.querySelector('[data-testid="overlay-jev-weaknesses"]')?.textContent ?? null,
-      connectJev: panel.querySelector('[data-testid="overlay-connect-jev"]') !== null,
+      connectJev: panel?.querySelector('[data-testid="overlay-connect-jev"]') !== null,
     };
   }
 
@@ -177,8 +234,9 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
     switch (flow) {
       case 'main-composer-detected': {
         await waitFor(() => (markerAttr('data-watcher-state') === 'watching' ? true : null), 20_000, 'watcher watching');
-        await waitFor(() => (document.getElementById(HOST_ID) !== null ? true : null), 10_000, 'overlay host');
-        await waitFor(() => (panelState() === 'empty' ? true : null), 10_000, 'panel empty phase');
+        // An empty composer renders NO extension UI near it at all (M5 dropped the empty balloon),
+        // so the watcher's healthy state is read from the marker, not from an overlay surface.
+        await sleep(1_500); // past the debounce: prove no surface appears with nothing typed
         return {
           watcherState: markerAttr('data-watcher-state'),
           watcherComposer: markerAttr('data-watcher-composer'),
@@ -189,7 +247,7 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
 
       case 'short-draft-empty-state': {
         await typeDraft('tweetTextarea_0', TEXTS['short']!);
-        await waitFor(() => (panelState() === 'empty' ? true : null), 10_000, 'empty phase for short draft');
+        await waitFor(() => (document.getElementById(HOST_ID) === null ? true : null), 10_000, 'no overlay UI for a short draft');
         return { overlay: panelSummary(), epoch: epoch() };
       }
 
@@ -202,7 +260,8 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
         link.click();
         await waitFor(() => (markerAttr('data-watcher-composer') === 'tweetTextarea_1' ? true : null), 10_000, 'reply composer watched');
         await typeDraft('tweetTextarea_1', TEXTS['reply']!);
-        await waitFor(() => (panelState() === 'analyzed' ? true : null), 15_000, 'reply draft analyzed');
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'reply draft analyzed');
+        await expandPanel();
         return {
           watcherComposer: markerAttr('data-watcher-composer'),
           overlay: panelSummary(),
@@ -212,13 +271,15 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
 
       case 'local-score-no-key': {
         await typeDraft('tweetTextarea_0', TEXTS['local']!);
-        await waitFor(() => (panelState() === 'analyzed' ? true : null), 15_000, 'local analysis');
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'local analysis');
+        await expandPanel();
         return { overlay: panelSummary(), epoch: epoch() };
       }
 
       case 'jev-pending-success': {
         await typeDraft('tweetTextarea_0', TEXTS['pending']!);
-        await waitFor(() => (panelState() === 'analyzed' ? true : null), 15_000, 'analyzed with pending AI');
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'analyzed with pending AI');
+        await expandPanel();
         const pending = panelSummary();
         await waitFor(() => (jevSection()?.getAttribute('data-jev-state') === 'verdict' ? true : null), 15_000, 'jev verdict');
         return { pending, settled: panelSummary(), epoch: epoch() };
@@ -226,15 +287,17 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
 
       case 'jev-failure': {
         await typeDraft('tweetTextarea_0', TEXTS['failure']!);
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 20_000, 'local analysis with a failing AI half');
+        await expandPanel();
         await waitFor(() => (jevSection()?.getAttribute('data-jev-state') === 'error' ? true : null), 20_000, 'jev error state');
         return { overlay: panelSummary(), epoch: epoch() };
       }
 
       case 'clearing': {
         await typeDraft('tweetTextarea_0', TEXTS['clear']!);
-        await waitFor(() => (panelState() === 'analyzed' ? true : null), 15_000, 'draft analyzed before clearing');
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'draft analyzed before clearing');
         await clearDraft('tweetTextarea_0');
-        await waitFor(() => (panelState() === 'empty' ? true : null), 10_000, 'panel back to empty');
+        await waitFor(() => (document.getElementById(HOST_ID) === null ? true : null), 10_000, 'overlay UI gone after clearing');
         return { overlay: panelSummary(), epoch: epoch() };
       }
 
@@ -245,7 +308,13 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
         // Draft B while A's slow response is still in flight.
         await typeDraft('tweetTextarea_0', TEXTS['staleB']!);
         await waitFor(async () => ((await mockJevCalls()) >= 2 ? true : null), 15_000, 'second Jev call');
-        await waitFor(() => (panelState() === 'analyzed' ? true : null), 15_000, 'draft B analyzed');
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'draft B analyzed');
+        await expandPanel();
+        // Wait for B's OWN verdict before the baseline snapshot: the guarantee under test is that
+        // A's late reply cannot repaint it, which is only observable once B has painted its own
+        // result. Snapshotting while B is still pending would compare a pending local headline
+        // against a settled hybrid one and call the correct behaviour a failure.
+        await waitFor(() => (jevSection()?.getAttribute('data-jev-state') === 'verdict' ? true : null), 20_000, "draft B's own verdict");
         const afterB = panelSummary();
         // A's reply lands ~3s after its request; the panel must still show B's result.
         await sleep(4_000);
@@ -262,15 +331,18 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
 
       case 'spa-teardown-remount': {
         await typeDraft('tweetTextarea_0', TEXTS['spa']!);
-        await waitFor(() => (panelState() === 'analyzed' ? true : null), 15_000, 'draft analyzed before SPA nav');
-        const before = { overlayPresent: document.getElementById(HOST_ID) !== null, epoch: epoch() };
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'draft analyzed before SPA nav');
+        // The collapsed pill IS the surface while typing: SPA teardown removes the whole host.
+        const before = { overlayPresent: document.getElementById(HOST_ID) !== null, pillPresent: pillPresent(), epoch: epoch() };
         (document.querySelector('[data-testid="navExplore"]') as HTMLElement).click();
         await waitFor(() => (document.getElementById(HOST_ID) === null ? true : null), 10_000, 'overlay torn down');
         const tornDown = { watcherState: markerAttr('data-watcher-state'), overlayGone: document.getElementById(HOST_ID) === null };
         // The explore view has no home link (like x.com's) — go BACK (popstate renders home).
         history.back();
-        await waitFor(() => (document.getElementById(HOST_ID) !== null ? true : null), 10_000, 'overlay remounted');
-        await waitFor(() => (panelState() === 'empty' ? true : null), 10_000, 'fresh empty panel');
+        // Remount is proven by the WATCHER re-attaching to the home composer (the composer starts
+        // empty, and M5 renders no overlay UI for an empty composer).
+        await waitFor(() => (markerAttr('data-watcher-state') === 'watching' ? true : null), 10_000, 'watcher remounted');
+        await waitFor(() => (markerAttr('data-watcher-composer') === 'tweetTextarea_0' ? true : null), 10_000, 'home composer rewatched');
         return {
           before,
           tornDown,
@@ -280,11 +352,18 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
 
       case 'both-surfaces': {
         await typeDraft('tweetTextarea_0', TEXTS['both']!);
-        await waitFor(() => (panelState() === 'analyzed' ? true : null), 15_000, 'draft analyzed');
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'draft analyzed');
+        await expandPanel();
+        const expandedOverlay = panelSummary();
+        // Collapse back to the pill before touching page controls: an EXPANDED panel deliberately
+        // captures the first outside click (VAL-DRAFT-037), so the page-interaction evidence below
+        // must run in the default collapsed state.
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await waitFor(() => (overlayPanel() === null ? true : null), 5_000, 'panel collapsed by Escape');
         await waitFor(() => (badgeSummary().length > 0 ? true : null), 15_000, 'badges present');
         const badges = badgeSummary();
-        // Native control pass-through: clicking a like button must reach the page (the badge
-        // hosts never capture pointer input), recorded by the fixture's click counter.
+        // Native control pass-through: clicking a like button must reach the page (neither the
+        // pill nor the badge hosts capture pointer input), recorded by the fixture's click counter.
         const article = document.querySelector('article[data-testid="tweet"]') as HTMLElement;
         (article.querySelector('[data-testid="like"]') as HTMLElement).click();
         await waitFor(
@@ -304,7 +383,7 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
         (document.getElementById(POPOVER_ID)!.shadowRoot!.querySelector('[data-testid="amplifyx-popover-close"]') as HTMLElement).click();
         await waitFor(() => (!popoverSummary().present ? true : null), 10_000, 'popover closed');
         return {
-          overlay: panelSummary(),
+          overlay: expandedOverlay,
           badges,
           likeClickReachedPage: true,
           popover,
@@ -316,7 +395,8 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
 
       case 'outage-draft': {
         await typeDraft('tweetTextarea_0', TEXTS['outage']!);
-        await waitFor(() => (panelState() === 'analyzed' ? true : null), 25_000, 'local analysis under outage');
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 25_000, 'local analysis under outage');
+        await expandPanel();
         // The local half renders immediately; the degraded notice arrives after the (refused)
         // exchange and its retries. The flow records only the SETTLED state.
         await waitFor(() => (jevSection()?.getAttribute('data-jev-state') === 'error' ? true : null), 40_000, 'degraded notice under outage');

@@ -48,12 +48,20 @@ export function failureReason(failure: JevAnalysisFailure): string {
  * must not re-introduce it. Otherwise a settled reply wins over the pending state (a re-dispatch
  * of an identical draft returns an identical result, so flipping back to a spinner would only be
  * noise); the optimistic phase decides from settings + key presence.
+ *
+ * M5: with `autoAnalyze` OFF the user, not the debounce, triggers the AI call — so this draft has
+ * NOTHING in flight and the honest half-state is `ready`, which the expanded panel renders as an
+ * explicit AI-analysis action (exactly one Jev call on activation, zero before — VAL-SETUP-010).
+ *
+ * A dispatch in flight takes precedence over the optimistic phase: the pill must read `pending`
+ * the moment the user's own Analyze action leaves the tab, not only once the reply settles.
  */
 function deriveJevSection(
   settings: Settings,
   keyPresent: boolean,
   reply: DraftAnalysis | null,
   transportFailed: boolean,
+  pendingCount: number,
 ): JevSection {
   if (!settings.jevForDrafts) return { state: 'off' };
   if (reply) {
@@ -80,6 +88,8 @@ function deriveJevSection(
   }
   if (transportFailed) return { state: 'error', reason: OVERLAY_COPY.errorReasons.transport };
   if (!keyPresent) return { state: 'no-key' };
+  if (pendingCount > 0) return { state: 'pending' };
+  if (!settings.autoAnalyze) return { state: 'ready' };
   return { state: 'pending' };
 }
 
@@ -95,19 +105,21 @@ export function deriveOverlayView(inputs: OverlayViewInputs): OverlayView {
   // Per-draft terminal-state ownership (VAL-DRAFT-018): this draft's own failure entry decides —
   // another draft's failure or result can neither add nor remove it.
   const transportFailed = transportFailures.has(hash);
-  const hasAnalysis = (pending.get(hash) ?? 0) > 0 || matchingReply !== null || transportFailed;
-  if (!hasAnalysis) return { phase: 'ready', optimizer: optimizerSection };
-
-  // Live-setting precedence again (VAL-DRAFT-021): with jevForDrafts off the panel is local-only —
-  // the verdict and the analyzer's hybrid headline are suppressed no matter what settled.
-  const verdict = settings.jevForDrafts ? matchingReply?.jev : undefined;
+  // M5 (VAL-SETUP-010): the LOCAL half is ALWAYS rendered for a qualifying draft, with or
+  // without a dispatch, a reply or an AI half-state. `autoAnalyze` gates the network call only —
+  // it never removes the pill.
   const local = matchingReply?.local ?? scoreDraft(capture);
   const jev = deriveJevSection(
     settings,
     keyPresent,
     matchingReply,
     transportFailed && !matchingReply,
+    pending.get(hash) ?? 0,
   );
+
+  // Live-setting precedence again (VAL-DRAFT-021): with jevForDrafts off the panel is local-only —
+  // the verdict and the analyzer's hybrid headline are suppressed no matter what settled.
+  const verdict = settings.jevForDrafts ? matchingReply?.jev : undefined;
   return {
     phase: 'analyzed',
     local,

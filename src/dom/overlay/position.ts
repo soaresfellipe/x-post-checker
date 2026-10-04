@@ -17,6 +17,8 @@ export interface RegionRect {
   readonly top: number;
   readonly bottom: number;
   readonly left: number;
+  /** The region's right edge, when the caller can measure it (the pill's bottom-right anchor). */
+  readonly right?: number;
 }
 
 export interface OverlaySize {
@@ -42,6 +44,14 @@ export interface AnchorPosition {
    * when the panel's natural size already fits the chosen side (VAL-DRAFT-023).
    */
   readonly maxHeight: number | null;
+  /**
+   * Present only for the COLLAPSED pill: the height band its top edge sits in, measured up from
+   * the region's BOTTOM edge (the composer furniture row). The pill is anchored there instead of
+   * below the region so it never occupies the space X's own mention/emoji/GIF popups take
+   * (VAL-DRAFT-032/033/040). Absent for the expanded panel, which keeps the below-the-region
+   * placement above.
+   */
+  readonly pillTop?: number;
 }
 
 export function computeAnchorPosition(inputs: {
@@ -79,10 +89,54 @@ export function computeAnchorPosition(inputs: {
   }
   top = Math.max(top, viewportTop);
 
-  // Horizontal: aligned with the region's left edge, clamped inside the visible window.
+  // Horizontal: the COLLAPSED PILL is anchored bottom-RIGHT of the region (VAL-DRAFT-033): its
+  // right edge sits `pillInsetRight` short of the region's right edge, leaving the Post button
+  // (the rightmost control of the composer furniture row) clear, and its top edge sits in that
+  // row's own band (see `computePillPosition`), so the text area above is never covered. When the
+  // region's right edge cannot be measured, the pill falls back to the region's left edge clamped
+  // inside the viewport (its previous placement).
   const leftEdge = scroll.x + margin;
   const rightEdge = scroll.x + viewport.width - overlaySize.width - margin;
-  const left = Math.min(Math.max(regionRect.left + scroll.x, leftEdge), Math.max(leftEdge, rightEdge));
+  const desiredLeft =
+    regionRect.right === undefined
+      ? regionRect.left + scroll.x
+      : regionRect.right + scroll.x - overlaySize.width - OVERLAY_PLACEMENT.pillInsetRight;
+  const left = Math.min(Math.max(desiredLeft, leftEdge), Math.max(leftEdge, rightEdge));
 
   return { top, left, maxHeight };
+}
+
+/**
+ * The COLLAPSED PILL's placement (VAL-DRAFT-032/033): its bottom-right corner sits inside the
+ * composer REGION — right-aligned `pillInsetRight` short of the region's right edge (clear of the
+ * Post button) and `pillInsetBottom` above the region's bottom edge, which is the top of the
+ * composer furniture row that holds the character counter and the media controls. Sitting in that
+ * band (rather than below the region) is what makes the pill structurally unable to cover the
+ * text area, the counter, the media controls or the Post button, and — because the space below is
+ * left entirely free — it can never occlude X's own mention/emoji/GIF popups, which grow
+ * downward from the composer (VAL-DRAFT-040).
+ *
+ * A region too short to hold the pill falls back to the panel's below-the-region placement, which
+ * is still inside the viewport and still outside the text area.
+ */
+export function computePillPosition(inputs: {
+  regionRect: RegionRect;
+  overlaySize: OverlaySize;
+  viewport: Viewport;
+  scroll: ScrollOffset;
+}): AnchorPosition {
+  const { regionRect, overlaySize, viewport, scroll } = inputs;
+  const regionBottom = regionRect.bottom + scroll.y;
+  const preferredTop = regionBottom - OVERLAY_PLACEMENT.pillInsetBottom - overlaySize.height;
+  if (preferredTop < regionRect.top + scroll.y || preferredTop < scroll.y) {
+    return computeAnchorPosition(inputs);
+  }
+  const position = computeAnchorPosition(inputs);
+  const maxHeight = viewport.height + scroll.y - preferredTop - OVERLAY_PLACEMENT.viewportMargin;
+  return {
+    top: preferredTop,
+    left: position.left,
+    maxHeight: maxHeight >= overlaySize.height ? null : Math.max(maxHeight, 0),
+    pillTop: preferredTop,
+  };
 }

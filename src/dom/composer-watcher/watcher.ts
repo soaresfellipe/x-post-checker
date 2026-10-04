@@ -17,7 +17,7 @@
  */
 import { DRAFT_DEBOUNCE_MS, isDraftEligible, sameDraftSnapshot } from '@/core/draft-snapshot';
 import { findAllCandidates } from '@/selectors';
-import { extractDraftSnapshot, findComposer } from './extract';
+import { extractDraftSnapshot, findComposer, getComposerText } from './extract';
 import type {
   ComposerChangeEvent,
   ComposerWatcher,
@@ -49,6 +49,18 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
   let captureForced = false;
   const draftListeners = new Set<(event: DraftEvent) => void>();
   const composerListeners = new Set<(event: ComposerChangeEvent) => void>();
+  // Immediate user-edit lane (VAL-DRAFT-036). Listeners run synchronously on the real edit event,
+  // BEFORE the debounce, so a consumer that must react instantly (the overlay collapsing its
+  // expanded panel) is never held back by the ~700ms capture delay.
+  const userEditListeners = new Set<() => void>();
+  // The composer text as of the last user-edit notification. An edit the user's own events did
+  // not report (the real Draft.js select-all + Backspace clear, which fires no input/paste event
+  // at all) is detected by the content-mutation lane and reported on the next microtask, unless
+  // the text has not actually changed since the last notification. See `notifyUserEdit`.
+  let lastNotifiedText: string | null = null;
+  // Open between a user-edit notification and the end of the task that produced it: any further
+  // lane reporting inside that window is the same edit. See `notifyUserEdit`.
+  let editWindowTimer: ReturnType<typeof setTimeout> | undefined;
 
   const isWatchable = (element: Element): boolean =>
     element.isConnected && element.matches('[role="textbox"][contenteditable="true"]');
@@ -59,6 +71,68 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
 
   function emitComposer(event: ComposerChangeEvent): void {
     for (const listener of composerListeners) listener(event);
+  }
+
+  /** Fans out to every registered user-edit listener, recording the text it was notified for. */
+  function emitUserEdit(): void {
+    lastNotifiedText = active === null ? null : getComposerText(active);
+    openEditWindow();
+    for (const listener of userEditListeners) listener();
+  }
+
+  /**
+   * One real edit is reported by up to three DOM lanes at once: the user's own
+   * input/paste/compositionend event AND the content-mutation observer that sees the very same
+   * edit's DOM write (a real keystroke writes the composer and then fires `input`; a real paste
+   * fires `paste`, then `input`, then writes). Only ONE notification may come out of that.
+   *
+   * The lanes are separated by TASK, not by order: every one of those events and the editor's
+   * write belong to the same task, and the mutation observer's callback runs at that task's end
+   * (a microtask checkpoint, before any timer). So the first lane to report opens a window that
+   * closes at the end of the task, and every lane after it in that same task is a duplicate of
+   * the edit already reported. Being order-independent matters: it keeps the guarantee in real
+   * Chrome, where the event lands first, as much as in the engines that deliver the mutation
+   * record first.
+   *
+   * An edit no user event reported at all - real x.com's select-all + Backspace clear, which
+   * fires neither input nor paste (verified live, library/x-dom.md) - is caught by the ambient
+   * pass, and a text-preserving re-render (the editor's own decorator polish) is never an edit:
+   * it carries the text of the last notification and is dropped. The notification reads the
+   * composer itself, so "notified" and "captured text" can never disagree.
+   */
+  function notifyUserEdit(ambient: boolean): void {
+    if (editWindowTimer !== undefined) return; // this task's edit is already reported
+    if (ambient) {
+      if (userEditListeners.size === 0) return; // nobody to notify: never even read the DOM
+      const text = active === null ? null : getComposerText(active);
+      if (text === lastNotifiedText) return; // a re-render, not an edit
+      // Deferred to the microtask checkpoint that delivered these mutations, so the write is
+      // complete before the composer is read. This DEFERRED pass is the reporter (the task window
+      // is still open for the lanes that fired first), so it emits rather than re-arming.
+      queueMicrotask(() => {
+        if (editWindowTimer !== undefined) return; // a user-edit event reported it meanwhile
+        const current = active === null ? null : getComposerText(active);
+        if (current === lastNotifiedText) return; // re-rendered to the same text meanwhile
+        emitUserEdit();
+      });
+      return;
+    }
+    emitUserEdit();
+  }
+
+  /** Closes the duplicate-suppression window once the reporting task is over. */
+  function openEditWindow(): void {
+    if (editWindowTimer !== undefined) clearTimeout(editWindowTimer);
+    editWindowTimer = setTimeout(() => {
+      editWindowTimer = undefined;
+    }, 0);
+  }
+
+  function closeEditWindow(): void {
+    if (editWindowTimer === undefined) return;
+    clearTimeout(editWindowTimer);
+    editWindowTimer = undefined;
+    lastNotifiedText = null;
   }
 
   function clearCaptureTimer(): void {
@@ -97,6 +171,7 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
     active = element;
     composing = false;
     captureForced = false;
+    lastNotifiedText = null;
     element.addEventListener('input', onInput);
     element.addEventListener('compositionstart', onCompositionStart);
     element.addEventListener('compositionupdate', onCompositionUpdate);
@@ -110,6 +185,7 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
     contentObserver = new MutationObserver(() => {
       if (composing) return; // composition updates mutate the DOM; compositionend schedules the capture
       scheduleCapture();
+      notifyUserEdit(true);
     });
     contentObserver.observe(element, { subtree: true, childList: true, characterData: true });
     emitComposer({ type: 'attached', composer: element });
@@ -121,6 +197,7 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
     active = null;
     composing = false;
     captureForced = false;
+    closeEditWindow();
     clearCaptureTimer();
     contentObserver?.disconnect();
     contentObserver = null;
@@ -154,8 +231,11 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
   // IME-safe input lane: composition events gate the input lane; nothing schedules while
   // composing, and compositionend schedules exactly one debounced capture. Every user-edit lane
   // marks its capture FORCED: it must emit even when the snapshot reads identical to the last one.
+  // Each lane also emits the immediate user-edit notification first, so consumers that must react
+  // synchronously (the overlay's panel collapse) never wait for the debounce.
   const onInput = (): void => {
     if (composing) return;
+    notifyUserEdit(false);
     captureForced = true;
     scheduleCapture();
   };
@@ -169,11 +249,13 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
   };
   const onCompositionEnd = (): void => {
     composing = false;
+    notifyUserEdit(false);
     captureForced = true;
     scheduleCapture();
   };
   const onPaste = (): void => {
     if (composing) return;
+    notifyUserEdit(false);
     captureForced = true;
     scheduleCapture();
   };
@@ -221,6 +303,10 @@ export function createComposerWatcher(options: ComposerWatcherOptions): Composer
     onComposerChange(listener) {
       composerListeners.add(listener);
       return () => composerListeners.delete(listener);
+    },
+    onUserEdit(listener) {
+      userEditListeners.add(listener);
+      return () => userEditListeners.delete(listener);
     },
   };
 }

@@ -11,8 +11,12 @@ import type { JevAnalysisFailure } from '@/core/jev-client/client';
 import type { Settings } from '@/core/settings-store';
 import type { ComposerChangeEvent, DraftEvent } from '@/dom/composer-watcher';
 
-/** Which Jev-half state the panel shows. `pending` = an analysis is in flight for this draft. */
-export type JevSectionState = 'pending' | 'verdict' | 'no-key' | 'off' | 'error';
+/**
+ * Which Jev-half state the panel shows. `pending` = an analysis is in flight for this draft;
+ * `ready` = nothing is in flight because `autoAnalyze` is off and the user has not asked yet
+ * (M5 / VAL-SETUP-010), which the panel renders as the explicit "Analyze with AI" action.
+ */
+export type JevSectionState = 'pending' | 'ready' | 'verdict' | 'no-key' | 'off' | 'error';
 
 export interface JevSection {
   readonly state: JevSectionState;
@@ -42,10 +46,14 @@ export type OptimizerSlot =
   | { readonly hash: string; readonly phase: 'done'; readonly optimization: Optimization }
   | { readonly hash: string; readonly phase: 'error'; readonly failure: JevAnalysisFailure };
 
-/** The pure view model for the current draft (all DOM-free; `deriveOverlayView` produces it). */
+/**
+ * The pure view model for the current draft (all DOM-free; `deriveOverlayView` produces it).
+ * M5 is COLLAPSED-FIRST: `empty` (no qualifying draft) renders NOTHING at all — no pill, no
+ * panel, no awaiting balloon — and `analyzed` is what the collapsed PILL renders from. The detail
+ * panel renders the same view, and only after an explicit pill click.
+ */
 export type OverlayView =
   | { readonly phase: 'empty'; readonly minDraftLength: number }
-  | { readonly phase: 'ready'; readonly optimizer: OptimizerSection }
   | {
       readonly phase: 'analyzed';
       readonly local: LocalScore;
@@ -62,7 +70,12 @@ export interface OverlayViewInputs {
   readonly keyPresent: boolean;
   /** Latest watcher capture; the newest draft wins (VAL-DRAFT-011). */
   readonly capture: DraftSnapshot | null;
-  /** In-flight analyze-draft dispatches, keyed by draft hash (hash -> count). */
+  /**
+   * In-flight analyze-draft dispatches, keyed by draft hash (hash -> count). No longer gates the
+   * local half (M5 renders it unconditionally) — it is retained because the AI half's `pending`
+   * state is derived from settings + key presence, and the controller still tracks these to keep
+   * its `settlePending` bookkeeping honest.
+   */
   readonly pending: ReadonlyMap<string, number>;
   /** The latest settled analyze-draft reply, when it matches the current draft's hash. */
   readonly reply: { readonly hash: string; readonly result: DraftAnalysis } | null;
@@ -86,7 +99,12 @@ export interface ScoreOverlayOptions {
   doc?: Document;
   /** Live Jev-key PRESENCE (never the key itself — the content script must not hold it). */
   getKeyPresence: () => boolean;
-  /** The explicit "Analyze" action: captures now and dispatches with trigger 'manual'. */
+  /**
+   * The explicit "Analyze with AI" action: captures now and dispatches with trigger 'manual'.
+   * Only reachable from the EXPANDED panel, and only meaningful while `autoAnalyze` is off
+   * (VAL-SETUP-010: typing then stays local-only and free; activating this runs exactly one Jev
+   * analysis for the current draft).
+   */
   requestAnalysis: () => boolean;
   /** Opens the extension Options page (via the background; content scripts cannot). */
   openOptions: () => void;
@@ -105,6 +123,14 @@ export interface ScoreOverlayOptions {
 }
 
 export interface ScoreOverlay {
+  /**
+   * Collapses an expanded panel back to the pill WITHOUT touching the captured draft (idempotent,
+   * a no-op when nothing is expanded). Wired to the watcher's immediate user-edit lane so typing
+   * collapses the panel at the keystroke rather than ~700ms later, when the debounced capture
+   * lands (VAL-DRAFT-036) — waiting out the debounce would leave the panel over the composer's own
+   * mention/emoji/GIF popups for the whole typing burst.
+   */
+  collapsePanel(): void;
   /**
    * Applies a settings snapshot (either delivery path — broadcast or storage event): enables or
    * disables the overlay per `settings.enabled`, restamps the revision on the host, and

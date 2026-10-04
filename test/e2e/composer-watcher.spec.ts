@@ -16,6 +16,18 @@ async function openFixture(context: BrowserContext): Promise<Page> {
   return page;
 }
 
+/**
+ * The signal breakdown lives INSIDE the expanded panel (M5 collapsed-first): the collapsed pill
+ * carries the headline alone, so any assertion about signals/Jev/optimizer content must open the
+ * panel by clicking the pill first.
+ */
+async function expand(page: Page): Promise<void> {
+  if ((await page.getByTestId('amplifyx-overlay').count()) > 0) return;
+  await expect(page.getByTestId('amplifyx-overlay-pill')).toBeVisible({ timeout: 5_000 });
+  await page.getByTestId('amplifyx-overlay-pill').click();
+  await expect(page.getByTestId('amplifyx-overlay')).toBeVisible();
+}
+
 async function openOptions(context: BrowserContext): Promise<Page> {
   const page = await context.newPage();
   await page.goto(await optionsUrl(context));
@@ -189,6 +201,7 @@ test.describe('composer watcher', () => {
       await expect(page.locator(REPLY_COMPOSER)).toBeVisible();
       await page.locator(REPLY_COMPOSER).click();
       await page.keyboard.type('Reply draft that is long enough');
+      await expand(page);
 
       const signals = page.getByTestId('overlay-signals');
       await expect(signals).toBeVisible({ timeout: 5_000 });
@@ -210,6 +223,7 @@ test.describe('composer watcher', () => {
 
     await page.locator(HOME_COMPOSER).click();
     await page.keyboard.type('Reply draft typed on a status page, long enough');
+    await expand(page);
     const signals = page.getByTestId('overlay-signals');
     await expect(signals).toBeVisible({ timeout: 5_000 });
     const row = signals.locator('li[data-signal-id="reply-mutual"]');
@@ -222,25 +236,30 @@ test.describe('composer watcher', () => {
     const page = await context.newPage();
     await page.goto(STATUS_URL, { waitUntil: 'domcontentloaded' });
     await expect(page.locator(MARKER_HOST)).toHaveAttribute('data-watcher-state', 'watching');
-    const replyRow = page.getByTestId('overlay-signals').locator('li[data-signal-id="reply-mutual"]');
-
-    // On the status route: reply context (route-derived, follow state never visible).
+    // On the status route: reply context (route-derived, follow state never visible). Typing
+    // collapses the panel, so each leg re-expands it before reading the breakdown.
     await page.locator(HOME_COMPOSER).click();
     await page.keyboard.type('Reply draft on the status page, long enough');
+    await expand(page);
+    const replyRow = page.getByTestId('overlay-signals').locator('li[data-signal-id="reply-mutual"]');
     await expect(replyRow).toContainText('reply - follow state not visible', { timeout: 5_000 });
 
     // Status -> home: the standalone home composer must NOT claim reply context.
+    await page.keyboard.press('Escape'); // collapse first: the captured click must not clear the editor
     await page.locator('[data-testid="navHome"]').click();
     await expect(page.locator('[data-testid="statusView"]')).toHaveCount(0);
     await page.locator(HOME_COMPOSER).click();
     await page.keyboard.type('Draft typed back on the home timeline');
+    await expand(page);
     await expect(replyRow).toContainText('not a reply', { timeout: 5_000 });
 
     // Home -> status again (browser back through the SPA history): the route flips it back.
+    await page.keyboard.press('Escape');
     await page.goBack();
     await expect(page.locator('[data-testid="statusView"]')).toBeVisible();
     await page.locator(HOME_COMPOSER).click();
     await page.keyboard.type('Reply draft on the status page again');
+    await expand(page);
     await expect(replyRow).toContainText('reply - follow state not visible', { timeout: 5_000 });
   });
 });

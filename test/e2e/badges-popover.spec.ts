@@ -396,21 +396,41 @@ test.describe('target badges (fixture E2E)', () => {
     const badge1 = page.locator(`${BADGE}[data-amplifyx-post-id="${POST_1}"]`);
     await expect(badge1).toBeVisible();
 
-    // Type an eligible draft: the overlay mounts near the composer while the badges stay put.
+    // Type an eligible draft: the COLLAPSED PILL mounts near the composer while the badges stay
+    // put — the pill is the whole overlay surface while typing (M5 collapsed-first).
     const composer = page.locator('[data-testid="tweetTextarea_0"]');
     await composer.click();
     await page.keyboard.type('What changed my year? One daily checklist that actually sticks.');
+    const pill = page.getByTestId('amplifyx-overlay-pill');
+    await expect(pill).toBeVisible({ timeout: 5_000 });
+    await expect(badge1).toBeVisible();
+
+    // Both surfaces remain usable together. Expanding the panel does not disturb the badges, and
+    // the panel collapses back to the pill (Escape) so the badge is reachable again — a click
+    // outside an EXPANDED panel is deliberately captured and never reaches the page (the
+    // user-approved VAL-DRAFT-037 exception), which is exactly why a badge cannot be
+    // mis-activated by a click aimed at the panel.
+    await pill.click();
     const overlay = page.getByTestId('amplifyx-overlay');
     await expect(overlay).toBeVisible();
     await expect(badge1).toBeVisible();
-
-    // Both surfaces remain usable together: the badge popover opens over the timeline and the
-    // overlay keeps its state; closing the popover leaves the overlay untouched.
+    await page.keyboard.press('Escape');
+    await expect(overlay).toHaveCount(0);
     await badge1.click();
     await expect(page.locator(POPOVER)).toBeVisible();
-    await expect(overlay).toBeVisible();
+    await expect(pill).toBeVisible(); // the overlay is untouched by the popover
     await page.keyboard.press('Escape');
     await expect(page.locator(POPOVER)).toHaveCount(0);
-    await expect(overlay).toBeVisible();
+    await expect(pill).toBeVisible();
+
+    // The pill's collapsed pass-through still works: typing collapses the panel and keeps the
+    // badges untouched, so the two surfaces never interfere in EITHER state.
+    await composer.click();
+    await page.keyboard.press('Control+A');
+    await page.keyboard.press('Backspace');
+    await page.keyboard.type('A second draft while the badges are on screen, long enough');
+    await expect(overlay).toHaveCount(0);
+    await expect(pill).toBeVisible({ timeout: 5_000 });
+    await expect(badge1).toBeVisible();
   });
 });

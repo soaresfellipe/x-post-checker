@@ -3,7 +3,7 @@ import { DRAFT_DEBOUNCE_MS, type DraftSnapshot } from '../../src/core/draft-snap
 import { draftCacheKey } from '../../src/core/jev-client/hash';
 import { DEFAULT_SETTINGS, type Settings } from '../../src/core/settings-store';
 import type { HookVariant, Optimization, OptimizationResult } from '../../src/core/optimizer';
-import { OVERLAY_HOST_ID, OVERLAY_TESTID, createScoreOverlay, type ScoreOverlay } from '../../src/dom/overlay';
+import { OVERLAY_HOST_ID, OVERLAY_PILL_TESTID, createScoreOverlay, type ScoreOverlay } from '../../src/dom/overlay';
 import { createComposerWatcher } from '../../src/dom/composer-watcher';
 
 /**
@@ -12,6 +12,10 @@ import { createComposerWatcher } from '../../src/dom/composer-watcher';
  * clipboard copy (VAL-OPT-004) that never touches the composer (VAL-OPT-005), the over-limit
  * flag (VAL-OPT-007), per-draft identity (stale replies never paint), and the reset on draft
  * change that makes repeat Optimize a cache-served no-op at the API layer (VAL-OPT-009).
+ *
+ * Migrated to the M5 collapsed-first model: the section lives INSIDE the expanded panel, so every
+ * flow now begins with a pill click, and typing a new draft collapses the panel (which each test
+ * re-expands). Coverage is unchanged — only its location in the interaction.
  */
 
 const HOME_HTML = `
@@ -91,6 +95,7 @@ interface Harness {
   pushSettings(partial: Partial<Settings>): void;
   optimizeReply(result: OptimizationResult, draft?: DraftSnapshot): void;
   optimizeFail(draft?: DraftSnapshot): void;
+  /** The expanded panel, clicking the pill first when collapsed (the only way to get it). */
   panel(): HTMLElement;
 }
 
@@ -149,10 +154,16 @@ function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: bo
       overlay.onOptimizeFailed(draft ?? optimizeRequests.at(-1)!);
     },
     panel(): HTMLElement {
-      const panel = document
-        .querySelector<HTMLElement>(HOST_SELECTOR)
-        ?.shadowRoot?.querySelector<HTMLElement>(`[data-testid="${OVERLAY_TESTID}"]`);
-      if (!panel) throw new Error('overlay panel is not mounted');
+      const shadow = document.querySelector<HTMLElement>(HOST_SELECTOR)?.shadowRoot;
+      if (shadow === null || shadow === undefined) throw new Error('the overlay host is not mounted');
+      if (shadow.querySelector(`[data-testid="amplifyx-overlay"]`) === null) {
+        // M5: the panel only exists after an explicit pill click.
+        const pill = shadow.querySelector<HTMLElement>(`[data-testid="${OVERLAY_PILL_TESTID}"]`);
+        if (pill === null) throw new Error('the score pill is not rendered');
+        pill.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
+      }
+      const panel = shadow.querySelector<HTMLElement>('[data-testid="amplifyx-overlay"]');
+      if (panel === null) throw new Error('the pill click did not expand the detail panel');
       return panel;
     },
   };
@@ -163,8 +174,14 @@ function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: bo
 const find = (root: ParentNode, testid: string): HTMLElement | null =>
   root.querySelector<HTMLElement>(`[data-testid="${testid}"]`);
 
+/**
+ * A bubbling, composed click. happy-dom normalizes a `MouseEvent` click init to `composed:false`
+ * (a click never crosses a shadow boundary that way), which would hide the click's real path from
+ * the overlay's "is this click mine?" check — so the composed flag is set through the base `Event`
+ * constructor, which keeps it.
+ */
 const click = (element: HTMLElement): void => {
-  element.dispatchEvent(new Event('click', { bubbles: true }));
+  element.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
 };
 
 beforeEach(() => {
@@ -214,10 +231,14 @@ describe('Optimize availability (VAL-OPT-001)', () => {
     expect(find(section, 'overlay-optimizer-notice')!.textContent).toMatch(/off in Settings/);
   });
 
-  it('hides the Optimize section entirely for an empty (below-minimum) draft', async () => {
-    const harness = startHarness();
+  it('renders no overlay UI at all for an empty (below-minimum) draft', async () => {
+    startHarness();
     await vi.advanceTimersByTimeAsync(0);
-    expect(find(harness.panel(), 'overlay-optimizer')).toBeNull();
+    // M5: no qualifying draft means no host, no pill and no panel — so there is no Optimize
+    // affordance anywhere near the composer (the old panel rendered an empty state instead).
+    expect(document.querySelector(HOST_SELECTOR)).toBeNull();
+    expect(find(document, 'overlay-optimizer')).toBeNull();
+    expect(find(document, OVERLAY_PILL_TESTID)).toBeNull();
   });
 });
 

@@ -1,7 +1,7 @@
 /**
- * The one place every ScoreOverlay UI constant and English string lives: host identity, panel
- * metrics, placement margins and ALL user-facing copy (the mission's English-only requirement
- * makes a single copy table the audit surface — VAL-CROSS-016).
+ * The one place every ScoreOverlay UI constant and English string lives: host identity, pill and
+ * panel metrics, placement margins and ALL user-facing copy (the mission's English-only
+ * requirement makes a single copy table the audit surface — VAL-CROSS-016).
  */
 
 /** Light-DOM host identity: appended to document.body, exactly like the marker. */
@@ -10,10 +10,14 @@ export const OVERLAY_HOST_ID = 'amplifyx-overlay-host';
 /** Shadow-DOM panel test id (plus the data-testid of every sub-element, for tests and E2E). */
 export const OVERLAY_TESTID = 'amplifyx-overlay';
 
+/** The collapsed pill's test id: the ONLY surface that exists while the user types. */
+export const OVERLAY_PILL_TESTID = 'amplifyx-overlay-pill';
+
 export const OVERLAY_TESTIDS = {
   panel: OVERLAY_TESTID,
+  pill: OVERLAY_PILL_TESTID,
   empty: 'overlay-empty',
-  ready: 'overlay-ready',
+  /** The explicit AI-analysis action inside the expanded panel (autoAnalyze off). */
   analyze: 'overlay-analyze',
   gauge: 'overlay-gauge',
   headline: 'overlay-headline',
@@ -26,6 +30,8 @@ export const OVERLAY_TESTIDS = {
   jevSuggestions: 'overlay-jev-suggestions',
   jevNotice: 'overlay-jev-notice',
   connectJev: 'overlay-connect-jev',
+  /** Which AI judgment state the pill is currently advertising (pending/verdict/no-key/off/error). */
+  pillJevState: 'overlay-pill-jev-state',
   optimizer: 'overlay-optimizer',
   optimize: 'overlay-optimize',
   optimizerNotice: 'overlay-optimizer-notice',
@@ -45,6 +51,18 @@ export const OVERLAY_TESTIDS = {
 export const OVERLAY_PLACEMENT = Object.freeze({
   gap: 8,
   viewportMargin: 8,
+  /**
+   * The collapsed pill's bottom-right offset INSIDE the composer region (px). Keeping the pill
+   * inside the region — the composer furniture row holding the character counter, the media
+   * controls and the Post button — is what structurally guarantees VAL-DRAFT-033: the pill can
+   * never overlap the text area (it sits in the furniture row's own band) and it deliberately
+   * stops short of the Post button's own box, which is the rightmost control in that row.
+   */
+  pillInsetRight: 44,
+  pillInsetBottom: 6,
+  /** The pill's compact footprint, used for measurement fallback where no layout engine runs. */
+  pillWidth: 44,
+  pillHeight: 22,
   /** Measurement fallbacks for engines without layout (happy-dom): the panel's design size. */
   fallbackWidth: 340,
   fallbackHeight: 240,
@@ -65,10 +83,21 @@ export const OPTIMIZER_COPY_RESET_MS = 1500;
 export const OVERLAY_COPY = Object.freeze({
   panelTitle: 'AmplifyX',
   panelSubtitle: 'Draft analysis',
+  /**
+   * The collapsed pill's copy. The VISIBLE label is the headline number ALONE (VAL-DRAFT-032):
+   * the accessible name lives in `pillLabel` so screen readers get the full sentence while the
+   * surface itself shows nothing but the score.
+   */
+  pillLabel: 'AmplifyX viral potential score: {n} out of 100. Activate for the full draft analysis.',
   empty: 'Type a post to see its viral-potential score.',
   emptyMinHint: 'Drafts need at least {n} characters to analyze.',
-  ready: 'Your draft is ready to analyze.',
-  analyzeButton: 'Analyze',
+  /**
+   * The AI-judgment half's "nothing is running" copy (autoAnalyze off, jevForDrafts on). It
+   * explains that the pill's local score is real and complete while the network half waits for
+   * the explicit action — never that AI already ran.
+   */
+  ready: 'Local score ready. AI judgment runs only when you ask for it.',
+  analyzeButton: 'Analyze with AI',
   gaugeLabel: 'Viral potential',
   hybridNote: 'Algorithm signals + AI judgment',
   localNote: 'Algorithm signals only',

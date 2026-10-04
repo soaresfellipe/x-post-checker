@@ -184,7 +184,11 @@ export function renderFixtureHtml(now: number = Date.now()): string {
         </div>
         <label data-testid="tweetTextarea_0_label">O que está acontecendo?</label>
       </div>
+      <!-- The composer furniture row, left to right: media control, character counter, Post
+           button (x.com's real order; the real counter exposes no stable data-testid, so the
+           fixture names it explicitly for the pill-placement geometry assertions). -->
       <button type="button" data-testid="addMedia" aria-label="Adicionar midia"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M0 0h24v24H0z" fill="none"/></svg></button>
+      <span data-testid="charCounter">0</span>
       <button type="button" data-testid="tweetButtonInline" aria-disabled="true">Postar</button>
     </div>
     <div role="tablist" data-testid="homeTabs">
@@ -342,6 +346,9 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
       '<div data-testid="tweetTextarea_1" role="textbox" contenteditable="true" aria-label="Texto do seu post" class="public-DraftEditor-content"></div>' +
       '</div>' +
       '<button type="button" data-testid="addMedia" aria-label="Adicionar midia"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M0 0h24v24H0z" fill="none"/></svg></button>' +
+      // Same furniture row as the home composer: media control, character counter, Post button —
+      // the row the collapsed score pill anchors into.
+      '<span data-testid="charCounter">0</span>' +
       '<button type="button" data-testid="tweetButton" aria-disabled="false">Responder</button>' +
       '</div>' +
       '</div>';

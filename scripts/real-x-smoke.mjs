@@ -253,26 +253,41 @@ async function main() {
     );
 
     // ---- 4. Draft overlay on a typed synthetic draft (NEVER submitted) ----
+    // M5 COLLAPSED-FIRST: while typing the ONLY extension UI near the composer is a compact pill
+    // carrying the headline number alone. The detail panel (signals, AI notice, optimizer) exists
+    // only after an explicit click on that pill, so both states are recorded separately.
     await composer.click(); // focus the composer TEXTBOX (not a post control) to expand it
     await page.keyboard.type(SMOKE_DRAFT, { delay: 12 });
-    const panel = page.locator('#amplifyx-overlay-host [data-testid="amplifyx-overlay"]');
-    const panelAppeared = await panel.waitFor({ state: 'visible', timeout: 10_000 }).then(() => true, () => false);
-    const panelState = panelAppeared
-      ? await waitFor(async () => {
-          const state = await page.locator('#amplifyx-overlay-host [data-testid="amplifyx-overlay"]').getAttribute('data-state');
+    const pill = page.locator('#amplifyx-overlay-host [data-testid="amplifyx-overlay-pill"]');
+    const pillAppeared = await pill.waitFor({ state: 'visible', timeout: 10_000 }).then(() => true, () => false);
+    const pillText = pillAppeared ? await pill.innerText().catch(() => '') : '';
+    const panelAbsentWhileTyping = (await page.locator('#amplifyx-overlay-host [data-testid="amplifyx-overlay"]').count()) === 0;
+    record(
+      'draft-overlay-pill-collapsed',
+      pillAppeared && panelAbsentWhileTyping && /^\d{1,3}$/.test(pillText.trim()),
+      `pill="${pillText.trim()}" detailPanelPresentWhileTyping=${!panelAbsentWhileTyping}`,
+    );
+
+    // Expand through the pill — the only way the detail panel comes into existence.
+    let panelState = null;
+    let headline = '';
+    let signalCount = 0;
+    let jevNotice = '';
+    if (pillAppeared) {
+      await pill.click();
+      const panel = page.locator('#amplifyx-overlay-host [data-testid="amplifyx-overlay"]');
+      const panelAppeared = await panel.waitFor({ state: 'visible', timeout: 5_000 }).then(() => true, () => false);
+      if (panelAppeared) {
+        panelState = await waitFor(async () => {
+          const state = await panel.getAttribute('data-state');
           return state === 'analyzed' ? 'analyzed' : null;
-        }, 15_000)
-      : null;
-    const headline = panelAppeared
-      ? await page.locator('#amplifyx-overlay-host [data-testid="overlay-headline"]').innerText().catch(() => '')
-      : '';
+        }, 15_000);
+        headline = await page.locator('#amplifyx-overlay-host [data-testid="overlay-headline"]').innerText().catch(() => '');
+        signalCount = await page.locator('#amplifyx-overlay-host [data-testid="overlay-signals"] li').count();
+        jevNotice = await page.locator('#amplifyx-overlay-host [data-testid="overlay-jev-notice"]').innerText().catch(() => '');
+      }
+    }
     const headlineScore = Number.parseInt(headline, 10);
-    const signalCount = panelAppeared
-      ? await page.locator('#amplifyx-overlay-host [data-testid="overlay-signals"] li').count()
-      : 0;
-    const jevNotice = panelAppeared
-      ? await page.locator('#amplifyx-overlay-host [data-testid="overlay-jev-notice"]').innerText().catch(() => '')
-      : '';
     record(
       'draft-overlay-score',
       panelState === 'analyzed' && Number.isInteger(headlineScore) && headlineScore >= 0 && headlineScore <= 100 && signalCount > 0,
@@ -281,11 +296,18 @@ async function main() {
     record(
       'draft-ai-off-local-only',
       jevNotice.startsWith('Local signals only'),
-      'no key in this profile: the overlay shows the local-only notice (AI structurally off)',
+      'no key in this profile: the expanded panel shows the local-only notice (AI structurally off)',
     );
 
-    // Evidence of the analyzed panel BEFORE the clear (redacted), then the clear-and-reset step.
+    // Evidence of the collapsed pill and the expanded panel BEFORE the clear (redacted), then the
+    // clear-and-reset step.
     await page.addStyleTag({ content: REDACTION_STYLESHEET });
+    await page.keyboard.press('Escape'); // collapse back to the pill for the collapsed evidence
+    await page
+      .locator('#amplifyx-overlay-host')
+      .screenshot({ path: join(EVIDENCE_DIR, 'overlay-pill-collapsed-redacted.png') })
+      .catch(() => {});
+    await pill.click();
     await page
       .locator('#amplifyx-overlay-host')
       .screenshot({ path: join(EVIDENCE_DIR, 'overlay-analyzed-redacted.png') })
@@ -295,8 +317,8 @@ async function main() {
     // select-all deletion through its own DOM writes with NO input event (verified live
     // 2026-10-03: the clear produced childList mutations with the text dropping to empty and
     // zero beforeinput/input events), so the watcher must pick the reset up from composer
-    // content mutations. The overlay must leave the analyzed state for the empty/hidden state
-    // within a bounded window (~700ms debounce + live-site margin), never stick.
+    // content mutations. Every overlay surface must disappear within a bounded window (~700ms
+    // debounce + live-site margin), never stick to the last analyzed state.
     let draftCleared = false;
     let overlayReset = false;
     let resetDetail = '';
@@ -309,20 +331,17 @@ async function main() {
         resetDetail = 'composer never confirmed empty — reset not assessable';
       } else {
         const clearedAt = Date.now();
-        const reset = await waitFor(async () => {
-          const panel = page.locator('#amplifyx-overlay-host [data-testid="amplifyx-overlay"]');
-          if ((await panel.count()) === 0) return 'hidden'; // overlay unmounted: also a reset
-          const state = await panel.getAttribute('data-state');
-          return state === 'empty' ? 'empty' : null;
-        }, 10_000, 300);
-        overlayReset = reset === 'empty' || reset === 'hidden';
+        // M5: clearing removes EVERY extension surface near the composer (VAL-DRAFT-014) — there
+        // is no empty panel and no pill left behind, so the host itself must disappear.
+        const reset = await waitFor(
+          async () => ((await page.locator('#amplifyx-overlay-host').count()) === 0 ? 'no-ui' : null),
+          10_000,
+          300,
+        );
+        overlayReset = reset === 'no-ui';
         resetDetail = overlayReset
-          ? `overlay reset to ${reset} in ${Date.now() - clearedAt}ms (bounded window 10s)`
-          : `overlay stuck at state=${(await page.locator('#amplifyx-overlay-host [data-testid="amplifyx-overlay"]').getAttribute('data-state').catch(() => 'host-gone')) ?? 'n/a'} for the full 10s window`;
-        await page
-          .locator('#amplifyx-overlay-host')
-          .screenshot({ path: join(EVIDENCE_DIR, 'overlay-after-clear-redacted.png') })
-          .catch(() => {});
+          ? `all overlay UI removed in ${Date.now() - clearedAt}ms (bounded window 10s)`
+          : `overlay stuck with ${await page.locator('#amplifyx-overlay-host').count()} host(s) present for the full 10s window`;
       }
     } catch {
       draftCleared = false;
@@ -365,13 +384,21 @@ async function main() {
 
     // ---- 7. Evidence (captured while the surfaces are still live, structural facts only;
     // redacted screenshots — the redaction stylesheet was applied before the clear step) ----
-    if (panelAppeared) {
-      await page.locator('#amplifyx-overlay-host').screenshot({ path: join(EVIDENCE_DIR, 'overlay-redacted.png') }).catch(() => {});
-      writeFileSync(
-        join(EVIDENCE_DIR, 'overlay-dom.json'),
-        JSON.stringify({ panelState, headlineScore: Number.isInteger(headlineScore) ? headlineScore : null, signalCount, aiNotice: jevNotice }, null, 2),
-      );
-    }
+    writeFileSync(
+      join(EVIDENCE_DIR, 'overlay-dom.json'),
+      JSON.stringify(
+        {
+          pillHeadline: pillText.trim(),
+          detailPanelPresentWhileTyping: !panelAbsentWhileTyping,
+          panelState,
+          headlineScore: Number.isInteger(headlineScore) ? headlineScore : null,
+          signalCount,
+          aiNotice: jevNotice,
+        },
+        null,
+        2,
+      ),
+    );
     if (badgeCount > 0) {
       await page.locator('button[data-testid="amplifyx-target-badge"]').first().screenshot({ path: join(EVIDENCE_DIR, 'badge-redacted.png') }).catch(() => {});
       const badgeFacts = await page.evaluate(() => {
