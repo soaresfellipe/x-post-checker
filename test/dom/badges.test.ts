@@ -157,7 +157,10 @@ describe('badge eligibility and content (VAL-TARGET-005/006, DOM tier)', () => {
   it('gates the pure scorer + threshold: eligible at the boundary, ineligible and below-threshold excluded', () => {
     document.body.innerHTML = renderPost(FIXTURE_POSTS[0]!, NOW);
     const article = document.querySelector('article')!;
-    const score = scoreTarget(extractPostSnapshot(article, { now: NOW })!);
+    // The fixed clock rides THROUGH to the scorer: scoreTarget's default `now` is the real
+    // clock, and this fixed-dated fixture post crosses the exact 48h gate in real time
+    // (observed 2026-10-05 10:00Z) — the test would silently flip to ineligible.
+    const score = scoreTarget(extractPostSnapshot(article, { now: NOW })!, NOW);
     expect(score.eligible).toBe(true);
     expect(isBadgeEligible(score, score.headline)).toBe(true); // >= threshold (at the boundary)
     expect(isBadgeEligible(score, score.headline + 1)).toBe(false); // strictly above -> no badge
@@ -192,7 +195,7 @@ describe('badge eligibility and content (VAL-TARGET-005/006, DOM tier)', () => {
   it('derives the reason from the top contributing signal (deterministic tie-break)', () => {
     document.body.innerHTML = renderFixtureHtml(NOW);
     const article = document.querySelector('article')!; // post 1: velocity (+14) is the top signal
-    const score = scoreTarget(extractPostSnapshot(article, { now: NOW })!);
+    const score = scoreTarget(extractPostSnapshot(article, { now: NOW })!, NOW); // fixed clock: see the 48h-gate note above
     expect(badgeReason(score)).toBe(BADGE_COPY.reasons.velocity);
   });
 
@@ -633,7 +636,7 @@ describe('view-model helpers', () => {
     document.body.innerHTML = renderFixtureHtml(NOW);
     const article = document.querySelector('article')!;
     const snapshot = extractPostSnapshot(article, { now: NOW })!;
-    const quiet = scoreTarget({ ...snapshot, likeCount: 0, replyCount: 0, repostCount: 0, verified: false, inNetwork: false, text: 'plain statement' });
+    const quiet = scoreTarget({ ...snapshot, likeCount: 0, replyCount: 0, repostCount: 0, verified: false, inNetwork: false, text: 'plain statement' }, NOW);
     expect(badgeReason(quiet)).toBe(BADGE_COPY.reasons.eligibility);
   });
 

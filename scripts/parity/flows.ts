@@ -1,14 +1,16 @@
 /**
  * The parity flow registry: every flow's seed state, draft texts, and the Node-side expectations
- * each browser leg must satisfy on its own (VAL-DRAFT-025, VAL-CROSS-010). The runner executes
- * the same registry for Chromium (Playwright) and Firefox (web-ext + Marionette); afterwards the
- * two outcome sets are compared for equality (stable fields only — see run.ts).
+ * each browser leg must satisfy on its own (VAL-DRAFT-025, VAL-CROSS-009, VAL-CROSS-010). The
+ * runner executes the same registry for Chromium (Playwright) and Firefox (web-ext + Marionette);
+ * afterwards the two outcome sets are compared for equality (stable fields only — see run.ts).
  *
  * Flows run in order and share one browser profile per leg, so they are grouped: no-key flows
  * first (no key has been seeded yet), then keyed flows (synthetic key + fixture-hosted Jev mock),
  * then the outage flows (real endpoint, blocked by the refusal proxy). Every flow's seed fully
  * rewrites settings + key + endpoint override, and every draft text is unique, so verdict caches
- * and revision gates carry no state between flows.
+ * and revision gates carry no state between flows. The flows exercise the M6 design-1b row model
+ * (in-flow 36px status row, inline expansion, outside-click forward, edit/Escape collapse, and
+ * the three-theme live switch).
  */
 import type { DriverArg, FlowOutcome } from './inpage-driver';
 
@@ -48,27 +50,40 @@ export interface ParityFlow {
 }
 
 /**
- * The overlay summary a flow recorded. The surface is COLLAPSED-FIRST (M5): `pillPresent` is the
- * default state while typing, `expanded` only after an explicit pill click, and `present` false
- * when NO extension UI is rendered at all (empty / below-minimum draft).
+ * The overlay summary a flow recorded. The surface is the M6 DESIGN-1B ROW MODEL: `rowPresent`
+ * is the default state while typing (the 36px in-flow status row before the toolBar), `expanded`
+ * only after an explicit row click, and `present` false when NO extension UI is rendered at all
+ * (empty / below-minimum draft).
  */
 function overlayOf(outcome: FlowOutcome): Record<string, unknown> {
   return (outcome['overlay'] as Record<string, unknown>) ?? {};
 }
 
 /**
- * The collapsed-first invariant every scored-draft overlay summary must satisfy (VAL-DRAFT-032):
- * before the pill click the ONLY surface was a compact pill carrying the headline number alone,
- * with no detail panel in the DOM.
+ * The row-model invariant every scored-draft overlay summary must satisfy (VAL-DRAFT-032/041):
+ * before the row click the ONLY surface was the collapsed 36px status row, with no expanded
+ * block in the DOM; the click expands the inline analysis. `inFlow` additionally pins the
+ * in-flow placement (immediate toolBar sibling) — true for the home composer, whose fixture
+ * view carries a `[data-testid="toolBar"]`; the reply-DIALOG fixture view has NO toolBar, so
+ * there the fallback placement with the SAME row anatomy is the contract-correct outcome.
  */
-function collapsedFirstViolation(overlay: Record<string, unknown>): string | null {
+function rowFirstViolation(overlay: Record<string, unknown>, inFlow = true): string | null {
   const collapsed = (overlay['collapsed'] as Record<string, unknown> | null) ?? null;
-  if (collapsed === null) return 'the collapsed pill state was never observed before the expansion';
-  if (collapsed['present'] !== true) return 'the collapsed score pill is missing while a draft is scored';
-  if (collapsed['panelPresent'] !== false) return 'the detail panel was already rendered while typing';
-  if (collapsed['headlineOnly'] !== true) return `the pill shows more than the headline number: "${String(collapsed['text'])}"`;
-  if (overlay['state'] !== 'analyzed') return `expanded panel state: ${String(overlay['state'])}`;
-  if (overlay['expanded'] !== true) return 'the pill click did not expand the detail panel';
+  if (collapsed === null) return 'the collapsed row state was never observed before the expansion';
+  if (collapsed['present'] !== true) return 'the collapsed status row is missing while a draft is scored';
+  if (collapsed['expandedBlock'] !== false) return 'the expanded block was already rendered while typing';
+  if (collapsed['ariaExpanded'] !== 'false') return `the row's aria-expanded: ${String(collapsed['ariaExpanded'])}`;
+  if (!/^\d{1,3}$/.test(String(collapsed['text']))) {
+    return `the row's headline is not a bare score: "${String(collapsed['text'])}"`;
+  }
+  if (overlay['state'] !== 'analyzed') return `expanded block state: ${String(overlay['state'])}`;
+  if (overlay['expanded'] !== true) return 'the row click did not expand the inline analysis';
+  if (inFlow) {
+    if (overlay['placement'] !== 'flow') return `overlay placement: ${String(overlay['placement'])}`;
+    if (overlay['toolbarSibling'] !== true) return 'the host is not the toolBar\'s preceding sibling';
+  } else if (overlay['placement'] !== 'fallback') {
+    return `overlay placement (reply dialog, no toolBar): ${String(overlay['placement'])}`;
+  }
   return null;
 }
 
@@ -88,7 +103,7 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
       if (outcome['watcherComposer'] !== 'tweetTextarea_0') return `watched composer: ${String(outcome['watcherComposer'])}`;
       // An empty composer renders NO extension UI near it at all (M5 dropped the empty balloon).
       const overlay = overlayOf(outcome);
-      if (overlay['present'] !== false || overlay['pillPresent'] !== false) return `overlay: ${JSON.stringify(overlay)}`;
+      if (overlay['present'] !== false || overlay['rowPresent'] !== false) return `overlay: ${JSON.stringify(overlay)}`;
       return null;
     },
   },
@@ -96,10 +111,10 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
     name: 'short-draft-empty-state',
     arg: { seed: seedPayload({ key: null, endpointOverride: null }), texts: { short: 'Too short' } },
     expect: (outcome): string | null => {
-      // Below minDraftLength NOTHING is rendered: no host, no pill, no panel (VAL-DRAFT-005).
+      // Below minDraftLength NOTHING is rendered: no host, no row, no block (VAL-DRAFT-005).
       const overlay = overlayOf(outcome);
       if (overlay['present'] !== false) return `overlay UI below the minimum length: ${JSON.stringify(overlay)}`;
-      if (overlay['pillPresent'] !== false || overlay['expanded'] !== false) {
+      if (overlay['rowPresent'] !== false || overlay['expanded'] !== false) {
         return `overlay surfaces below the minimum length: ${JSON.stringify(overlay)}`;
       }
       return null;
@@ -110,8 +125,10 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
     arg: { seed: seedPayload({ key: null, endpointOverride: null }), texts: { reply: 'Reply draft: adding the missing benchmark numbers to this thread right now.' } },
     expect: (outcome): string | null => {
       if (outcome['watcherComposer'] !== 'tweetTextarea_1') return `watched composer: ${String(outcome['watcherComposer'])}`;
+      // The reply-DIALOG fixture view has no toolBar: fallback placement with the SAME row
+      // anatomy is the contract-correct outcome there (VAL-DRAFT-041's fallback clause).
       const overlay = overlayOf(outcome);
-      const collapsed = collapsedFirstViolation(overlay);
+      const collapsed = rowFirstViolation(overlay, false);
       if (collapsed !== null) return collapsed;
       if (overlay['headlineSource'] !== 'local') return `headline source: ${String(overlay['headlineSource'])}`;
       if (overlay['jevState'] !== 'no-key') return `jev state: ${String(overlay['jevState'])}`;
@@ -124,17 +141,17 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
     arg: { seed: seedPayload({ key: null, endpointOverride: null }), texts: { local: 'Local only draft: steady hands ship better software every single week.' } },
     expect: (outcome): string | null => {
       const overlay = overlayOf(outcome);
-      const collapsed = collapsedFirstViolation(overlay);
+      const collapsed = rowFirstViolation(overlay);
       if (collapsed !== null) return collapsed;
       if (overlay['headlineSource'] !== 'local') return `headline source: ${String(overlay['headlineSource'])}`;
       if (overlay['jevState'] !== 'no-key') return `jev state: ${String(overlay['jevState'])}`;
       if (Number(overlay['signals']) < 1) return `signals: ${String(overlay['signals'])}`;
       const headline = Number(overlay['headline']);
       if (!(headline >= 0 && headline <= 100)) return `headline out of range: ${String(overlay['headline'])}`;
-      // The collapsed pill's number and the expanded panel's headline are the same local score.
+      // The collapsed row's number and the expanded state's headline are the same local score.
       const collapsedText = String((overlay['collapsed'] as Record<string, unknown> | null)?.['text'] ?? '');
       if (collapsedText !== String(overlay['headline'])) {
-        return `collapsed pill "${collapsedText}" != expanded headline "${String(overlay['headline'])}"`;
+        return `collapsed row "${collapsedText}" != headline "${String(overlay['headline'])}"`;
       }
       return null;
     },
@@ -144,12 +161,16 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
     arg: { seed: seedPayload({ key: null, endpointOverride: null }), texts: { both: 'Both surfaces draft: the composer and the timeline badges coexist peacefully here.' } },
     expect: (outcome): string | null => {
       const overlay = overlayOf(outcome);
-      const collapsed = collapsedFirstViolation(overlay);
+      const collapsed = rowFirstViolation(overlay);
       if (collapsed !== null) return collapsed;
+      // M6 (VAL-DRAFT-037): the first outside click on the EXPANDED block both collapses it
+      // and reaches the page — the like counter incremented on that same first click.
+      if (outcome['outsideClickCollapsed'] !== true) return 'the first outside click did not collapse the expanded block';
       if (outcome['likeClickReachedPage'] !== true) return 'the native like click never reached the page (surface blocked it)';
       const post1 = badgeFor(outcome, POST_1_ID);
       if (post1 === null) return 'no badge on the question post (post 1)';
       if (typeof post1['reason'] !== 'string' || post1['reason'] === '') return 'post-1 badge has no reason';
+      if (post1['inUserName'] !== true) return 'post-1 badge is not inside [data-testid="User-Name"] (1b placement)';
       const popover = outcome['popover'] as Record<string, unknown>;
       if (popover['present'] !== true) return 'popover did not open from the badge click';
       if (typeof popover['localScore'] !== 'string' || popover['localScore'] === '') return 'popover local score missing';
@@ -168,17 +189,20 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
       const pending = (outcome['pending'] as Record<string, unknown>) ?? {};
       if (pending['state'] !== 'analyzed') return `pending overlay state: ${String(pending['state'])}`;
       if (pending['jevState'] !== 'pending') return `pending jev state: ${String(pending['jevState'])}`;
-      if (pending['jevPendingText'] !== 'Analyzing with AI…') return `pending copy: ${String(pending['jevPendingText'])}`;
+      if (!String(pending['jevNotice'] ?? '').includes('AI judgment on its way')) {
+        return `pending copy: ${String(pending['jevNotice'])}`;
+      }
+      if (pending['aiShort'] !== 'Analyzing…') return `pending row AI label: ${String(pending['aiShort'])}`;
       const settled = (outcome['settled'] as Record<string, unknown>) ?? {};
       if (settled['jevState'] !== 'verdict') return `settled jev state: ${String(settled['jevState'])}`;
       if (settled['headlineSource'] !== 'hybrid') return `settled headline source: ${String(settled['headlineSource'])}`;
       if (String(settled['jevBand'] ?? '').length === 0) return 'settled band missing';
-      if (!String(settled['jevConfidence'] ?? '').includes('65')) return `settled confidence: ${String(settled['jevConfidence'])}`;
-      // The re-collapsed pill sampled AFTER the verdict carries the hybrid headline — the
+      if (!String(settled['jevTryLine'] ?? '').includes('65% confidence')) return `settled try line: ${String(settled['jevTryLine'])}`;
+      // The re-collapsed row sampled AFTER the verdict carries the hybrid headline — the
       // field-comparable number this flow contributes to the cross-browser score comparison.
       const settledCollapsed = (settled['collapsed'] as Record<string, unknown> | null) ?? null;
       if (settledCollapsed === null || String(settledCollapsed['text']) !== String(settled['headline'])) {
-        return `settled collapsed pill: ${JSON.stringify(settledCollapsed)}`;
+        return `settled collapsed row: ${JSON.stringify(settledCollapsed)}`;
       }
       return null;
     },
@@ -196,6 +220,32 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
       if (!String(overlay['jevErrorReason'] ?? '').includes('HTTP 500')) return `error reason: ${String(overlay['jevErrorReason'])}`;
       if (overlay['headlineSource'] !== 'local') return `headline source after failure: ${String(overlay['headlineSource'])}`;
       if (Number(overlay['signals']) < 1) return 'local signals missing after failure';
+      return null;
+    },
+  },
+  {
+    name: 'collapse-triggers',
+    arg: { seed: seedPayload({ key: null, endpointOverride: null }), texts: { collapse: 'Collapse draft: outside clicks, edits and Escape all close the inline analysis.' } },
+    expect: (outcome): string | null => {
+      // VAL-DRAFT-036: a new composer edit collapses the block while the edit is applied.
+      if (outcome['editCollapsed'] !== true) return 'a new composer edit did not collapse the expanded block';
+      // VAL-DRAFT-035: Escape collapses the block; the status row remains with the headline.
+      if (outcome['escapeCollapsed'] !== true) return 'Escape did not collapse the expanded block';
+      return null;
+    },
+  },
+  {
+    name: 'theme-switch',
+    arg: { seed: seedPayload({ key: null, endpointOverride: null }), texts: { theme: 'Theme draft: the row and badges follow the body background across all three X themes.' } },
+    expect: (outcome): string | null => {
+      // The ThemeDetector re-maps both shadow hosts live; 'unknown' falls back to light
+      // (VAL-THEME-001/002, exercised cross-browser here).
+      const themes = (outcome['themes'] as Record<string, Record<string, unknown>>) ?? {};
+      for (const [theme, expected] of [['light', 'light'], ['dim', 'dim'], ['lights-out', 'lights-out'], ['unknown', 'light']] as const) {
+        const observed = themes[theme] ?? {};
+        if (observed['overlay'] !== expected) return `overlay data-theme after ${theme}: ${String(observed['overlay'])}`;
+        if (observed['badge'] !== expected) return `badge data-theme after ${theme}: ${String(observed['badge'])}`;
+      }
       return null;
     },
   },
@@ -237,7 +287,7 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
       const before = (outcome['before'] as Record<string, unknown>) ?? {};
       const tornDown = (outcome['tornDown'] as Record<string, unknown>) ?? {};
       const remounted = (outcome['remounted'] as Record<string, unknown>) ?? {};
-      if (before['overlayPresent'] !== true || before['pillPresent'] !== true) {
+      if (before['overlayPresent'] !== true || before['rowPresent'] !== true) {
         return `overlay absent before navigation: ${JSON.stringify(before)}`;
       }
       if (tornDown['overlayGone'] !== true) return 'overlay survived the SPA teardown';
@@ -259,7 +309,11 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
       const overlay = overlayOf(outcome);
       if (overlay['state'] !== 'analyzed') return `overlay state: ${String(overlay['state'])}`;
       if (overlay['jevState'] !== 'error') return `jev state: ${String(overlay['jevState'])}`;
-      if (!String(overlay['jevNotice'] ?? '').includes('local signals still apply')) return `degraded notice: ${String(overlay['jevNotice'])}`;
+      // The degraded notice embeds the network failure reason (the 1b error copy table).
+      if (!String(overlay['jevNotice'] ?? '').includes('AI unavailable')) return `degraded notice: ${String(overlay['jevNotice'])}`;
+      if (!String(overlay['jevErrorReason'] ?? '').includes('Could not reach the AI service.')) {
+        return `degraded error reason: ${String(overlay['jevErrorReason'])}`;
+      }
       if (overlay['headlineSource'] !== 'local') return `headline source: ${String(overlay['headlineSource'])}`;
       if (Number(overlay['signals']) < 1) return 'local signals missing under outage';
       return null;
@@ -276,9 +330,11 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
       if (badges.length === 0) return 'no badges under outage (local target scoring must survive)';
       const popover = (outcome['popover'] as Record<string, unknown>) ?? {};
       if (popover['aiState'] !== 'error') return `popover AI state: ${String(popover['aiState'])}`;
-      if (!String(popover['aiErrorReason'] ?? '').includes('Could not reach the AI service.')) {
-        return `popover error reason: ${String(popover['aiErrorReason'])}`;
+      // The popover error state embeds the reason in its notice line, with a Retry link.
+      if (!String(popover['aiNotice'] ?? '').includes('Could not reach the AI service.')) {
+        return `popover error notice: ${String(popover['aiNotice'])}`;
       }
+      if (popover['aiRetry'] !== true) return 'popover error state has no Retry link';
       if (typeof popover['localScore'] !== 'string' || popover['localScore'] === '') return 'popover local score missing under outage';
       return null;
     },
@@ -288,13 +344,19 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
 /** Fields logged as evidence but excluded from strict cross-browser equality. */
 export function stripVolatile(outcome: FlowOutcome): FlowOutcome {
   const clone = structuredClone(outcome) as FlowOutcome;
-  const badges = clone['badges'];
-  if (Array.isArray(badges)) {
-    for (const badge of badges as Array<Record<string, unknown>>) delete badge['score'];
+  // The FULL badge set is viewport-dependent (the fixture feed is virtualized and recycles
+  // articles on scroll, so which eligible posts intersect the fold at snapshot time differs by
+  // engine layout). The compared unit is `targetBadge` — the sorted-first eligible post's chip,
+  // present in every leg — recorded per flow. Badge scores stay stripped (defensive: scoring
+  // floats are engine-identical but the strip predates this harness).
+  delete clone['badges'];
+  const targetBadge = clone['targetBadge'];
+  if (targetBadge !== null && typeof targetBadge === 'object') {
+    delete (targetBadge as Record<string, unknown>)['score'];
   }
   delete clone['mockCalls']; // call-log reads race with in-flight slow exchanges by ±1 entry
-  // `collapsed.text` (the pill's headline number) IS compared: the driver samples it only after
-  // the pill's AI half has settled, so the number is deterministic for the draft (local when no
+  // `collapsed.text` (the row's headline number) IS compared: the driver samples it only after
+  // the row's AI half has settled, so the number is deterministic for the draft (local when no
   // verdict can land, the hybrid one once it has) and equal across browsers for the same draft +
   // mock verdict. Cross-browser score equivalence is part of the parity evidence
   // (VAL-DRAFT-025 / VAL-CROSS-010) — do not strip it.

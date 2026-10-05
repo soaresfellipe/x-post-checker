@@ -11,10 +11,11 @@
  * `mode: 'open'`), the marker's data-* diagnostics, and same-origin fetches to the fixture
  * server's Jev-mock control endpoints.
  *
- * The overlay is COLLAPSED-FIRST (M5): the default surface is a compact pill carrying the
- * headline alone, and the detail panel exists only after an explicit pill click. So every probe
- * below that reads detail content EXPANDS the panel first through a real pill click — the driver
- * exercises the same path the user does — and reads 'no UI at all' from the absent host.
+ * The overlay is the M6 DESIGN-1B ROW MODEL: the default surface is the 36px in-flow status row
+ * inserted before the composer's toolBar, and the inline analysis exists only after an explicit
+ * row click. So every probe below that reads detail content EXPANDS the block first through a
+ * real row click — the driver exercises the same path the user does — and reads 'no UI at all'
+ * from the absent host.
  */
 
 export interface DriverArg {
@@ -49,67 +50,80 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
   }
 
   const overlayRoot = (): ShadowRoot | null => document.getElementById(HOST_ID)?.shadowRoot ?? null;
-  const overlayPill = (): Element | null =>
-    overlayRoot()?.querySelector('[data-testid="amplifyx-overlay-pill"]') ?? null;
+  const overlayRow = (): Element | null =>
+    overlayRoot()?.querySelector('[data-testid="amplifyx-overlay-row"]') ?? null;
   const overlayPanel = (): Element | null =>
     overlayRoot()?.querySelector(`[data-testid="${PANEL_TESTID}"]`) ?? null;
-  /** The phase of whichever overlay surface exists: the panel when expanded, else the pill. */
+  /** The phase of whichever overlay surface exists: the block when expanded, else the row. */
   const surfaceState = (): string | null =>
-    overlayPanel()?.getAttribute('data-state') ?? overlayPill()?.getAttribute('data-state') ?? null;
-  const pillPresent = (): boolean => overlayPill() !== null;
+    overlayPanel()?.getAttribute('data-state') ?? overlayRow()?.getAttribute('data-state') ?? null;
+  const rowPresent = (): boolean => overlayRow() !== null;
   const marker = (): HTMLElement | null => document.getElementById(MARKER_ID);
   const markerAttr = (name: string): string | null => marker()?.getAttribute(name) ?? null;
 
+  /** The host's placement mode: 'flow' (in flow before the toolBar) or 'fallback'. */
+  const hostPlacement = (): string | null =>
+    document.getElementById(HOST_ID)?.getAttribute('data-placement') ?? null;
+  /** VAL-DRAFT-041: the host is the immediate preceding sibling of a `[data-testid="toolBar"]`. */
+  const hostIsToolBarSibling = (): boolean => {
+    const host = document.getElementById(HOST_ID);
+    if (host === null) return false;
+    return [...document.querySelectorAll('[data-testid="toolBar"]')].some(
+      (bar) => bar.previousElementSibling === host,
+    );
+  };
+
   /**
-   * The COLLAPSED surface as observed just before a flow expanded it: the headline number alone,
-   * with no panel in the DOM. Captured here (not after the click) because the pill does not
-   * survive expansion — the panel replaces it — so this is the only honest record of the state
-   * the user actually sees while typing (VAL-DRAFT-032).
+   * The COLLAPSED surface as observed just before a flow expanded it: the 36px in-flow status
+   * row, with no expanded block in the DOM. Captured here (not after the click) because the
+   * row is the only surface while typing and the expanded block merely adds below it — so this
+   * is the only honest record of the state the user actually sees while typing (VAL-DRAFT-032).
    *
-   * `expandPanel` awaits a SETTLED pill before sampling (default), so the headline number is
+   * `expandPanel` awaits a SETTLED row before sampling (default), so the headline number is
    * deterministic for the draft — local when no verdict can land, the hybrid one once it has —
    * and is therefore field-comparable across browsers (VAL-DRAFT-025 / VAL-CROSS-010).
    */
   let collapsedSeen: Record<string, unknown> | null = null;
 
   function readCollapsed(): Record<string, unknown> {
-    const pill = overlayPill();
-    if (pill === null) return { present: false, panelPresent: overlayPanel() !== null };
-    const text = (pill.textContent ?? '').trim();
+    const row = overlayRow();
+    if (row === null) return { present: false, expandedBlock: overlayPanel() !== null };
     return {
       present: true,
-      panelPresent: overlayPanel() !== null,
-      text,
-      headlineOnly: /^\d{1,3}$/.test(text),
+      expandedBlock: overlayPanel() !== null,
+      ariaExpanded: row.getAttribute('aria-expanded'),
+      // The bare headline number is what carries across browsers: the row's other anatomy
+      // ("Viral potential", the summary, the AI half) is fixed copy for the same draft state.
+      text: (row.querySelector('[data-testid="overlay-headline"]')?.textContent ?? '').trim(),
     };
   }
 
   /**
-   * Expands the collapsed panel with a real click on the pill — the only way it comes to exist.
-   * By default the pill's AI half is awaited to a SETTLED state first: while a Jev exchange is in
-   * flight the pill carries the LOCAL headline number, and once a verdict lands it carries the
-   * HYBRID one — which of the two a click samples is otherwise a race between the click and the
-   * exchange (a slower browser leg legitimately samples the local number), so only the settled
-   * number is field-comparable across browsers. Pass false to expand immediately, for the flows
-   * that must observe a PENDING state in the panel itself.
+   * Expands the inline analysis with a real click on the status row — the only way it comes to
+   * exist. By default the row's AI half is awaited to a SETTLED state first: while a Jev
+   * exchange is in flight the row carries the LOCAL headline number, and once a verdict lands
+   * it carries the HYBRID one — which of the two a click samples is otherwise a race between
+   * the click and the exchange (a slower browser leg legitimately samples the local number),
+   * so only the settled number is field-comparable across browsers. Pass false to expand
+   * immediately, for the flows that must observe a PENDING state in the block itself.
    */
   async function expandPanel(settledCollapsed = true): Promise<void> {
     if (overlayPanel() !== null) return;
-    await waitFor(() => overlayPill() ?? undefined, 15_000, 'collapsed score pill');
+    await waitFor(() => overlayRow() ?? undefined, 15_000, 'collapsed status row');
     if (settledCollapsed) {
-      // Re-queried per attempt: render() replaces the pill node on every analysis update.
+      // Re-queried per attempt: render() replaces the row node on every analysis update.
       await waitFor(
         () => {
-          const state = overlayPill()?.getAttribute('data-jev-state');
+          const state = overlayRow()?.getAttribute('data-jev-state');
           return state !== null && state !== undefined && state !== 'pending' ? state : null;
         },
         30_000,
-        'the collapsed pill AI state to settle',
+        'the status-row AI state to settle',
       );
     }
     collapsedSeen = readCollapsed();
-    (overlayPill() as HTMLElement).click();
-    await waitFor(() => (overlayPanel() !== null ? true : null), 5_000, 'expanded detail panel');
+    (overlayRow() as HTMLElement).click();
+    await waitFor(() => (overlayPanel() !== null ? true : null), 5_000, 'expanded inline analysis');
   }
 
   function jevSection(): Element | null {
@@ -117,38 +131,51 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
   }
 
   /**
-   * The overlay's whole observable surface: the collapsed pill (the default) plus the expanded
-   * panel when a flow opened it. `present` is false when NO extension UI is rendered at all,
-   * which is what an empty or below-minimum draft produces (VAL-DRAFT-005).
+   * The overlay's whole observable surface: the collapsed status row (the default) plus the
+   * expanded inline block when a flow opened it. `present` is false when NO extension UI is
+   * rendered at all, which is what an empty or below-minimum draft produces (VAL-DRAFT-005).
    */
   function panelSummary(): Record<string, unknown> {
-    const pill = overlayPill();
-    const panel = overlayPanel();
-    if (pill === null && panel === null) {
-      return { present: false, pillPresent: false, expanded: false, collapsed: collapsedSeen };
+    const row = overlayRow();
+    const block = overlayPanel();
+    const placement = hostPlacement();
+    const toolbarSibling = hostIsToolBarSibling();
+    if (row === null && block === null) {
+      return {
+        present: false,
+        rowPresent: false,
+        expanded: false,
+        collapsed: collapsedSeen,
+        placement,
+        toolbarSibling,
+      };
     }
     const jev = jevSection();
     return {
       present: true,
-      pillPresent,
-      expanded: panel !== null,
+      rowPresent: row !== null,
+      expanded: block !== null,
       collapsed: collapsedSeen,
       state: surfaceState(),
-      headline: panel?.querySelector('[data-testid="overlay-headline"]')?.textContent ?? pill?.textContent ?? null,
-      headlineSource:
-        panel?.querySelector('[data-testid="overlay-gauge"]')?.getAttribute('data-headline-source') ??
-        pill?.getAttribute('data-headline-source') ??
-        null,
-      signals: panel?.querySelectorAll('[data-testid="overlay-signals"] li').length ?? 0,
-      emptyText: null, // the empty balloon was REMOVED in M5: no UI at all is the empty state
-      jevState: jev?.getAttribute('data-jev-state') ?? pill?.getAttribute('data-jev-state') ?? null,
+      headline: row?.querySelector('[data-testid="overlay-headline"]')?.textContent ?? null,
+      headlineSource: row?.getAttribute('data-headline-source') ?? null,
+      summary: row?.querySelector('[data-testid="overlay-summary"]')?.textContent ?? null,
+      aiShort: row?.querySelector('[data-testid="overlay-ai-state"]')?.textContent ?? null,
+      // Chips only (points ≠ 0); the "N neutral ›" rows list is the toggle's business.
+      signals: block?.querySelectorAll('[data-testid="overlay-chip"]').length ?? 0,
+      neutralToggle: block?.querySelector('[data-testid="overlay-neutral-toggle"]') !== null,
+      jevState: jev?.getAttribute('data-jev-state') ?? row?.getAttribute('data-jev-state') ?? null,
       jevNotice: jev?.querySelector('[data-testid="overlay-jev-notice"]')?.textContent ?? null,
-      jevErrorReason: jev?.querySelector('.error-reason')?.textContent ?? null,
-      jevPendingText: jev?.querySelector('[data-testid="overlay-jev-pending"]')?.textContent ?? null,
+      jevErrorReason:
+        jev?.querySelector('[data-testid="overlay-retry"]') !== null
+          ? (jev?.querySelector('[data-testid="overlay-jev-notice"]')?.textContent ?? null)
+          : null,
+      jevTryLine: jev?.querySelector('[data-testid="overlay-jev-try-line"]')?.textContent ?? null,
       jevBand: jev?.querySelector('[data-testid="overlay-jev-band"]')?.textContent ?? null,
-      jevConfidence: jev?.querySelector('[data-testid="overlay-jev-confidence"]')?.textContent ?? null,
-      jevWeaknesses: jev?.querySelector('[data-testid="overlay-jev-weaknesses"]')?.textContent ?? null,
-      connectJev: panel?.querySelector('[data-testid="overlay-connect-jev"]') !== null,
+      jevWeakness: jev?.querySelector('[data-testid="overlay-jev-weakness"]')?.textContent ?? null,
+      connectJev: block?.querySelector('[data-testid="overlay-connect-jev"]') !== null,
+      placement,
+      toolbarSibling,
     };
   }
 
@@ -157,10 +184,14 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
     for (const host of document.querySelectorAll(`[${BADGE_HOST_ATTR}]`)) {
       const button = host.shadowRoot?.querySelector('[data-testid="amplifyx-target-badge"]');
       if (button === null || button === undefined) continue;
+      // 1b: the chip is SCORE-ONLY — the reason lives in the tooltip and the aria-label
+      // ("Reply target score {n}: {reason}"), so the label is parsed for the reason.
+      const labelMatch = /^Reply target score -?\d+: (.+)$/.exec(button.getAttribute('aria-label') ?? '');
       badges.push({
         postId: button.getAttribute('data-amplifyx-post-id') ?? null,
         score: Number(button.querySelector('[data-testid="amplifyx-badge-score"]')?.textContent ?? '-1'),
-        reason: button.querySelector('[data-testid="amplifyx-badge-reason"]')?.textContent ?? null,
+        reason: labelMatch?.[1] ?? null,
+        inUserName: host.parentElement?.closest('[data-testid="User-Name"]') !== null,
       });
     }
     return badges.sort((a, b) => String(a['postId']).localeCompare(String(b['postId'])));
@@ -173,9 +204,10 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
     return {
       present: true,
       localScore: panel.querySelector('[data-testid="amplifyx-popover-local-score"]')?.textContent ?? null,
+      caption: panel.querySelector('[data-testid="amplifyx-popover-caption"]')?.textContent ?? null,
       aiState: ai?.getAttribute('data-ai-state') ?? null,
       aiNotice: ai?.querySelector('[data-testid="amplifyx-popover-ai-notice"]')?.textContent ?? null,
-      aiErrorReason: ai?.querySelector('[data-testid="amplifyx-popover-ai-error-reason"]')?.textContent ?? null,
+      aiRetry: ai?.querySelector('[data-testid="amplifyx-popover-retry"]') !== null,
     };
   }
 
@@ -208,6 +240,27 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
     const response = await fetch('/__mock/jev/calls', { cache: 'no-store' });
     const calls = (await response.json()) as unknown[];
     return calls.length;
+  }
+
+  /**
+   * Waits for the badge set to go STABLE (two identical consecutive samples) before a flow
+   * snapshots it: the timeline scanner attaches badges across successive scan passes, so a
+   * count-based wait would compare one leg's mid-scan snapshot against the other's settled one.
+   */
+  async function stableBadges(): Promise<Array<Record<string, unknown>>> {
+    let previous = '';
+    await waitFor(
+      async () => {
+        const badges = badgeSummary();
+        const key = JSON.stringify(badges);
+        const stable = key !== '' && key === previous;
+        previous = key;
+        return stable ? badges : null;
+      },
+      15_000,
+      'the badge set to stabilize',
+    ).catch(() => undefined);
+    return badgeSummary();
   }
 
   /** Applies a seed through the extension's typed 'seed-test-state' protocol and awaits the
@@ -303,8 +356,8 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
         await expandPanel(false);
         const pending = panelSummary();
         await waitFor(() => (jevSection()?.getAttribute('data-jev-state') === 'verdict' ? true : null), 15_000, 'jev verdict');
-        // Collapse back to the pill and re-expand with a SETTLED collapsed sample: the verdict
-        // has landed, so the pill now carries the hybrid headline — the field-comparable number
+        // Collapse back to the row and re-expand with a SETTLED collapsed sample: the verdict
+        // has landed, so the row now carries the hybrid headline — the field-comparable number
         // (both engines compute it from the same local score and the same mock verdict).
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
         await waitFor(() => (overlayPanel() === null ? true : null), 5_000, 'panel collapsed by Escape');
@@ -361,10 +414,14 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
       case 'spa-teardown-remount': {
         await typeDraft('tweetTextarea_0', TEXTS['spa']!);
         await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'draft analyzed before SPA nav');
-        // The collapsed pill IS the surface while typing: SPA teardown removes the whole host.
-        const before = { overlayPresent: document.getElementById(HOST_ID) !== null, pillPresent: pillPresent(), epoch: epoch() };
+        // The collapsed row IS the surface while typing: SPA teardown removes the whole host.
+        const before = { overlayPresent: document.getElementById(HOST_ID) !== null, rowPresent: rowPresent(), epoch: epoch() };
         (document.querySelector('[data-testid="navExplore"]') as HTMLElement).click();
         await waitFor(() => (document.getElementById(HOST_ID) === null ? true : null), 10_000, 'overlay torn down');
+        // The M6 host lives INSIDE the composer subtree, so it vanishes with the view's innerHTML
+        // swap BEFORE the watcher's own mutation pass re-classifies to idle — wait for the
+        // watcher state itself rather than reading it right after the host disappears.
+        await waitFor(() => (markerAttr('data-watcher-state') === 'idle' ? true : null), 10_000, 'watcher idle');
         const tornDown = { watcherState: markerAttr('data-watcher-state'), overlayGone: document.getElementById(HOST_ID) === null };
         // The explore view has no home link (like x.com's) — go BACK (popstate renders home).
         history.back();
@@ -384,15 +441,9 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
         await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'draft analyzed');
         await expandPanel();
         const expandedOverlay = panelSummary();
-        // Collapse back to the pill before touching page controls: an EXPANDED panel deliberately
-        // captures the first outside click (VAL-DRAFT-037), so the page-interaction evidence below
-        // must run in the default collapsed state.
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-        await waitFor(() => (overlayPanel() === null ? true : null), 5_000, 'panel collapsed by Escape');
-        await waitFor(() => (badgeSummary().length > 0 ? true : null), 15_000, 'badges present');
-        const badges = badgeSummary();
-        // Native control pass-through: clicking a like button must reach the page (neither the
-        // pill nor the badge hosts capture pointer input), recorded by the fixture's click counter.
+        // M6 outside-click forward (VAL-DRAFT-037): with the inline analysis EXPANDED, the first
+        // click outside both collapses it AND reaches the page — the like control's own fixture
+        // counter must increment on that first click (the M5 first-click-swallow is removed).
         const article = document.querySelector('article[data-testid="tweet"]') as HTMLElement;
         (article.querySelector('[data-testid="like"]') as HTMLElement).click();
         await waitFor(
@@ -403,6 +454,13 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
           10_000,
           'native like click reached the page',
         );
+        await waitFor(() => (overlayPanel() === null ? true : null), 5_000, 'outside click collapsed the block');
+        const outsideClickCollapsed = overlayPanel() === null && rowPresent();
+        const badges = await stableBadges();
+        if (badges.length === 0) throw new Error('no badges present after the draft flow');
+        // The COMPARED badge unit (badges are sorted by post id): the topmost eligible post is
+        // in view in every leg; the FULL set is viewport-dependent evidence only.
+        const targetBadge = badges[0] ?? null;
         // Badge click opens the popover without activating the post (badge isolation).
         const firstBadgeHost = document.querySelector(`[${BADGE_HOST_ATTR}]`) as HTMLElement;
         const badgeButton = firstBadgeHost.shadowRoot!.querySelector('[data-testid="amplifyx-target-badge"]') as HTMLElement;
@@ -413,13 +471,69 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
         await waitFor(() => (!popoverSummary().present ? true : null), 10_000, 'popover closed');
         return {
           overlay: expandedOverlay,
+          outsideClickCollapsed,
           badges,
+          targetBadge,
           likeClickReachedPage: true,
           popover,
           popoverClosed: !popoverSummary().present,
           locationStillHome: location.pathname === '/',
           epoch: epoch(),
         };
+      }
+
+      case 'collapse-triggers': {
+        await typeDraft('tweetTextarea_0', TEXTS['collapse']!);
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'draft analyzed');
+        await expandPanel();
+        // (a) VAL-DRAFT-036: any new composer edit collapses the block AT THE KEYSTROKE —
+        // the collapse is synchronous with the edit, not debounce-bound.
+        await typeDraft('tweetTextarea_0', `${TEXTS['collapse']!} A little more.`);
+        const editCollapsed = await waitFor(
+          () => (overlayPanel() === null && rowPresent() ? true : null),
+          5_000,
+          'edit collapse',
+        ).then(() => overlayPanel() === null && rowPresent());
+        // (b) VAL-DRAFT-035: Escape collapses the re-expanded block; the row remains.
+        await expandPanel();
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        const escapeCollapsed = await waitFor(
+          () => (overlayPanel() === null && rowPresent() ? true : null),
+          5_000,
+          'Escape collapse',
+        ).then(() => overlayPanel() === null && rowPresent());
+        return { editCollapsed, escapeCollapsed, epoch: epoch() };
+      }
+
+      case 'theme-switch': {
+        await typeDraft('tweetTextarea_0', TEXTS['theme']!);
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'draft analyzed');
+        await stableBadges(); // a badge host must exist before its data-theme is sampled
+        // The fixture's __fixtureSetTheme writes the body background INLINE exactly like real
+        // x.com (verified live, library/x-dom.md); the ThemeDetector's body-style observer must
+        // re-map both shadow hosts' data-theme. 'unknown' falls back to light.
+        const setTheme = (theme: string): void =>
+          (window as unknown as { __fixtureSetTheme: (t: string) => void }).__fixtureSetTheme(theme);
+        const readThemes = (): Record<string, unknown> => ({
+          overlay: document.getElementById(HOST_ID)?.getAttribute('data-theme') ?? null,
+          badge: document.querySelector(`[${BADGE_HOST_ATTR}]`)?.getAttribute('data-theme') ?? null,
+        });
+        await waitFor(() => (document.getElementById(HOST_ID)?.getAttribute('data-theme') === 'light' ? true : null), 10_000, 'light tokens at mount');
+        const themes: Record<string, unknown> = { light: readThemes() };
+        for (const theme of ['dim', 'lights-out', 'unknown'] as const) {
+          setTheme(theme);
+          await waitFor(
+            () => {
+              const current = document.getElementById(HOST_ID)?.getAttribute('data-theme') ?? null;
+              return current === (theme === 'unknown' ? 'light' : theme) ? true : null;
+            },
+            10_000,
+            `theme switch to ${theme}`,
+          );
+          themes[theme] = readThemes();
+        }
+        setTheme('light'); // restore the fixture default for later flows in the same leg
+        return { themes, epoch: epoch() };
       }
 
       case 'outage-draft': {
@@ -433,8 +547,9 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
       }
 
       case 'outage-targets': {
-        await waitFor(() => (badgeSummary().length > 0 ? true : null), 15_000, 'badges present under outage');
-        const badges = badgeSummary();
+        const badges = await stableBadges();
+        if (badges.length === 0) throw new Error('no badges present under outage (local target scoring must survive)');
+        const targetBadge = badges[0] ?? null;
         const firstBadgeHost = document.querySelector(`[${BADGE_HOST_ATTR}]`) as HTMLElement;
         const badgeButton = firstBadgeHost.shadowRoot!.querySelector('[data-testid="amplifyx-target-badge"]') as HTMLElement;
         badgeButton.click();
@@ -442,7 +557,7 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
         (document.getElementById(POPOVER_ID)!.shadowRoot!.querySelector('[data-testid="amplifyx-popover-deep-analysis"]') as HTMLElement).click();
         await waitFor(() => (popoverSummary()['aiState'] === 'error' ? true : null), 25_000, 'deep analysis failed visibly');
         const popover = popoverSummary();
-        return { badges, popover, epoch: epoch() };
+        return { badges, targetBadge, popover, epoch: epoch() };
       }
 
       default:
