@@ -8,8 +8,9 @@ web-ext-artifacts/
 *.zip
 
 # env & secrets (NEVER COMMIT)
-.env.local
-.env.*.local
+.env
+.env.*
+!.env.example
 
 # playwright / test artifacts
 test-results/
@@ -22,6 +23,12 @@ evidence/
 
 # research notes (mission artifacts, kept out of the product repo)
 research/
+
+# editors / IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
 
 # misc
 .DS_Store
