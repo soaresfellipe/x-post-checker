@@ -23,7 +23,8 @@ import { isTargetStale, scoreTarget, staleTargetScore, type TargetScore } from '
 import { postMetricsSignature, type PostSnapshot } from '@/core/post-snapshot';
 import type { Settings } from '@/core/settings-store';
 import type { TargetAnalysisResult } from '@/core/target-analysis';
-import type { ScanEvent } from '@/dom/timeline-scanner';
+import { BADGE_HOST_ATTRIBUTE, BADGE_HOST_VALUE, type ScanEvent } from '@/dom/timeline-scanner';
+import { ThemeDetector, applyThemeTokens, setHostTheme, type XTheme } from '@/dom/theme';
 import { BADGE_STYLE, BADGE_TESTID, BADGE_TESTIDS } from './config';
 import { createTargetPopover, type TargetPopover } from './popover';
 import { badgeReason, deriveTargetAiSection, isBadgeEligible } from './view-model';
@@ -92,6 +93,15 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
   const scoreCache = new Map<string, { signature: string; score: TargetScore }>();
 
   let running = false;
+  // M6 theme foundation: one detector drives every badge host's `data-theme` (the token custom
+  // properties on each shadow `:host` resolve from it); a live theme switch restamps all hosts.
+  const themeDetector = new ThemeDetector({ doc });
+  const themeRestamp = (theme: XTheme): void => {
+    for (const host of doc.querySelectorAll(`[${BADGE_HOST_ATTRIBUTE}="${BADGE_HOST_VALUE}"]`)) {
+      setHostTheme(host, theme);
+    }
+  };
+  themeDetector.subscribe(themeRestamp);
   /** Per-post deep-analysis state (memory only; the authoritative cache lives in the background). */
   const pending = new Set<string>();
   const settled = new Map<string, TargetAnalysisResult>();
@@ -178,11 +188,14 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
     // Idempotent repaint: every scan pass rebuilds the shadow content from THIS event's data, so
     // repeated passes (and recycled hosts re-rendered for a new post) can never accumulate
     // duplicate badge buttons (VAL-TARGET-008's "without duplicate hosts" contract).
-    let style = shadow.querySelector('style');
+    let style = shadow.querySelector('style:not([data-amplifyx-theme-tokens])');
     if (style === null) {
       style = doc.createElement('style');
       style.textContent = BADGE_STYLE;
     }
+    // M6 theme tokens on the badge host's :host (idempotent shared block).
+    const themeStyle = applyThemeTokens(shadow);
+    setHostTheme(event.host, themeDetector.getTheme());
 
     const reason = badgeReason(score);
     const button = doc.createElement('button');
@@ -200,7 +213,7 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
     reasonSpan.className = 'reason';
     reasonSpan.textContent = reason;
     button.append(scoreSpan, reasonSpan);
-    shadow.replaceChildren(style, button);
+    shadow.replaceChildren(themeStyle, style, button);
     event.host.style.height = 'auto';
     // Click isolation (VAL-TARGET-016): the badge consumes its own activation so the underlying
     // post's handlers, navigation, and controls never see it. The popover still opens.
@@ -241,6 +254,7 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
     },
     destroy() {
       this.stop();
+      themeDetector.destroy();
     },
   };
 }

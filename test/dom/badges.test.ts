@@ -282,7 +282,8 @@ describe('popover interactions (VAL-TARGET-014/015/016, DOM tier)', () => {
     const host = document.getElementById(POPOVER_HOST_ID)!;
     expect(host.style.pointerEvents).toBe('none');
     // The panel is pointer-inert by stylesheet; its own buttons re-enable hits (AGENTS.md rule).
-    const styleText = host.shadowRoot!.querySelector('style')!.textContent ?? '';
+    // The token STYLE block (data-amplifyx-theme-tokens) is separate — select the surface style.
+    const styleText = host.shadowRoot!.querySelector('style:not([data-amplifyx-theme-tokens])')!.textContent ?? '';
     expect(styleText).toContain('.panel { pointer-events: none; }');
     expect(styleText).toContain('pointer-events: auto');
     harness.teardown();

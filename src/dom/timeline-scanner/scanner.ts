@@ -26,7 +26,7 @@ export const SCAN_THROTTLE_MS = 250;
 
 /** The badge host attribute: one host per article, the M3 badge feature's mount point. */
 export const BADGE_HOST_ATTRIBUTE = 'data-amplifyx-host';
-const BADGE_HOST_VALUE = 'badge';
+export const BADGE_HOST_VALUE = 'badge';
 
 /** Diff-state bound: evict the oldest ids beyond this many tracked posts (bounded memory). */
 const MAX_TRACKED_POSTS = 2000;

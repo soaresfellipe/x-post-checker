@@ -1,5 +1,6 @@
 export {
   BADGE_HOST_ATTRIBUTE,
+  BADGE_HOST_VALUE,
   SCAN_THROTTLE_MS,
   createTimelineScanner,
   defaultArticleVisible,

@@ -29,6 +29,7 @@ import type { DraftAnalysis, DraftAnalysisResult } from '@/core/analyzer';
 import { VARIANT_LABELS, type HookVariant, type OptimizationResult } from '@/core/optimizer';
 import type { SignalEntry } from '@/core/heuristic-engine';
 import { findComposerAnchorRegion } from '@/dom/composer-watcher';
+import { ThemeDetector, applyThemeTokens, setHostTheme } from '@/dom/theme';
 import { SELECTORS } from '@/selectors';
 import {
   OPTIMIZER_COPY_RESET_MS,
@@ -189,6 +190,14 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
   let mutationObserver: MutationObserver | null = null;
   /** The newest applied settings revision, restamped on every host the overlay mounts. */
   let settingsRevision: number | undefined;
+  // M6 theme foundation: live X-theme detection drives every surface's `data-theme` (the token
+  // custom properties on each shadow `:host` resolve from it; unknown background falls back to
+  // light inside the detector).
+  const themeDetector = new ThemeDetector({ doc });
+  themeDetector.subscribe(() => {
+    const host = hostElement();
+    if (host) setHostTheme(host, themeDetector.getTheme());
+  });
 
   // ---- host management (idempotent: exactly one host, keyed by OVERLAY_HOST_ID) ----
 
@@ -210,7 +219,9 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       panelRoot.className = 'panel-root';
       host.shadowRoot!.append(style, panelRoot);
     }
+    applyThemeTokens(host.shadowRoot!);
     doc.body.append(host);
+    setHostTheme(host, themeDetector.getTheme());
     mounted = true;
     // Observability: the newest applied settings revision travels with whatever host exists, so
     // a freshly mounted surface always carries the settings that produced it.
@@ -933,6 +944,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       doc.removeEventListener('wheel', onWheel);
       doc.removeEventListener('keydown', onKeyDown, true);
       doc.removeEventListener('click', onOutsideClick, true);
+      themeDetector.destroy();
       unmountHost();
       clearAnalysisState();
     },

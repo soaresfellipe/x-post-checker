@@ -111,10 +111,15 @@ function renderPost(post: FixturePost, now: number): string {
 
   return `<div data-testid="cellInnerDiv"><div data-testid="placementTracking"><article data-testid="tweet" role="article" tabindex="0">
   <div data-testid="Tweet-User-Avatar"><a href="/${post.handle}" role="link"><img alt="" width="40" height="40" src="data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw=="/></a></div>
-  <div data-testid="User-Name">
-    <a href="/${post.handle}" role="link"><span>${escapeHtml(post.displayName)}</span>${verified}</a>
-    <a href="/${post.handle}" role="link"><span>@${post.handle}</span></a>
-    <a href="/${post.handle}/status/${post.id}" role="link"><time datetime="${datetime}">${escapeHtml(post.timeLabel)}</time></a>
+  <!-- REAL User-Name shape (verified live 2026-10-05, m6 insertion probe, fact 4e): exactly TWO
+       children - the display-name link (+ verified icon) and, in the second child's nested divs,
+       the status link holding the time element LAST. The M6 badge host inserts as the last child
+       of User-Name, after that time link. -->
+  <div data-testid="User-Name">    <div>
+      <a href="/${post.handle}" role="link"><span>${escapeHtml(post.displayName)}</span>${verified}</a>
+      <a href="/${post.handle}" role="link"><span>@${post.handle}</span></a>
+    </div>
+    <div><div><div><a href="/${post.handle}/status/${post.id}" role="link"><time datetime="${datetime}">${escapeHtml(post.timeLabel)}</time></a></div></div></div>
   </div>
   <button data-testid="caret" type="button" aria-label="Mais"></button>
   ${followsMarker}
@@ -256,6 +261,21 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
     return false;
   };
 
+  // M6 theme-switch hook: sets the BODY BACKGROUND INLINE STYLE exactly the way real x.com does
+  // (verified live 2026-10-05, m6 insertion probe fact 4d: X renders the body background as an
+  // inline background-color style; no body/html class). The ThemeDetector's style-attribute
+  // MutationObserver sees these writes, so the three X themes + an unknown value are all
+  // switchable deterministically from E2E.
+  window.__fixtureSetTheme = function (theme) {
+    var colors = {
+      light: 'rgb(255, 255, 255)',
+      dim: 'rgb(21, 32, 43)',
+      'lights-out': 'rgb(0, 0, 0)',
+      unknown: 'rgb(18, 18, 18)'
+    };
+    document.body.style.backgroundColor = colors[theme] || colors.light;
+  };
+
   var primary = document.querySelector('[data-testid="primaryColumn"]');
   if (!primary) return;
   var homeHtml = primary.innerHTML;
@@ -380,6 +400,10 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
       '<div data-testid="statusView">' +
       '<nav><a href="/" role="link" data-testid="navHome"><span>Pagina inicial</span></a></nav>' +
       postHtml +
+      // REAL x.com reply-composer nesting (verified live 2026-10-05, m6 insertion probe, fact 2:
+      // the status-page inline "Post your reply" composer HAS its own toolBar — same tight
+      // text-row wrapper + sibling furniture-row shape as the home composer).
+      '<div>' +
       '<div>' +
       '<div data-testid="tweetTextarea_0RichTextInputContainer">' +
       '<div class="DraftEditor-root">' +
@@ -387,7 +411,12 @@ ${FIXTURE_POSTS.map((post) => renderPost(post, now)).join('\n')}
       '</div>' +
       '</div>' +
       '</div>' +
+      '<div data-testid="toolBar">' +
+      '<button type="button" data-testid="addMedia" aria-label="Adicionar midia"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M0 0h24v24H0z" fill="none"/></svg></button>' +
+      '<span data-testid="charCounter">0</span>' +
       '<button type="button" data-testid="tweetButtonInline" aria-disabled="true">Responder</button>' +
+      '</div>' +
+      '</div>' +
       '</div>';
   }
 

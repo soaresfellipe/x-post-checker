@@ -10,6 +10,7 @@
  */
 import type { PostSnapshot } from '@/core/post-snapshot';
 import type { SignalEntry } from '@/core/heuristic-engine';
+import { ThemeDetector, applyThemeTokens, setHostTheme } from '@/dom/theme';
 import {
   BADGE_COPY,
   POPOVER_HOST_ID,
@@ -44,6 +45,8 @@ export interface TargetPopover {
 
 export function createTargetPopover(callbacks: TargetPopoverCallbacks, doc: Document = document): TargetPopover {
   const win = doc.defaultView ?? window;
+  // M6 theme foundation: the popover's host carries the shared token block + the live data-theme.
+  const themeDetector = new ThemeDetector({ doc });
   let host: HTMLElement | null = null;
   let view: TargetPopoverView | null = null;
   let anchor: Element | null = null;
@@ -56,6 +59,7 @@ export function createTargetPopover(callbacks: TargetPopoverCallbacks, doc: Docu
     host.id = POPOVER_HOST_ID;
     host.style.pointerEvents = 'none';
     host.attachShadow({ mode: 'open' });
+    applyThemeTokens(host.shadowRoot!);
     doc.body.append(host);
     return host;
   }
@@ -252,11 +256,12 @@ export function createTargetPopover(callbacks: TargetPopoverCallbacks, doc: Docu
     open(nextView, article) {
       view = nextView;
       anchor = article;
-      ensureHost();
-      const shadow = host!.shadowRoot!;
+      const themedHost = ensureHost();
+      const shadow = themedHost.shadowRoot!;
       const style = doc.createElement('style');
       style.textContent = POPOVER_STYLE;
-      shadow.replaceChildren(style, renderPanel());
+      shadow.replaceChildren(applyThemeTokens(shadow), style, renderPanel());
+      setHostTheme(themedHost, themeDetector.getTheme());
       win.addEventListener('scroll', onRepositionSignal, { capture: true, passive: true } as AddEventListenerOptions);
       win.addEventListener('resize', onRepositionSignal);
       doc.addEventListener('keydown', onKeyDown, true);
@@ -266,8 +271,8 @@ export function createTargetPopover(callbacks: TargetPopoverCallbacks, doc: Docu
       if (!view || !host?.shadowRoot) return;
       const samePost = view.post.id === nextView.post.id;
       view = nextView;
-      const style = host.shadowRoot.querySelector('style');
-      host.shadowRoot.replaceChildren(style!, renderPanel());
+      const style = host.shadowRoot.querySelector('style:not([data-amplifyx-theme-tokens])');
+      host.shadowRoot.replaceChildren(applyThemeTokens(host.shadowRoot), style!, renderPanel());
       if (!samePost) reposition();
       else scheduleReposition();
     },
@@ -277,6 +282,7 @@ export function createTargetPopover(callbacks: TargetPopoverCallbacks, doc: Docu
     },
     destroy() {
       close_();
+      themeDetector.destroy();
     },
   };
 }
