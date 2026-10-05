@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DRAFT_DEBOUNCE_MS, type DraftSnapshot } from '../../src/core/draft-snapshot';
+import { scoreDraft, composeHeadline, type JevVerdict } from '../../src/core/heuristic-engine';
 import { draftCacheKey } from '../../src/core/jev-client/hash';
+import { WEAKNESS_LABELS } from '../../src/core/jev-client/config';
 import { DEFAULT_SETTINGS, type Settings } from '../../src/core/settings-store';
 import type { HookVariant, Optimization, OptimizationResult } from '../../src/core/optimizer';
 import { OVERLAY_HOST_ID, OVERLAY_ROW_TESTID, OVERLAY_TESTID, createScoreOverlay, type ScoreOverlay } from '../../src/dom/overlay';
@@ -73,12 +75,17 @@ const DEFAULT_VARIANTS: readonly HookVariant[] = [
   variant('story', VARIANT_STORY, 0.7),
 ];
 
-function optimized(draft: DraftSnapshot, variants: readonly HookVariant[] = DEFAULT_VARIANTS, dropAdvice?: string): OptimizationResult {
+function optimized(
+  draft: DraftSnapshot,
+  variants: readonly HookVariant[] = DEFAULT_VARIANTS,
+  dropAdvice?: string,
+  suggestions: Optimization['hashtags']['suggestions'] | null = null,
+): OptimizationResult {
   const optimization: Optimization = {
     draftHash: draftCacheKey(draft),
     variants: [...variants],
     hashtags: {
-      suggestions: [
+      suggestions: suggestions ?? [
         { tag: 'System', rationale: 'Comes straight from your draft ("system").', probability: 0.82 },
         { tag: 'Checklist', rationale: 'Comes straight from your draft ("checklist").', probability: 0.71 },
       ],
@@ -94,11 +101,14 @@ interface Harness {
   overlay: ScoreOverlay;
   watcher: ReturnType<typeof createComposerWatcher>;
   optimizeRequests: DraftSnapshot[];
+  analysisRequests: DraftSnapshot[];
   copied: string[];
   setKeyPresent(present: boolean): void;
   pushSettings(partial: Partial<Settings>): void;
   optimizeReply(result: OptimizationResult, draft?: DraftSnapshot): void;
   optimizeFail(draft?: DraftSnapshot): void;
+  /** Settles a same-draft analyze-draft reply (with a default verdict) for the last dispatch. */
+  analyzeReply(request?: DraftSnapshot): void;
   /** The expanded block, clicking the row first when collapsed (the only way to get it). */
   expanded(): HTMLElement;
 }
@@ -115,6 +125,7 @@ async function startHarness(
   const settings: Settings = { ...DEFAULT_SETTINGS, ...overrides.settings };
   let keyPresent = overrides.keyPresent ?? true;
   const optimizeRequests: DraftSnapshot[] = [];
+  const analysisRequests: DraftSnapshot[] = [];
   const copied: string[] = [];
 
   const overlay = createScoreOverlay({
@@ -132,7 +143,10 @@ async function startHarness(
   const watcher = createComposerWatcher({
     getMinDraftLength: () => settings.minDraftLength,
     getAutoAnalyze: () => settings.autoAnalyze,
-    dispatchAnalysis: (dispatch) => overlay.onAnalysisDispatched(dispatch.snapshot),
+    dispatchAnalysis: (dispatch) => {
+      analysisRequests.push(dispatch.snapshot);
+      overlay.onAnalysisDispatched(dispatch.snapshot);
+    },
   });
   watcher.onDraft((event) => overlay.onDraftCaptured(event));
   // Production wiring (content.ts): the immediate user-edit lane owns collapse (VAL-DRAFT-036).
@@ -148,6 +162,7 @@ async function startHarness(
     overlay,
     watcher,
     optimizeRequests,
+    analysisRequests,
     copied,
     setKeyPresent(present: boolean) {
       keyPresent = present;
@@ -162,6 +177,34 @@ async function startHarness(
     },
     optimizeFail(draft) {
       overlay.onOptimizeFailed(draft ?? optimizeRequests.at(-1)!);
+    },
+    analyzeReply(request) {
+      // A settled same-draft analyze-draft reply (the same shape overlay.test.ts replies with).
+      const snapshot = request ?? analysisRequests.at(-1)!;
+      const local = scoreDraft(snapshot);
+      const verdict: JevVerdict = {
+        ordinal: 3.44,
+        confidence: 0.65,
+        band: 'moderate',
+        strengths: [],
+        weaknesses: [WEAKNESS_LABELS.not_specific_enough],
+        suggestions: ['Lead with the number.'],
+      };
+      overlay.onAnalysisResult(
+        {
+          kind: 'analyzed',
+          local,
+          jev: verdict,
+          meta: {
+            analyzedAt: 1_700_000_000_000,
+            trigger: 'manual',
+            draftHash: draftCacheKey(snapshot),
+            headline: composeHeadline(local.headline, verdict.ordinal),
+            jevStatus: 'ok',
+          },
+        },
+        snapshot,
+      );
     },
     expanded(): HTMLElement {
       const shadow = document.querySelector<HTMLElement>(HOST_SELECTOR)?.shadowRoot;
@@ -291,6 +334,37 @@ describe('Optimizer lifecycle (VAL-OPT-002, VAL-OPT-003)', () => {
     expect(suggestions[0]!.getAttribute('title')).toContain('Comes straight from your draft');
     expect(find(box, 'overlay-optimizer-drop-advice')!.textContent).toMatch(/Drop #Grind/);
   });
+
+  it('renders drop advice even when the suggestions list is empty (M6-SCRUTINY-005, VAL-OPT-006)', async () => {
+    // An eligible draft with excess hashtags whose candidate list comes back empty (its own
+    // tags/stopwords are excluded — e.g. 'We use #Focus #Habits #Work #Systems.'): the advice to
+    // drop the fourth tag is still valid and MUST render independently of the empty suggestions.
+    const harness = await analyzeHarness();
+    click(find(harness.expanded(), 'overlay-optimize')!);
+    harness.optimizeReply(
+      optimized(
+        harness.optimizeRequests[0]!,
+        DEFAULT_VARIANTS,
+        'You use 5 hashtags. Drop #Grind, #Hustle.',
+        [],
+      ),
+    );
+
+    const box = find(harness.expanded(), 'overlay-optimizer-hashtags')!;
+    expect(find(box, 'overlay-optimizer-drop-advice')!.textContent).toMatch(/Drop #Grind/);
+    // The no-suggestions line is NOT shown — there is something to render (the advice).
+    expect(box.textContent).not.toContain('No hashtag suggestions for this draft.');
+  });
+
+  it('keeps the no-suggestions line only when there is truly nothing to render (VAL-OPT-006)', async () => {
+    const harness = await analyzeHarness();
+    click(find(harness.expanded(), 'overlay-optimize')!);
+    harness.optimizeReply(optimized(harness.optimizeRequests[0]!, DEFAULT_VARIANTS, undefined, []));
+
+    const box = find(harness.expanded(), 'overlay-optimizer-hashtags')!;
+    expect(find(box, 'overlay-optimizer-drop-advice')).toBeNull();
+    expect(box.textContent).toContain('No hashtag suggestions for this draft.');
+  });
 });
 
 describe('Copy action (VAL-OPT-004, VAL-OPT-005)', () => {
@@ -326,6 +400,42 @@ describe('Copy action (VAL-OPT-004, VAL-OPT-005)', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(copy.textContent).toBe('Copy');
     expect(copy.disabled).toBe(false);
+  });
+
+  it('holds the Copied pin across a same-draft analysis dispatch and result (M6-SCRUTINY-006, VAL-OPT-004)', async () => {
+    // The scrutiny failure path (autoAnalyze off): generate hooks, copy one, then activate
+    // "Analyze with AI" — the same-draft capture/dispatch and the result each re-render the
+    // expanded block and REBUILD the Copy buttons; the pin must survive on its ORIGINAL
+    // deadline (a pending AI response landing just after a copy has the same effect).
+    const harness = await analyzeHarness({ settings: { autoAnalyze: false } });
+    click(find(harness.expanded(), 'overlay-optimize')!);
+    harness.optimizeReply(optimized(harness.optimizeRequests[0]!));
+
+    const copyAt = () => find(harness.expanded(), 'overlay-optimizer-copy')! as HTMLButtonElement;
+    click(copyAt());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(copyAt().textContent).toBe('Copied');
+
+    // T+200ms: a same-draft analysis dispatch re-renders the block — the pin HOLDS.
+    await vi.advanceTimersByTimeAsync(200);
+    click(find(harness.expanded(), 'overlay-analyze')!);
+    expect(harness.analysisRequests).toHaveLength(1);
+    expect(copyAt().textContent).toBe('Copied');
+    expect(copyAt().disabled).toBe(true);
+
+    // T+~200ms: the result lands, re-rendering again — the pin still HOLDS.
+    harness.analyzeReply();
+    expect(copyAt().textContent).toBe('Copied');
+    expect(copyAt().disabled).toBe(true);
+
+    // T+1499ms (the ORIGINAL deadline minus 1): still pinned — no reset was restarted.
+    await vi.advanceTimersByTimeAsync(OPTIMIZER_COPY_RESET_MS - 200 - 1);
+    expect(copyAt().textContent).toBe('Copied');
+
+    // T+1500ms: reverted to a usable Copy button.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(copyAt().textContent).toBe('Copy');
+    expect(copyAt().disabled).toBe(false);
   });
 });
 

@@ -222,6 +222,13 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
   // draft change — re-running the optimizer on an identical draft is served by the background's
   // optimizer cache with zero API calls (VAL-OPT-009).
   let optimizerSlot: OptimizerSlot | null = null;
+  // M6-SCRUTINY-006 (VAL-OPT-004): the "Copied" feedback is PER DRAFT + PER VARIANT and
+  // DEADLINE-based — never owned by the button node, which any unrelated same-draft analysis
+  // render (a capture, a dispatch, a settling result) rebuilds with fresh buttons. Keyed by
+  // draft hash + variant index + text; the value is the reset deadline (ms epoch). A button
+  // rebuilt DURING the interval reads its live pin and renders "Copied" immediately; the timer
+  // reverts the pin at the ORIGINAL deadline (a re-render never restarts it).
+  const copiedPins = new Map<string, number>();
 
   let mounted = false;
   let destroyed = false;
@@ -469,23 +476,49 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
 
   // ---- optimizer rendering (§4.3; English-only surface, VAL-CROSS-016) ----
 
-  function copyButton(variant: HookVariant): HTMLElement {
+  function copiedPinKey(hash: string, index: number, variant: HookVariant): string {
+    return `${hash}\u0000${index}\u0000${variant.text}`;
+  }
+
+  function applyCopiedLabel(button: HTMLButtonElement): void {
+    button.textContent = OVERLAY_COPY.copiedLabel;
+    button.disabled = true;
+  }
+
+  function applyCopyLabel(button: HTMLButtonElement): void {
+    button.textContent = OVERLAY_COPY.copyButton;
+    button.disabled = false;
+  }
+
+  function copyButton(variant: HookVariant, pinKey: string): HTMLElement {
     const button = el('button', {
       className: 'btn-outline',
       testid: OVERLAY_TESTIDS.optimizerCopy,
       text: OVERLAY_COPY.copyButton,
     }) as HTMLButtonElement;
+    // A pin set earlier in this interval survives the node's rebuild: the fresh button renders
+    // "Copied" straight away. An expired pin seen here is garbage-collected on sight.
+    const liveDeadline = copiedPins.get(pinKey);
+    if (liveDeadline !== undefined) {
+      if (liveDeadline > Date.now()) applyCopiedLabel(button);
+      else copiedPins.delete(pinKey);
+    }
     // VAL-OPT-004: the button puts EXACTLY the variant text on the clipboard — no labels, no
     // extra text — and never touches the composer (VAL-OPT-005: copy is the transfer mechanism).
     button.addEventListener('click', () => {
       void copyVariant(variant.text)
         .then(() => {
-          button.textContent = OVERLAY_COPY.copiedLabel;
-          button.disabled = true;
+          const deadline = Date.now() + OPTIMIZER_COPY_RESET_MS;
+          copiedPins.set(pinKey, deadline);
+          applyCopiedLabel(button);
           setTimeout(() => {
+            // Superseded by a newer copy of the same variant: THAT copy's timer owns the revert.
+            if (copiedPins.get(pinKey) !== deadline) return;
+            copiedPins.delete(pinKey);
             if (button.isConnected) {
-              button.textContent = OVERLAY_COPY.copyButton;
-              button.disabled = false;
+              applyCopyLabel(button); // cheap in-place revert (keeps the carousel scroll position)
+            } else {
+              render(); // the pin's node was rebuilt by an unrelated render — repaint the view
             }
           }, OPTIMIZER_COPY_RESET_MS);
         })
@@ -494,7 +527,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     return button;
   }
 
-  function variantCard(variant: HookVariant): HTMLElement {
+  function variantCard(variant: HookVariant, pinKey: string): HTMLElement {
     const card = el('article', { className: 'hook-card', testid: OVERLAY_TESTIDS.optimizerVariant });
     card.dataset.variantKind = variant.kind;
     // VAL-OPT-007: an over-limit variant is explicitly flagged (never presented as ready).
@@ -514,7 +547,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       }),
     );
     if (variant.overLimit) footer.querySelector('.hook-chars')?.setAttribute('data-over-limit', 'true');
-    footer.append(copyButton(variant));
+    footer.append(copyButton(variant, pinKey));
     card.append(footer);
     return card;
   }
@@ -522,27 +555,33 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
   function hashtagsBlock(optimization: Extract<OptimizerSlot, { phase: 'done' }>['optimization']): HTMLElement {
     const box = el('div', { className: 'hashtags', testid: OVERLAY_TESTIDS.optimizerHashtags });
     const advice = optimization.hashtags;
-    if (advice.suggestions.length === 0) {
+    // M6-SCRUTINY-005 (VAL-OPT-006): the drop advice is INDEPENDENT of the suggestion list —
+    // a draft with excess hashtags can yield ZERO new candidates (its own tags and stopwords
+    // are excluded from the candidate pool) while the advice to drop the fourth tag stays fully
+    // valid. The "no suggestions" line shows only when there is truly nothing to render.
+    if (advice.suggestions.length > 0) {
+      // §4.3: "Add #Tag · #Tag" as --accent links with the rationale in the title tooltip. The
+      // tags are buttons styled as links (no navigation, composer untouched); any click behavior
+      // belongs to the optimizer feature, not the row.
+      const line = el('p', { className: 'hashtag-line' });
+      line.append(el('span', { text: `${OVERLAY_COPY.hashtagAdd} ` }));
+      advice.suggestions.forEach((suggestion, index) => {
+        if (index > 0) line.append(el('span', { text: ' · ' }));
+        const link = el('button', {
+          className: 'hashtag-link',
+          testid: OVERLAY_TESTIDS.optimizerHashtag,
+          text: `#${suggestion.tag}`,
+        });
+        link.title = suggestion.rationale;
+        line.append(link);
+      });
+      box.append(line);
+    } else if (advice.dropAdvice === undefined) {
       box.append(el('p', { text: OVERLAY_COPY.noHashtags }));
       return box;
     }
-    // §4.3: "Add #Tag · #Tag" as --accent links with the rationale in the title tooltip. The
-    // tags are buttons styled as links (no navigation, composer untouched); any click behavior
-    // belongs to the optimizer feature, not the row.
-    const line = el('p', { className: 'hashtag-line' });
-    line.append(el('span', { text: `${OVERLAY_COPY.hashtagAdd} ` }));
-    advice.suggestions.forEach((suggestion, index) => {
-      if (index > 0) line.append(el('span', { text: ' · ' }));
-      const link = el('button', {
-        className: 'hashtag-link',
-        testid: OVERLAY_TESTIDS.optimizerHashtag,
-        text: `#${suggestion.tag}`,
-      });
-      link.title = suggestion.rationale;
-      line.append(link);
-    });
-    box.append(line);
-    // VAL-OPT-006: when the draft already carries excess hashtags, name which to drop.
+    // VAL-OPT-006: when the draft already carries excess hashtags, name which to drop —
+    // rendered whether or not any new suggestions exist (M6-SCRUTINY-005).
     if (advice.dropAdvice !== undefined) {
       box.append(el('p', { testid: OVERLAY_TESTIDS.optimizerDropAdvice, text: advice.dropAdvice }));
     }
@@ -609,7 +648,13 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
         header.append(el('span', { className: 'opt-caption', text: OVERLAY_COPY.optimizerCaption }));
         section.append(header);
         const list = el('div', { className: 'hooks', testid: OVERLAY_TESTIDS.optimizerVariants });
-        for (const variant of view.optimizer.optimization.variants) list.append(variantCard(variant));
+        // The copied pins are keyed by THIS draft's identity + the variant's own identity, so a
+        // same-draft analysis re-render rebuilds every card onto its live pin
+        // (M6-SCRUTINY-006) while a different draft never sees a stale pin.
+        const hash = optimizerSlot?.hash ?? (capture !== null ? draftIdentity(capture) : '');
+        view.optimizer.optimization.variants.forEach((variant, index) =>
+          list.append(variantCard(variant, copiedPinKey(hash, index, variant))),
+        );
         section.append(list);
         section.append(hashtagsBlock(view.optimizer.optimization));
         break;
@@ -953,6 +998,9 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     reply = null;
     transportFailures.clear();
     optimizerSlot = null;
+    // Copied pins are per-draft (M6-SCRUTINY-006): with the draft state torn down there is no
+    // draft identity to pin to, so none survives.
+    copiedPins.clear();
   }
 
   function pendingCount(hash: string): number {
@@ -1027,6 +1075,12 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       // (a different draft's stale entry is pruned to keep the set bounded).
       for (const failedHash of transportFailures) {
         if (failedHash !== hash) transportFailures.delete(failedHash);
+      }
+      // Copied pins are per draft too (M6-SCRUTINY-006): a SAME-draft capture (e.g. the manual
+      // "Analyze with AI" re-capture) keeps its pins — the pin must outlive unrelated analysis
+      // renders — while a different draft's stale pins are pruned to keep the set bounded.
+      for (const pinKey of copiedPins.keys()) {
+        if (!pinKey.startsWith(`${hash}\u0000`)) copiedPins.delete(pinKey);
       }
       capture = event.snapshot;
       render();
