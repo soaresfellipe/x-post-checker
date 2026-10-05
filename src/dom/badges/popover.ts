@@ -42,6 +42,12 @@ export interface TargetPopover {
   open(view: TargetPopoverView, article: Element): void;
   /** Re-renders the open popover (settings changed, analysis settled). No-op when closed. */
   refresh(view: TargetPopoverView): void;
+  /**
+   * Points the open popover's anchor at the CURRENT chip (a repaint rebuilt it — the old button
+   * is detached and its zero rectangle would drag the card toward the viewport origin on the
+   * next geometry refresh; M6-SCRUTINY-008). No-op when closed.
+   */
+  rebindAnchor(anchor: Element): void;
   close(): void;
   readonly isOpen: boolean;
   destroy(): void;
@@ -329,6 +335,11 @@ export function createTargetPopover(callbacks: TargetPopoverCallbacks, doc: Docu
       else scheduleReposition();
     },
     close: close_,
+    rebindAnchor(next) {
+      if (!view) return;
+      anchor = next;
+      scheduleReposition();
+    },
     get isOpen() {
       return view !== null;
     },

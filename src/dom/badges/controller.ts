@@ -254,6 +254,14 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
       domEvent.preventDefault();
       openPopoverFor(event.post, score, button);
     });
+    // Anchoring (M6-SCRUTINY-008, VAL-TARGET-027): a repaint of the OPEN popover's post just
+    // replaced the chip — rebind the popover to the CURRENT button so later geometry refreshes
+    // (Deep-analysis refresh, scroll, resize) read a live rectangle, never the detached chip's
+    // zero rectangle (which slid the card toward the viewport origin).
+    if (open && open.post.id === event.post.id) {
+      open.chip = button;
+      popover.rebindAnchor(button);
+    }
   }
 
   function clearHost(event: ScanEvent): void {
@@ -276,7 +284,10 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
     stop() {
       running = false;
       open = null;
-      popover.destroy();
+      // Reversible stop (master disable): CLOSE the popover but never destroy it — the same
+      // controller (and its popover, and the popover's live ThemeDetector) is reused by start().
+      // Destroying here froze the detector's palette forever after (M6-SCRUTINY-001).
+      popover.close();
       pending.clear();
       settled.clear();
     },
@@ -285,7 +296,9 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
       refreshPopover();
     },
     destroy() {
+      // FINAL teardown only (the tab is gone): now the popover's own ThemeDetector may go too.
       this.stop();
+      popover.destroy();
       themeDetector.destroy();
     },
   };

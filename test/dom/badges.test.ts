@@ -45,6 +45,10 @@ interface Harness {
   settings: Settings;
   setSettings(update: Partial<Settings>): void;
   onSettingsChanged(): void;
+  /** The master-disable path (content.ts stopScanner): reversible — the controller is reused on re-enable. */
+  stopBadges(): void;
+  /** The master-enable path (content.ts startScanner's badges.start()). */
+  startBadges(): void;
   deepAnalysisCalls: { id: string }[];
   resolveDeepAnalysis: ((result: TargetAnalysisResult) => void)[];
   openOptionsCalls: number;
@@ -64,6 +68,9 @@ function badgeInShadow(host: Element, id?: string): HTMLElement | null {
 
 function startHarness(options: HarnessOptions = {}): Harness {
   const clock = options.clock ?? { now: NOW };
+  // Theme determinism: a prior test's body theme switch (an inline style on the PERSISTENT body
+  // element) must not leak into this test's ThemeDetector mapping.
+  document.body.style.backgroundColor = '';
   document.body.innerHTML = options.fixtureHtml ?? renderFixtureHtml(clock.now);
   const marker = document.createElement('div');
   marker.id = MARKER_HOST_ID;
@@ -90,6 +97,12 @@ function startHarness(options: HarnessOptions = {}): Harness {
     },
     onSettingsChanged() {
       badges.onSettingsChanged();
+    },
+    stopBadges() {
+      badges.stop();
+    },
+    startBadges() {
+      badges.start();
     },
     deepAnalysisCalls: [],
     resolveDeepAnalysis: [],
@@ -421,6 +434,10 @@ describe('popover interactions (VAL-TARGET-014/015/016, DOM tier)', () => {
     const styleText = host.shadowRoot!.querySelector('style:not([data-amplifyx-theme-tokens])')!.textContent ?? '';
     expect(styleText).toContain('.panel { pointer-events: none; }');
     expect(styleText).toContain('pointer-events: auto');
+    // M6-SCRUTINY-007: the neutral toggle is one of those own controls — a REAL pointer click
+    // must reach it (a synthetic dispatchEvent bypasses hit-testing, so pin the rule itself).
+    const toggleRule = styleText.match(/\.neutral-toggle\s*{[^}]*}/)?.[0] ?? '';
+    expect(toggleRule).toContain('pointer-events: auto');
     harness.teardown();
   });
 
@@ -628,6 +645,49 @@ describe('master lifecycle', () => {
     expect(document.querySelectorAll(`[${BADGE_HOST_ATTRIBUTE}="badge"]`).length).toBe(0);
     expect(harness.badgeCount()).toBe(0);
     expect(harness.popover()).toBeNull();
+  });
+
+  // M6-SCRUTINY-001 (VAL-THEME-001/002): the master-disable stop is REVERSIBLE — the reused
+  // popover's ThemeDetector must survive it, or the re-enabled session renders a frozen palette.
+  it('a disable→re-enable cycle keeps the popover theme live: theme switched while disabled, then live switches (VAL-THEME-001/002)', async () => {
+    const harness = startHarness();
+    await waitThrottle();
+    harness.clickBadge(POST_ID(0));
+    expect(document.getElementById(POPOVER_HOST_ID)!.getAttribute('data-theme')).toBe('light');
+
+    harness.stopBadges(); // content.ts's disable path — closes the popover, reuses the controller
+    expect(harness.popover()).toBeNull();
+
+    // The user switches X's theme WHILE the extension is disabled...
+    document.body.style.backgroundColor = 'rgb(21, 32, 43)'; // dim
+    await new Promise((resolve) => setTimeout(resolve, 0)); // happy-dom flushes mutations async
+    harness.startBadges();
+    await waitThrottle(); // the next scan pass repaints the badges
+    harness.clickBadge(POST_ID(0));
+    const reopened = document.getElementById(POPOVER_HOST_ID)!;
+    expect(reopened.getAttribute('data-theme')).toBe('dim'); // ...the popover must not resurrect light
+
+    // ...and it keeps following live switches on par with every other surface (no frozen palette).
+    document.body.style.backgroundColor = 'rgb(0, 0, 0)'; // lights out
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reopened.getAttribute('data-theme')).toBe('lights-out');
+    harness.teardown();
+  });
+
+  it('an initially-disabled session (stop before any open) yields a theme-live popover after re-enable (VAL-THEME-001/002)', async () => {
+    const harness = startHarness();
+    harness.stopBadges(); // the disable path a disabled tab takes at mount, before anything renders
+    document.body.style.backgroundColor = 'rgb(21, 32, 43)'; // dim while disabled
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    harness.startBadges();
+    await waitThrottle();
+    harness.clickBadge(POST_ID(0));
+    const host = document.getElementById(POPOVER_HOST_ID)!;
+    expect(host.getAttribute('data-theme')).toBe('dim');
+    document.body.style.backgroundColor = 'rgb(0, 0, 0)'; // lights out
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(host.getAttribute('data-theme')).toBe('lights-out');
+    harness.teardown();
   });
 });
 

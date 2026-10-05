@@ -152,6 +152,40 @@ const fixtureClicks = (page: Page) =>
     (window as unknown as { __fixtureClicks: { articles: Record<string, number>; controls: Record<string, number> } }).__fixtureClicks,
   );
 
+/**
+ * The 1b anchored-below-chip geometry in ONE atomic snapshot (evaluate does not pierce shadow
+ * roots — traverse manually): the panel's box next to the LIVE chip with the given post id.
+ * Sampling the chip fresh at call time is what makes this a live-chip assertion (M6-SCRUTINY-008).
+ */
+const chipPopoverGeometry = (page: Page, id: string) =>
+  page.evaluate((postId: string) => {
+    const panel = document.getElementById('amplifyx-target-popover-host')?.shadowRoot?.querySelector('[data-testid="amplifyx-target-popover"]');
+    const panelRect = panel?.getBoundingClientRect();
+    for (const host of document.querySelectorAll('[data-amplifyx-host="badge"]')) {
+      const badge = host.shadowRoot?.querySelector(`[data-testid="amplifyx-target-badge"][data-amplifyx-post-id="${postId}"]`);
+      if (!badge) continue;
+      const chipRect = badge.getBoundingClientRect();
+      return {
+        chipTop: chipRect.top,
+        chipBottom: chipRect.bottom,
+        chipLeft: chipRect.left,
+        panelTop: panelRect?.top ?? null,
+        panelLeft: panelRect?.left ?? null,
+        panelWidth: panelRect?.width ?? null,
+      };
+    }
+    return null;
+  }, id);
+
+/** Polls until the popover sits 6px below the CURRENT chip, left-aligned (settled, whole-px). */
+const expectAnchoredBelowLiveChip = async (page: Page, id: string): Promise<void> => {
+  await expect.poll(async () => {
+    const g = await chipPopoverGeometry(page, id);
+    if (!g || g.panelTop === null || g.panelLeft === null) return false;
+    return Math.abs(g.panelTop - (g.chipBottom + 6)) < 1.5 && Math.abs(g.panelLeft - g.chipLeft) < 1.5;
+  }, { timeout: 5_000 }).toBe(true);
+};
+
 test.describe('target badges (fixture E2E)', () => {
   test('renders badges only above the threshold with score + English reason, zero API calls while scanning (VAL-TARGET-005/006/019, VAL-SETUP-012)', async ({ context }) => {
     const jev = await countJevAndAbort(context);
@@ -250,6 +284,93 @@ test.describe('target badges (fixture E2E)', () => {
     await expect(badge1).toBeVisible();
     await page.waitForTimeout(600); // past the scanner throttle: all mutation passes settled
     expect(await page.locator(`${BADGE}[data-amplifyx-post-id="${POST_1}"]`).count()).toBe(1);
+    expect(errors).toEqual([]);
+  });
+
+  test('the "N neutral ›" toggle answers a REAL pointer click: rows open/close, the native post behind never activates (VAL-TARGET-027, M6-SCRUTINY-007)', async ({ context }) => {
+    const errors: string[] = [];
+    const page = await openFixture(context);
+    page.on('pageerror', (error) => errors.push(String(error)));
+    const badge1 = page.locator(`${BADGE}[data-amplifyx-post-id="${POST_1}"]`);
+    await expect(badge1).toBeVisible();
+    await badge1.click();
+    const popover = page.locator(`${POPOVER}[data-amplifyx-post-id="${POST_1}"]`);
+    await expect(popover).toBeVisible();
+
+    const rows = popover.locator('[data-testid="amplifyx-popover-signal-rows"]');
+    const toggle = popover.locator('[data-testid="amplifyx-popover-neutral-toggle"]');
+    await expect(rows).toBeHidden();
+    // REAL pointer input (mouse down/up at the control's box — never dispatchEvent/evaluate):
+    // the inert panel must not swallow the click, and the click must not fall through to the
+    // native post behind the popover either.
+    await toggle.click({ timeout: 5_000 });
+    await expect(rows).toBeVisible();
+    await toggle.click({ timeout: 5_000 });
+    await expect(rows).toBeHidden();
+
+    // Pointer discipline: neither toggle click reached the page behind the popover.
+    const clicks = await fixtureClicks(page);
+    expect(clicks.articles[POST_1] ?? 0).toBe(0);
+    expect(Object.keys(clicks.controls)).toEqual([]);
+    expect(new URL(page.url()).pathname).toBe('/');
+    expect(errors).toEqual([]);
+  });
+
+  test('a same-post repaint rebinds the open popover: the Deep-analysis refresh stays anchored 6px below the CURRENT chip (VAL-TARGET-027, M6-SCRUTINY-008)', async ({ context }) => {
+    const jev = await stubJev(context);
+    await enableTargetsAi(context);
+    const errors: string[] = [];
+    const page = await openFixture(context);
+    page.on('pageerror', (error) => errors.push(String(error)));
+    const badge1 = page.locator(`${BADGE}[data-amplifyx-post-id="${POST_1}"]`);
+    await expect(badge1).toBeVisible();
+    await badge1.click();
+    const popover = page.locator(`${POPOVER}[data-amplifyx-post-id="${POST_1}"]`);
+    await expect(popover).toBeVisible();
+
+    // Scan-driven repaint of the SAME visible post: the chip button is rebuilt and the old one
+    // (the popover's retained anchor) becomes detached.
+    await page.evaluate(
+      (id: string) => (window as unknown as { __fixtureReplaceArticleInner: (id: string) => boolean }).__fixtureReplaceArticleInner(id),
+      POST_1,
+    );
+    await expect(badge1).toBeVisible();
+    await page.waitForTimeout(600); // past the scanner throttle: the repaint pass settled
+
+    // The refresh a repaint invalidates: Deep analysis settles and re-repositions the popover,
+    // which must read the LIVE chip's rectangle — a detached anchor's zero rectangle would slide
+    // the card toward the viewport origin instead of 6px below the current chip.
+    await page.locator(DEEP_ANALYSIS).click();
+    await expect(page.locator(`${POPOVER} ${POPOVER_AI}`)).toHaveAttribute('data-ai-state', 'verdict');
+    expect(jev.count()).toBe(1);
+    await expectAnchoredBelowLiveChip(page, POST_1);
+    expect(errors).toEqual([]);
+  });
+
+  test('scroll/resize after a same-post repaint keeps the popover anchored 6px below the CURRENT chip (VAL-TARGET-027, M6-SCRUTINY-008)', async ({ context }) => {
+    const errors: string[] = [];
+    const page = await openFixture(context);
+    page.on('pageerror', (error) => errors.push(String(error)));
+    const badge1 = page.locator(`${BADGE}[data-amplifyx-post-id="${POST_1}"]`);
+    await expect(badge1).toBeVisible();
+    await badge1.click();
+    const popover = page.locator(`${POPOVER}[data-amplifyx-post-id="${POST_1}"]`);
+    await expect(popover).toBeVisible();
+
+    // Scan-driven repaint, then the scroll/resize legs: every reposition signal must read the
+    // live chip, never the detached pre-repaint anchor.
+    await page.evaluate(
+      (id: string) => (window as unknown as { __fixtureReplaceArticleInner: (id: string) => boolean }).__fixtureReplaceArticleInner(id),
+      POST_1,
+    );
+    await expect(badge1).toBeVisible();
+    await page.waitForTimeout(600); // past the scanner throttle
+    await page.evaluate(() => window.scrollTo(0, 240)); // a scroll pass repaints again + repositions
+    await page.waitForTimeout(400);
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(400);
+    await page.setViewportSize({ width: 1280, height: 900 }); // resize-triggered reposition
+    await expectAnchoredBelowLiveChip(page, POST_1);
     expect(errors).toEqual([]);
   });
 

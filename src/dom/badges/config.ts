@@ -177,6 +177,9 @@ export const POPOVER_STYLE = `
   .chip[data-direction='positive'] { color: var(--good-text); background: var(--good-bg); }
   .chip[data-direction='negative'] { color: var(--weak-text); background: var(--weak-bg); }
   .neutral-toggle {
+    /* Own-control exception (M6-SCRUTINY-007): the inert panel must not swallow this button's
+       REAL pointer clicks — like the close/link controls, it re-enables hit-testing itself. */
+    pointer-events: auto;
     min-height: 28px; padding: 6px 10px;
     border: 0; border-radius: 999px; background: var(--hover); color: var(--fg2-hover);
     font: 500 13px/16px system-ui, -apple-system, sans-serif; cursor: pointer;
