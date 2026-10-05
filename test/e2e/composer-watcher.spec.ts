@@ -17,15 +17,26 @@ async function openFixture(context: BrowserContext): Promise<Page> {
 }
 
 /**
- * The signal breakdown lives INSIDE the expanded panel (M5 collapsed-first): the collapsed pill
- * carries the headline alone, so any assertion about signals/Jev/optimizer content must open the
- * panel by clicking the pill first.
+ * The signal breakdown lives INSIDE the expanded block (M6 in-flow model): the collapsed row
+ * carries only the summary, so any assertion about signals/Jev/optimizer content must open the
+ * block by clicking the row first.
  */
 async function expand(page: Page): Promise<void> {
   if ((await page.getByTestId('amplifyx-overlay').count()) > 0) return;
-  await expect(page.getByTestId('amplifyx-overlay-pill')).toBeVisible({ timeout: 5_000 });
-  await page.getByTestId('amplifyx-overlay-pill').click();
+  await expect(page.getByTestId('amplifyx-overlay-row')).toBeVisible({ timeout: 5_000 });
+  await page.getByTestId('amplifyx-overlay-row').click();
   await expect(page.getByTestId('amplifyx-overlay')).toBeVisible();
+}
+
+/**
+ * Reveals the FULL signal rows list: in the design-1b model the collapsed block shows at most 4
+ * chips, and the rows list (where the neutral reply-mutual row lives) renders only after the
+ * "N neutral ›" toggle is activated.
+ */
+async function revealRows(page: Page): Promise<void> {
+  const toggle = page.getByTestId('overlay-neutral-toggle');
+  if ((await toggle.count()) > 0) await toggle.click();
+  await expect(page.getByTestId('overlay-signal-rows')).toBeVisible();
 }
 
 async function openOptions(context: BrowserContext): Promise<Page> {
@@ -203,6 +214,7 @@ test.describe('composer watcher', () => {
       await page.keyboard.type('Reply draft that is long enough');
       await expand(page);
 
+      await revealRows(page);
       const signals = page.getByTestId('overlay-signals');
       await expect(signals).toBeVisible({ timeout: 5_000 });
       const row = signals.locator('li[data-signal-id="reply-mutual"]');
@@ -224,6 +236,7 @@ test.describe('composer watcher', () => {
     await page.locator(HOME_COMPOSER).click();
     await page.keyboard.type('Reply draft typed on a status page, long enough');
     await expand(page);
+    await revealRows(page);
     const signals = page.getByTestId('overlay-signals');
     await expect(signals).toBeVisible({ timeout: 5_000 });
     const row = signals.locator('li[data-signal-id="reply-mutual"]');
@@ -241,6 +254,7 @@ test.describe('composer watcher', () => {
     await page.locator(HOME_COMPOSER).click();
     await page.keyboard.type('Reply draft on the status page, long enough');
     await expand(page);
+    await revealRows(page);
     const replyRow = page.getByTestId('overlay-signals').locator('li[data-signal-id="reply-mutual"]');
     await expect(replyRow).toContainText('reply - follow state not visible', { timeout: 5_000 });
 
@@ -251,6 +265,7 @@ test.describe('composer watcher', () => {
     await page.locator(HOME_COMPOSER).click();
     await page.keyboard.type('Draft typed back on the home timeline');
     await expand(page);
+    await revealRows(page);
     await expect(replyRow).toContainText('not a reply', { timeout: 5_000 });
 
     // Home -> status again (browser back through the SPA history): the route flips it back.
@@ -260,6 +275,7 @@ test.describe('composer watcher', () => {
     await page.locator(HOME_COMPOSER).click();
     await page.keyboard.type('Reply draft on the status page again');
     await expand(page);
+    await revealRows(page);
     await expect(replyRow).toContainText('reply - follow state not visible', { timeout: 5_000 });
   });
 });

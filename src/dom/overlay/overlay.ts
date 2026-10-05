@@ -1,37 +1,40 @@
 /**
  * ScoreOverlay controller — the draft-analysis surface near the active composer.
  *
- * COLLAPSED-FIRST (M5, user-approved after real-site testing): the always-expanded panel covered
- * X's own mention-autocomplete and could not be scrolled, so the default surface is a COMPACT
- * PILL showing ONLY the headline number. Clicking it expands the full detail panel; the panel
- * collapses on an outside click (which never reaches the page), on Escape, and on ANY new user
- * edit in the composer — that last rule is the deterministic anti-occlusion guarantee, since while
- * typing only the pill exists and X's mention/emoji/GIF popups grow into free space below it.
- * No qualifying draft means NO UI at all: no pill, no panel, no awaiting balloon.
+ * DESIGN 1b (M6, user-approved 2026-10-05): nothing floats over the composer. The collapsed
+ * surface is a fixed 36px STATUS ROW inserted IN DOCUMENT FLOW as the immediate preceding sibling
+ * of X's `[data-testid="toolBar"]` inside the composer block (probe-verified on real x.com,
+ * `library/x-dom.md`: React does not disturb a sibling inserted there, and X's own @mention
+ * dropdown draws OVER an in-flow element — no yield mechanism exists or is needed). Clicking the
+ * row expands the analysis INLINE, below the row inside the same host, pushing the toolbar down;
+ * the expanded block has a MAX HEIGHT with internal wheel/trackpad scroll. Collapse triggers:
+ * outside click (which collapses AND reaches the page — there is NO capture lane), Escape, and
+ * any new user edit in the composer. Absolute placement survives ONLY as the fallback when the
+ * toolbar is not found, with the same row anatomy. No qualifying draft means NO UI at all.
  *
- * Ownership rules (architecture.md): the surface lives in its OWN Shadow-DOM host appended to
- * `document.body`, never inside the React-managed x.com tree; and pointer capture is deliberately
- * asymmetric — the host is `pointer-events: none` always, only the pill button takes hits, and
- * ONLY the expanded panel re-enables hits on itself (the one user-approved exception to the
- * no-pointer-capture convention, AGENTS.md).
+ * Ownership rules (architecture.md): the surface lives in its OWN Shadow-DOM host the extension
+ * owns; the host is `pointer-events: none` always, and only the extension's own controls (the
+ * row button, the expanded block's buttons/scrollable content) take hits — page clicks, typing,
+ * scrolling and posting are never intercepted. Inserting the host before the toolbar is a NEW
+ * DOM insertion into X's tree: it is idempotent, the mutation observer re-attaches the host
+ * whenever a React re-render detaches it, and X's own nodes are never moved or modified.
  *
  * State machine (see `view-model.ts`): `empty` below the minimum length renders nothing at all;
- * `analyzed` renders the local "Algorithm signals" half immediately at capture time (never waiting
- * for Jev — VAL-DRAFT-006) plus the "AI judgment" half that arrives asynchronously and is clearly
- * distinguished (VAL-DRAFT-008). Replies match drafts by hash, so the newest draft always wins
- * (VAL-DRAFT-011), and every Jev half-state (pending, verdict, no key, off, failure) renders an
- * explicit English notice inside the expanded panel while the pill keeps the usable local score.
+ * `analyzed` renders the local half immediately at capture time (never waiting for Jev —
+ * VAL-DRAFT-006) plus the AI half that arrives asynchronously and is clearly distinguished
+ * (VAL-DRAFT-008). Replies match drafts by hash, so the newest draft always wins (VAL-DRAFT-011),
+ * and every Jev state renders its verbatim copy from `config.ts` (design-1b §6).
  */
 import type { DraftSnapshot } from '@/core/draft-snapshot';
-import { JEV_BAND_LABELS, type JevVerdict } from '@/core/heuristic-engine';
+import { JEV_BAND_LABELS, type JevVerdict, type SignalEntry } from '@/core/heuristic-engine';
 import { DEFAULT_SETTINGS, type Settings } from '@/core/settings-store';
 import type { DraftAnalysis, DraftAnalysisResult } from '@/core/analyzer';
 import { VARIANT_LABELS, type HookVariant, type OptimizationResult } from '@/core/optimizer';
-import type { SignalEntry } from '@/core/heuristic-engine';
 import { findComposerAnchorRegion } from '@/dom/composer-watcher';
 import { ThemeDetector, applyThemeTokens, setHostTheme } from '@/dom/theme';
-import { SELECTORS } from '@/selectors';
+import { findFirst } from '@/selectors';
 import {
+  JEVD_BAND_TREATMENT,
   OPTIMIZER_COPY_RESET_MS,
   OVERLAY_COPY,
   OVERLAY_HEADLINE_TIERS,
@@ -39,106 +42,158 @@ import {
   OVERLAY_PLACEMENT,
   OVERLAY_TESTIDS,
 } from './config';
-import { clampPillClearOfControl, computeAnchorPosition, computePillPosition } from './position';
+import { computeAnchorPosition } from './position';
 import { deriveOverlayView, draftIdentity } from './view-model';
-import type { OptimizerSection, OptimizerSlot, OverlayView, ScoreOverlay, ScoreOverlayOptions } from './types';
+import type { OptimizerSlot, OverlayView, ScoreOverlay, ScoreOverlayOptions } from './types';
+
+/** The `analyzed` view — every render surface exists only for a qualifying draft. */
+type AnalyzedView = Extract<OverlayView, { phase: 'analyzed' }>;
 
 const STYLE = `
   /*
-   * Pointer discipline (AGENTS.md, the one approved exception made explicit):
-   *   - the HOST is always pointer-events: none, so it can never intercept a page click;
-   *   - the collapsed state re-enables hits ONLY on the pill itself — nothing else, so typing,
-   *     media attach, posting, timeline clicks and page scrolling pass through untouched;
-   *   - the EXPANDED panel re-enables hits on itself, because the user explicitly opened it and
-   *     the first outside click must close it without reaching the page (VAL-DRAFT-037).
+   * Pointer discipline (AGENTS.md, no exceptions since M6): the HOST is always
+   * pointer-events: none, so it can never intercept a page click; only the extension's OWN
+   * controls (the row button, the expanded block's buttons/scrollable content) re-enable hits.
+   * There is NO capture lane: an outside click while expanded collapses the block AND reaches
+   * the page behind it (VAL-DRAFT-037, the M5 swallow exception was removed).
    */
-  :host { all: initial; position: absolute; z-index: 2147483000; pointer-events: none; }
-  .panel-root { pointer-events: none; }
-  .pill {
+  :host { all: initial; display: block; pointer-events: none; }
+  :host([data-placement='fallback']) { position: absolute; z-index: 2147483000; width: min(340px, calc(100vw - 16px)); }
+  .panel-root { display: block; }
+
+  /* ---- the collapsed 36px status row (design-1b §3) ---- */
+  .row {
+    pointer-events: auto;
+    box-sizing: border-box;
+    display: flex; align-items: center; gap: 8px;
+    width: 100%; height: 36px;
+    margin: 0; padding: 10px 0;
+    border: 0; border-top: 1px solid var(--line);
+    background: var(--bg); color: var(--fg);
+    font: 400 13px/16px system-ui, -apple-system, sans-serif;
+    text-align: left; cursor: pointer;
+  }
+  .row .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; }
+  .row .dot[data-tier='good'] { background: var(--good); }
+  .row .dot[data-tier='ok'] { background: var(--ok); }
+  .row .dot[data-tier='weak'] { background: var(--weak); }
+  .row .score { flex: 0 0 auto; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .row .viral-label { flex: 0 0 auto; font-weight: 500; white-space: nowrap; }
+  .row .summary { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg2); }
+  .row .ai { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; color: var(--fg2); }
+  .row .ai-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg2); }
+  .row .ai-dot[data-state='pending'] { background: var(--accent); animation: amplifyx-pulse 1.2s ease-in-out infinite; }
+  .row .ai-dot[data-state='verdict'] { background: var(--good); }
+  .row .ai-dot[data-state='error'] { background: var(--weak); }
+  .row .chevron { flex: 0 0 auto; transition: transform 0.15s ease; color: var(--fg2); }
+  :host([data-expanded='true']) .row .chevron { transform: rotate(180deg); }
+  @keyframes amplifyx-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  @media (prefers-reduced-motion: reduce) {
+    .row .ai-dot[data-state='pending'] { animation: none; opacity: 0.6; }
+  }
+
+  /* ---- the expanded inline analysis (design-1b §4; D2: max height + internal scroll) ---- */
+  .expanded {
+    pointer-events: auto;
+    box-sizing: border-box;
+    display: flex; flex-direction: column; gap: 14px;
+    padding: 0 0 12px;
+    background: var(--bg); color: var(--fg);
+    font: 400 13px/16px system-ui, -apple-system, sans-serif;
+    max-height: ${String(OVERLAY_PLACEMENT.expandedMaxHeight)}px;
+    overflow-y: auto;
+  }
+
+  /* ---- signal chips + the "N neutral ›" toggle (§4.1) ---- */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; font-weight: 500; font-size: 13px; }
+  .chip .points { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .chip[data-direction='positive'] { color: var(--good); background: var(--good-bg); }
+  .chip[data-direction='negative'] { color: var(--weak); background: var(--weak-bg); }
+  .neutral-toggle {
+    min-height: 28px; padding: 6px 10px;
+    border: 0; border-radius: 999px; background: var(--hover); color: var(--fg2);
+    font: 500 13px/16px system-ui, -apple-system, sans-serif; cursor: pointer;
+  }
+  .rows { list-style: none; margin: 0; padding: 0; }
+  .rows li { display: flex; gap: 6px; padding: 2px 0; }
+  .rows .label { flex: 0 0 44%; }
+  .rows .value { flex: 1; color: var(--fg2); }
+  .rows .points { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+  .rows .points[data-direction='positive'] { color: var(--good); }
+  .rows .points[data-direction='negative'] { color: var(--weak); }
+
+  /* ---- the condensed AI block (§4.2 / §6) ---- */
+  .ai-block { display: flex; flex-direction: column; gap: 6px; }
+  .ai-block .notice { margin: 0; color: var(--fg2); }
+  .ai-block .notice button { pointer-events: auto; background: none; border: 0; padding: 0; color: var(--accent); font: inherit; font-weight: 500; text-decoration: none; cursor: pointer; }
+  .ai-block .notice button:hover { text-decoration: underline; }
+  .ai-head { display: flex; align-items: center; gap: 8px; }
+  .ai-chip { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; font-weight: 500; font-size: 13px; white-space: nowrap; }
+  .ai-chip[data-treatment='good'] { color: var(--good); background: var(--good-bg); }
+  .ai-chip[data-treatment='ok'] { color: var(--fg2); background: var(--hover); }
+  .ai-chip[data-treatment='weak'] { color: var(--weak); background: var(--weak-bg); }
+  .ai-head .weakness { color: var(--fg); font-size: 14px; }
+  .try-line { margin: 0; color: var(--fg2); }
+
+  /* ---- the optimizer section (§4.3) ---- */
+  .optimizer { display: flex; flex-direction: column; gap: 8px; }
+  .optimizer .opt-header { display: flex; align-items: baseline; gap: 8px; }
+  .optimizer .opt-title { font-weight: 700; font-size: 14px; }
+  .optimizer .opt-caption { color: var(--fg2); font-size: 12px; }
+  .btn-outline {
     pointer-events: auto;
     box-sizing: border-box;
     display: inline-flex; align-items: center; justify-content: center;
-    min-width: 26px; height: 20px; padding: 0 7px;
-    border: 1px solid #cfd9de; border-radius: 999px;
-    background: #ffffff; color: #0f1419;
-    font: 700 12px/1 system-ui, -apple-system, sans-serif;
-    font-variant-numeric: tabular-nums;
-    cursor: pointer; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+    min-height: 28px; padding: 0 12px;
+    border: 1px solid var(--outline); border-radius: 999px;
+    background: transparent; color: var(--fg);
+    font: 700 13px/16px system-ui, -apple-system, sans-serif; cursor: pointer;
   }
-  .pill[data-tier="good"] { color: #00876a; border-color: #00876a; }
-  .pill[data-tier="ok"] { color: #8a6400; border-color: #b58105; }
-  .pill[data-tier="weak"] { color: #c4302b; border-color: #c4302b; }
-  .pill[data-jev-state="pending"] { border-style: dashed; }
-  .panel {
+  .btn-outline:hover { background: var(--hover); }
+  .btn-outline:disabled { cursor: default; background: transparent; }
+  .btn-outline[data-size='32'] { height: 32px; font-size: 14px; }
+  .optimizer .pending-line { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--fg2); }
+  .optimizer .pending-line .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: amplifyx-pulse 1.2s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) {
+    .optimizer .pending-line .dot { animation: none; opacity: 0.6; }
+  }
+  .hooks { display: flex; gap: 8px; overflow: auto hidden; }
+  .hook-card { flex: 0 0 232px; box-sizing: border-box; width: 232px; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+  .hook-card .hook-kind { margin: 0 0 4px; font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--fg2); }
+  .hook-card .hook-text {
+    display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4;
+    overflow: hidden; margin: 0 0 6px; font-size: 14px; line-height: 19px;
+  }
+  .hook-card .hook-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .hook-card .hook-chars { color: var(--fg2); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .hook-card .hook-chars[data-over-limit='true'] { color: var(--weak); font-weight: 700; }
+  .hashtags { margin: 0; color: var(--fg2); }
+  .hashtag-line { margin: 0; }
+  .hashtag-link {
     pointer-events: auto;
-    box-sizing: border-box;
-    width: min(340px, calc(100vw - 16px));
-    max-height: none;
-    overflow-y: auto;
-    padding: 12px;
-    border: 1px solid #cfd9de; border-radius: 12px;
-    background: #ffffff; color: #0f1419;
-    font: 400 13px/1.45 system-ui, -apple-system, sans-serif;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+    background: none; border: 0; padding: 0;
+    color: var(--accent); font: inherit; font-weight: 500; text-decoration: none; cursor: pointer;
   }
-  .panel header { display: flex; align-items: baseline; gap: 6px; margin-bottom: 8px; }
-  .panel .title { font-weight: 700; font-size: 14px; }
-  .panel .subtitle { color: #536471; font-size: 12px; }
-  .gauge { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 2px; }
-  .gauge .number { font-size: 30px; font-weight: 700; line-height: 1; }
-  .gauge .number[data-tier="good"] { color: #00a680; }
-  .gauge .number[data-tier="ok"] { color: #b58105; }
-  .gauge .number[data-tier="weak"] { color: #d64545; }
-  .gauge .gauge-label { color: #536471; font-size: 12px; }
-  .gauge-note { color: #536471; font-size: 11px; margin: 0 0 8px; }
-  section { border-top: 1px solid #eff3f4; margin-top: 8px; padding-top: 2px; }
-  section h3 {
-    margin: 8px 0 4px; font-size: 11px; font-weight: 700;
-    text-transform: uppercase; letter-spacing: 0.06em; color: #536471;
-  }
-  section[data-testid="overlay-signals"] h3 { color: #0f1419; }
-  ul { list-style: none; margin: 0; padding: 0; }
-  li { display: flex; gap: 6px; padding: 2px 0; }
-  li .label { flex: 0 0 44%; }
-  li .value { flex: 1; color: #536471; }
-  li .points { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
-  li .points[data-direction="positive"] { color: #00a680; }
-  li .points[data-direction="negative"] { color: #d64545; }
-  .jev-state { margin: 0 0 4px; }
-  .jev-state .band { font-weight: 700; }
-  .subheading { margin: 6px 0 2px; font-size: 12px; font-weight: 600; color: #536471; }
-  .notice { color: #536471; margin: 4px 0; }
-  .pending { color: #536471; font-style: italic; }
-  .error-reason { color: #d64545; margin: 2px 0; }
-  button {
-    pointer-events: auto;
-    margin-top: 6px; padding: 4px 12px;
-    border: 0; border-radius: 999px; cursor: pointer;
-    background: #1d9bf0; color: #ffffff; font: 600 12px/1.4 system-ui, sans-serif;
-  }
-  button:disabled { background: #d0d9de; cursor: default; }
-  .variant-kind { display: block; font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
-    text-transform: uppercase; color: #536471; margin-top: 6px; }
-  .variant-text { margin: 2px 0; color: #0f1419; }
-  .variant-chars { display: block; color: #536471; font-size: 11px; margin: 0 0 2px; }
-  .variant-chars[data-over-limit="true"] { color: #d64545; font-weight: 600; }
-  .optimizer-variant { display: block; border-top: 1px solid #eff3f4; padding: 4px 0 6px; }
-  .optimizer-variant li, .optimizer-hashtag { display: block; }
-  .optimizer-hashtag { padding: 2px 0; }
-  .hashtag-tag { font-weight: 600; margin-right: 6px; }
-  .hashtag-rationale { color: #536471; }
-  .drop-advice { color: #536471; margin: 4px 0 0; }
+  .hashtag-link:hover { text-decoration: underline; }
+  .error-line { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--fg); }
+  .error-line .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--weak); }
+  .error-line button { pointer-events: auto; background: none; border: 0; padding: 0; color: var(--accent); font: inherit; font-weight: 500; text-decoration: none; cursor: pointer; }
+  .error-line button:hover { text-decoration: underline; }
 `;
 
-function headlineTier(headline: number): 'good' | 'ok' | 'weak' {
+type HeadlineTier = 'good' | 'ok' | 'weak';
+
+function headlineTier(headline: number): HeadlineTier {
   if (headline >= OVERLAY_HEADLINE_TIERS.good) return 'good';
   if (headline >= OVERLAY_HEADLINE_TIERS.ok) return 'ok';
   return 'weak';
 }
 
+/** Design-1b §4.1: explicit sign, U+2212 minus for negatives (never a bare hyphen). */
 function formatPoints(points: number): string {
   if (points > 0) return `+${points}`;
-  if (points < 0) return String(points);
+  if (points < 0) return `\u2212${Math.abs(points)}`;
   return '0';
 }
 
@@ -159,35 +214,31 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
   const pending = new Map<string, number>();
   let reply: { hash: string; result: DraftAnalysis } | null = null;
   // Per-draft terminal-state ownership (VAL-DRAFT-018): each draft hash owns its own transport
-  // failure, so a settling dispatch can never displace another draft's terminal state (a single
-  // slot let an older failing draft erase the current draft's error and downgrade it to ready).
+  // failure, so a settling dispatch can never displace another draft's terminal state.
   const transportFailures = new Set<string>();
   // The Optimize lifecycle slot (m4-optimizer): per-draft, matched by identity, reset on every
-  // draft change — re-clicking Optimize on an identical draft is then served by the background's
+  // draft change — re-running the optimizer on an identical draft is served by the background's
   // optimizer cache with zero API calls (VAL-OPT-009).
   let optimizerSlot: OptimizerSlot | null = null;
 
   let mounted = false;
   let destroyed = false;
-  // M5: expansion is EXPLICIT (a pill click) and never happens on its own. `expanded` is
+  // M6: expansion is EXPLICIT (a row click) and never happens on its own. `expanded` is
   // per-composer-attach state, so navigating away and back always starts collapsed again.
   let expanded = false;
   /**
-   * True only while the panel's OWN "Analyze with AI" action is re-capturing the draft. That
-   * re-capture is not a user edit, so it must not collapse the panel the user just opened.
+   * True only while the expanded block's OWN "Analyze with AI" action is re-capturing the draft.
+   * That re-capture is not a user edit, so it must not collapse the block the user just opened.
    */
   let manualCapture = false;
-  // Host dimensions by state, so a toggle never measures a stale size for the new one.
-  let collapsedSize: { width: number; height: number } = {
-    width: OVERLAY_PLACEMENT.pillWidth,
-    height: OVERLAY_PLACEMENT.pillHeight,
-  };
-  let expandedSize: { width: number; height: number } = {
-    width: OVERLAY_PLACEMENT.fallbackWidth,
-    height: OVERLAY_PLACEMENT.fallbackHeight,
-  };
+  // The "N neutral ›" toggle: a LOCAL expansion of the full rows list — no re-render of the rest
+  // of the overlay (VAL-DRAFT-044).
+  let neutralRowsVisible = false;
   let repositionScheduled = false;
   let mutationObserver: MutationObserver | null = null;
+  // Clicks observed INSIDE the host's shadow root (see createHostElement): the outside-click
+  // collapse lane must never treat the extension's own controls as "outside".
+  const insideClicks = new WeakSet<Event>();
   /** The newest applied settings revision, restamped on every host the overlay mounts. */
   let settingsRevision: number | undefined;
   // M6 theme foundation: live X-theme detection drives every surface's `data-theme` (the token
@@ -205,30 +256,85 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     return !destroyed && settings.enabled && composer !== null;
   }
 
+  function createHostElement(): HTMLElement {
+    const host = doc.createElement('div');
+    host.id = OVERLAY_HOST_ID;
+    host.attachShadow({ mode: 'open' });
+    const shadowRoot = host.shadowRoot!;
+    const style = doc.createElement('style');
+    style.textContent = STYLE;
+    const panelRoot = doc.createElement('div');
+    panelRoot.className = 'panel-root';
+    shadowRoot.append(style, panelRoot);
+    applyThemeTokens(shadowRoot);
+    setHostTheme(host, themeDetector.getTheme());
+    if (settingsRevision !== undefined) host.dataset.settingsRevision = String(settingsRevision);
+    // Observe (never swallow) clicks that happen inside this shadow root: the outside-click lane
+    // must not collapse on the extension's own controls. A per-event mark is ordering-proof —
+    // the row's own click handler re-renders synchronously, detaching the clicked node before
+    // the document-level listener runs (a composed-path check alone would then miss).
+    shadowRoot.addEventListener(
+      'click',
+      (event) => {
+        if (event instanceof Event) insideClicks.add(event);
+      },
+      true,
+    );
+    return host;
+  }
+
+  /** X's toolBar inside the composer's anchor region, or null (then the fallback applies). */
+  function anchorToolBar(): Element | null {
+    if (composer === null) return null;
+    const region = findComposerAnchorRegion(composer);
+    return findFirst(region, 'composerToolBar');
+  }
+
+  /**
+   * IN-FLOW insertion (Design 1b, probe-verified on real x.com): the host becomes the immediate
+   * preceding sibling of X's `[data-testid="toolBar"]`. This is a NEW node in X's React tree —
+   * idempotent, re-attached by the observer when a re-render detaches it, and it NEVER moves or
+   * modifies X's own nodes. Fallback (toolbar not found): appended to document.body for absolute
+   * placement below the composer region, same row anatomy.
+   */
+  function insertHost(host: HTMLElement): 'flow' | 'fallback' {
+    const toolBar = anchorToolBar();
+    const parent = toolBar?.parentElement ?? null;
+    if (toolBar && parent) {
+      parent.insertBefore(host, toolBar);
+      host.dataset.placement = 'flow';
+      return 'flow';
+    }
+    doc.body.append(host);
+    host.dataset.placement = 'fallback';
+    return 'fallback';
+  }
+
   function mountHost(): void {
     if (mounted || !shouldMount()) return;
-    let host = doc.getElementById(OVERLAY_HOST_ID);
-    if (!host?.shadowRoot) {
-      host?.remove();
-      host = doc.createElement('div');
-      host.id = OVERLAY_HOST_ID;
-      host.attachShadow({ mode: 'open' });
-      const style = doc.createElement('style');
-      style.textContent = STYLE;
-      const panelRoot = doc.createElement('div');
-      panelRoot.className = 'panel-root';
-      host.shadowRoot!.append(style, panelRoot);
-    }
-    applyThemeTokens(host.shadowRoot!);
-    doc.body.append(host);
-    setHostTheme(host, themeDetector.getTheme());
+    // Idempotency: an existing attached host node (e.g. left over from a settings toggle in the
+    // same document) is reused only when it is still attached AND still carries its shadow root.
+    const existing = doc.getElementById(OVERLAY_HOST_ID);
+    const host = existing && existing.isConnected && existing.shadowRoot ? existing : createHostElement();
+    if (host !== existing) existing?.remove();
+    if (!host.isConnected) insertHost(host);
     mounted = true;
-    // Observability: the newest applied settings revision travels with whatever host exists, so
-    // a freshly mounted surface always carries the settings that produced it.
-    if (settingsRevision !== undefined) host.dataset.settingsRevision = String(settingsRevision);
-    // Page layout can move the composer after mount (feed hydration, route polish): re-anchor.
-    mutationObserver ??= new MutationObserver(() => scheduleReposition());
+    // React re-renders can detach our host (and page layout can move the composer): the observer
+    // re-attaches the host and keeps the fallback placement honest.
+    mutationObserver ??= new MutationObserver(() => onDocMutated());
     mutationObserver.observe(doc.body ?? doc, { childList: true, subtree: true });
+  }
+
+  function onDocMutated(): void {
+    if (mounted && shouldMount() && hostElement() === null) {
+      // A React re-render detached the host: re-insert it as if freshly mounted (same anchor
+      // rules, same idempotency — X's own nodes are never touched). The fresh host starts empty;
+      // render() repaints the current view into it.
+      insertHost(createHostElement());
+      render();
+      return;
+    }
+    scheduleReposition(); // fallback placement upkeep; a no-op in flow mode
   }
 
   function unmountHost(): void {
@@ -248,7 +354,10 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
 
   // ---- rendering (createElement only; web-ext lint forbids innerHTML in extension code) ----
 
-  function el(tag: string, init: { testid?: string; className?: string; text?: string } = {}): HTMLElement {
+  function el(
+    tag: string,
+    init: { testid?: string; className?: string; text?: string } = {},
+  ): HTMLElement {
     const element = doc.createElement(tag);
     if (init.testid !== undefined) element.dataset.testid = init.testid;
     if (init.className !== undefined) element.className = init.className;
@@ -271,10 +380,55 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     return JEV_BAND_LABELS[verdict.band] ?? JEV_BAND_LABELS.weak!;
   }
 
-  // ---- optimizer rendering (m4-optimizer; English-only surface, VAL-CROSS-016) ----
+  /** The AI state's LONG form for the row's aria-label (§6; the verdict state collapses to its short). */
+  function aiLong(view: AnalyzedView): string {
+    switch (view.jev.state) {
+      case 'pending':
+        return OVERLAY_COPY.pendingLong;
+      case 'ready':
+        return `${OVERLAY_COPY.readyLongBefore}${OVERLAY_COPY.readyLink}${OVERLAY_COPY.readyLongAfter}`;
+      case 'verdict':
+        return `${OVERLAY_COPY.verdictShortPrefix}${bandLabel(view.jev.verdict!)}`;
+      case 'no-key':
+        return `${OVERLAY_COPY.noKeyLongBefore}${OVERLAY_COPY.noKeyLink}${OVERLAY_COPY.noKeyLongAfter}`;
+      case 'off':
+        return OVERLAY_COPY.offLong;
+      case 'error':
+        return OVERLAY_COPY.errorLong(view.headline, view.jev.reason ?? OVERLAY_COPY.errorReasons.network);
+    }
+  }
+
+  function aiShortLabel(view: AnalyzedView): string {
+    switch (view.jev.state) {
+      case 'pending':
+        return OVERLAY_COPY.pendingShort;
+      case 'ready':
+        return OVERLAY_COPY.readyShort;
+      case 'verdict':
+        return `${OVERLAY_COPY.verdictShortPrefix}${bandLabel(view.jev.verdict!)}`;
+      case 'no-key':
+      case 'off':
+        return OVERLAY_COPY.noKeyShort;
+      case 'error':
+        return OVERLAY_COPY.errorShort;
+    }
+  }
+
+  function rowLabel(view: AnalyzedView): string {
+    // The long forms are full sentences ending in a period; the label template adds its own
+    // period, so the sentence's trailing one is dropped to avoid a doubled dot.
+    const aiLongText = aiLong(view).replace(/\.$/u, '');
+    return OVERLAY_COPY.rowLabel.replace('{n}', String(view.headline)).replace('{aiLong}', aiLongText);
+  }
+
+  // ---- optimizer rendering (§4.3; English-only surface, VAL-CROSS-016) ----
 
   function copyButton(variant: HookVariant): HTMLElement {
-    const button = el('button', { testid: OVERLAY_TESTIDS.optimizerCopy, text: OVERLAY_COPY.copyButton }) as HTMLButtonElement;
+    const button = el('button', {
+      className: 'btn-outline',
+      testid: OVERLAY_TESTIDS.optimizerCopy,
+      text: OVERLAY_COPY.copyButton,
+    }) as HTMLButtonElement;
     // VAL-OPT-004: the button puts EXACTLY the variant text on the clipboard — no labels, no
     // extra text — and never touches the composer (VAL-OPT-005: copy is the transfer mechanism).
     button.addEventListener('click', () => {
@@ -294,62 +448,59 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     return button;
   }
 
-  function variantItem(variant: HookVariant): HTMLElement {
-    const item = el('li', { className: 'optimizer-variant', testid: OVERLAY_TESTIDS.optimizerVariant });
-    item.dataset.variantKind = variant.kind;
+  function variantCard(variant: HookVariant): HTMLElement {
+    const card = el('article', { className: 'hook-card', testid: OVERLAY_TESTIDS.optimizerVariant });
+    card.dataset.variantKind = variant.kind;
     // VAL-OPT-007: an over-limit variant is explicitly flagged (never presented as ready).
-    item.dataset.overLimit = String(variant.overLimit);
-    item.append(el('span', { className: 'variant-kind', text: VARIANT_LABELS[variant.kind] }));
-    item.append(
-      el('p', { className: 'variant-text', testid: OVERLAY_TESTIDS.optimizerVariantText, text: variant.text }),
+    card.dataset.overLimit = String(variant.overLimit);
+    card.append(el('h4', { className: 'hook-kind', text: VARIANT_LABELS[variant.kind] }));
+    card.append(
+      el('p', { className: 'hook-text', testid: OVERLAY_TESTIDS.optimizerVariantText, text: variant.text }),
     );
-    item.append(
+    const footer = el('div', { className: 'hook-footer' });
+    footer.append(
       el('span', {
-        className: 'variant-chars',
+        className: 'hook-chars',
         testid: OVERLAY_TESTIDS.optimizerVariantChars,
         text: variant.overLimit
-          ? OVERLAY_COPY.overLimitFlag.replace('{n}', String(variant.weightedChars))
-          : OVERLAY_COPY.charNote.replace('{n}', String(variant.weightedChars)),
+          ? OVERLAY_COPY.overLimitFlag(variant.weightedChars)
+          : OVERLAY_COPY.charNote(variant.weightedChars),
       }),
     );
-    if (variant.overLimit) item.querySelector('.variant-chars')?.setAttribute('data-over-limit', 'true');
-    item.append(copyButton(variant));
-    return item;
+    if (variant.overLimit) footer.querySelector('.hook-chars')?.setAttribute('data-over-limit', 'true');
+    footer.append(copyButton(variant));
+    card.append(footer);
+    return card;
   }
 
   function hashtagsBlock(optimization: Extract<OptimizerSlot, { phase: 'done' }>['optimization']): HTMLElement {
-    const box = el('div', { testid: OVERLAY_TESTIDS.optimizerHashtags });
-    box.append(el('h4', { className: 'subheading', text: OVERLAY_COPY.hashtagHeading }));
+    const box = el('div', { className: 'hashtags', testid: OVERLAY_TESTIDS.optimizerHashtags });
     const advice = optimization.hashtags;
     if (advice.suggestions.length === 0) {
-      box.append(el('p', { className: 'notice', text: OVERLAY_COPY.noHashtags }));
-    } else {
-      const list = el('ul');
-      for (const suggestion of advice.suggestions) {
-        const item = el('li', { className: 'optimizer-hashtag', testid: OVERLAY_TESTIDS.optimizerHashtag });
-        item.dataset.tag = suggestion.tag;
-        item.append(el('span', { className: 'hashtag-tag', text: `#${suggestion.tag}` }));
-        item.append(el('span', { className: 'hashtag-rationale', text: suggestion.rationale }));
-        list.append(item);
-      }
-      box.append(list);
+      box.append(el('p', { text: OVERLAY_COPY.noHashtags }));
+      return box;
     }
+    // §4.3: "Add #Tag · #Tag" as --accent links with the rationale in the title tooltip. The
+    // tags are buttons styled as links (no navigation, composer untouched); any click behavior
+    // belongs to the optimizer feature, not the row.
+    const line = el('p', { className: 'hashtag-line' });
+    line.append(el('span', { text: `${OVERLAY_COPY.hashtagAdd} ` }));
+    advice.suggestions.forEach((suggestion, index) => {
+      if (index > 0) line.append(el('span', { text: ' · ' }));
+      const link = el('button', {
+        className: 'hashtag-link',
+        testid: OVERLAY_TESTIDS.optimizerHashtag,
+        text: `#${suggestion.tag}`,
+      });
+      link.title = suggestion.rationale;
+      line.append(link);
+    });
+    box.append(line);
     // VAL-OPT-006: when the draft already carries excess hashtags, name which to drop.
     if (advice.dropAdvice !== undefined) {
-      box.append(el('p', { className: 'drop-advice', testid: OVERLAY_TESTIDS.optimizerDropAdvice, text: advice.dropAdvice }));
+      box.append(el('p', { testid: OVERLAY_TESTIDS.optimizerDropAdvice, text: advice.dropAdvice }));
     }
     return box;
-  }
-
-  function optimizeButton(enabled: boolean): HTMLElement {
-    const button = el('button', { testid: OVERLAY_TESTIDS.optimize, text: OVERLAY_COPY.optimizeButton }) as HTMLButtonElement;
-    button.dataset.state = enabled ? 'enabled' : 'disabled';
-    if (!enabled) {
-      button.disabled = true;
-      return button;
-    }
-    button.addEventListener('click', () => optimizeNow());
-    return button;
   }
 
   /** The Optimize lifecycle: eligible-draft gate -> loading slot -> dispatch -> reply/failure. */
@@ -363,184 +514,261 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     requestOptimize(capture);
   }
 
-  function optimizerSection(view: { optimizer: OptimizerSection }): HTMLElement {
-    const section = el('section', { testid: OVERLAY_TESTIDS.optimizer });
+  /** An outline pill action (the optimizer's "Find stronger hooks"). */
+  function outlineAction(text: string, testid: string, onClick: () => void): HTMLElement {
+    const button = el('button', { className: 'btn-outline', testid, text });
+    button.dataset.size = '32';
+    button.addEventListener('click', onClick);
+    return button;
+  }
+
+  function pendingLine(text: string, testid: string): HTMLElement {
+    const line = el('p', { className: 'pending-line', testid });
+    line.append(el('span', { className: 'dot' }));
+    line.append(el('span', { text }));
+    return line;
+  }
+
+  function errorLine(text: string, testid: string, retry: (() => void) | null): HTMLElement {
+    const line = el('p', { className: 'error-line', testid });
+    line.append(el('span', { className: 'dot' }));
+    line.append(el('span', { text }));
+    if (retry) line.append(linkButton(OVERLAY_COPY.retryLink, OVERLAY_TESTIDS.retry, retry));
+    return line;
+  }
+
+  /** A link-styled button embedded in a notice line (no innerHTML anywhere). */
+  function linkButton(text: string, testid: string, onClick: () => void): HTMLElement {
+    const link = el('button', { testid, text });
+    link.addEventListener('click', onClick);
+    return link;
+  }
+
+  function optimizerSection(view: AnalyzedView): HTMLElement | null {
+    // M6 user decision D3: without AI (no key, or the AI lane off in Settings) the optimizer
+    // section is HIDDEN entirely — no disabled button, no guidance notice.
+    if (view.optimizer.state === 'no-key' || view.optimizer.state === 'off') return null;
+    const section = el('section', { className: 'optimizer', testid: OVERLAY_TESTIDS.optimizer });
     section.dataset.optimizerState = view.optimizer.state;
-    section.append(el('h3', { text: OVERLAY_COPY.optimizerHeading }));
     switch (view.optimizer.state) {
       case 'idle':
-        section.append(optimizeButton(true));
+        section.append(outlineAction(OVERLAY_COPY.optimizeButton, OVERLAY_TESTIDS.optimize, () => optimizeNow()));
         break;
-      case 'off':
-        // VAL-OPT-001: disabled with a clear reason (the AI lane is off in Settings).
-        section.append(optimizeButton(false));
-        section.append(el('p', { className: 'notice', testid: OVERLAY_TESTIDS.optimizerNotice, text: OVERLAY_COPY.optimizerOff }));
-        break;
-      case 'no-key': {
-        // VAL-OPT-001: disabled and the guidance points to Options — made actionable with the
-        // same Connect Jev control the AI-judgment section uses.
-        section.append(optimizeButton(false));
-        section.append(
-          el('p', { className: 'notice', testid: OVERLAY_TESTIDS.optimizerNotice, text: OVERLAY_COPY.optimizerNoKey }),
-        );
-        const connect = el('button', { testid: OVERLAY_TESTIDS.optimizerConnect, text: OVERLAY_COPY.connectJev });
-        connect.addEventListener('click', () => options.openOptions());
-        section.append(connect);
-        break;
-      }
       case 'loading':
-        section.append(el('p', { className: 'pending', testid: OVERLAY_TESTIDS.optimizerPending, text: OVERLAY_COPY.optimizerPending }));
+        section.append(pendingLine(OVERLAY_COPY.optimizerPending, OVERLAY_TESTIDS.optimizerPending));
         break;
       case 'done': {
-        section.append(optimizeButton(true)); // re-click serves the cached result (VAL-OPT-009)
-        const list = el('ul', { testid: OVERLAY_TESTIDS.optimizerVariants });
-        for (const variant of view.optimizer.optimization.variants) list.append(variantItem(variant));
+        const header = el('div', { className: 'opt-header' });
+        header.append(el('span', { className: 'opt-title', text: OVERLAY_COPY.optimizerHeading }));
+        header.append(el('span', { className: 'opt-caption', text: OVERLAY_COPY.optimizerCaption }));
+        section.append(header);
+        const list = el('div', { className: 'hooks', testid: OVERLAY_TESTIDS.optimizerVariants });
+        for (const variant of view.optimizer.optimization.variants) list.append(variantCard(variant));
         section.append(list);
         section.append(hashtagsBlock(view.optimizer.optimization));
         break;
       }
       case 'error':
         // VAL-OPT-010: explicit non-blocking error; local scoring and the composer untouched.
-        section.append(
-          el('p', { className: 'notice', testid: OVERLAY_TESTIDS.optimizerNotice, text: OVERLAY_COPY.optimizerError }),
-        );
-        section.append(el('p', { className: 'error-reason', text: view.optimizer.reason }));
-        section.append(optimizeButton(true));
+        section.append(errorLine(OVERLAY_COPY.optimizerError, OVERLAY_TESTIDS.optimizerNotice, () => optimizeNow()));
         break;
     }
     return section;
   }
 
-  function verdictBlock(verdict: JevVerdict): HTMLElement {
-    const box = el('div');
-    box.append(el('span', { className: 'band', testid: OVERLAY_TESTIDS.jevBand, text: bandLabel(verdict) }));
-    box.append(
-      el('p', {
-        className: 'jev-state',
-        testid: OVERLAY_TESTIDS.jevConfidence,
-        text: `${OVERLAY_COPY.confidenceLabel}: ${Math.round(verdict.confidence * 100)}%`,
-      }),
-    );
-    if (verdict.weaknesses.length > 0) {
-      const list = el('ul', { testid: OVERLAY_TESTIDS.jevWeaknesses });
-      for (const weakness of verdict.weaknesses) list.append(el('li', { text: weakness }));
-      box.append(el('h4', { className: 'subheading', text: `${OVERLAY_COPY.weaknessHeading}:` }), list);
+  // ---- the expanded block's sections (§4) ----
+
+  function verbatimRow(label: string, value: string): HTMLElement {
+    const row = el('li');
+    row.append(el('span', { className: 'label', text: label }));
+    row.append(el('span', { className: 'value', text: value }));
+    return row;
+  }
+
+  function chipsSection(view: AnalyzedView): HTMLElement {
+    const box = el('div', { className: 'chips-box', testid: OVERLAY_TESTIDS.signals });
+    const chips = el('div', { className: 'chips' });
+    for (const chip of view.chips) {
+      const chipEl = el('span', { className: 'chip', testid: OVERLAY_TESTIDS.chip });
+      chipEl.dataset.signalId = chip.id;
+      chipEl.dataset.direction = chip.direction;
+      chipEl.append(el('span', { className: 'phrase', text: chip.phrase }));
+      chipEl.append(el('span', { className: 'points', text: formatPoints(chip.points) }));
+      chips.append(chipEl);
     }
-    if (verdict.suggestions.length > 0) {
-      const list = el('ul', { testid: OVERLAY_TESTIDS.jevSuggestions });
-      for (const suggestion of verdict.suggestions) list.append(el('li', { text: suggestion }));
-      box.append(el('h4', { className: 'subheading', text: `${OVERLAY_COPY.suggestionsHeading}:` }), list);
+    if (view.neutralCount > 0) {
+      const toggle = el('button', {
+        className: 'neutral-toggle',
+        testid: OVERLAY_TESTIDS.neutralToggle,
+        text: OVERLAY_COPY.neutralToggle(view.neutralCount),
+      });
+      toggle.setAttribute('aria-expanded', String(neutralRowsVisible));
+      // The rows list is built fresh on each reveal (the view is immutable); the LOCAL toggle
+      // never re-renders the other blocks, so the block's scroll position is preserved.
+      let current: HTMLElement | null = neutralRowsVisible ? rowsList(view) : null;
+      if (current !== null) box.append(current);
+      toggle.addEventListener('click', () => {
+        neutralRowsVisible = !neutralRowsVisible;
+        toggle.setAttribute('aria-expanded', String(neutralRowsVisible));
+        if (neutralRowsVisible && current === null) {
+          current = rowsList(view);
+          box.append(current);
+        } else if (!neutralRowsVisible && current !== null) {
+          current.remove();
+          current = null;
+        }
+      });
+      chips.append(toggle);
+    }
+    box.append(chips);
+    return box;
+  }
+
+  /** The full rows list (label / value / points) behind the "N neutral ›" toggle. */
+  function rowsList(view: AnalyzedView): HTMLElement {
+    const list = el('ul', { className: 'rows', testid: OVERLAY_TESTIDS.signalRows });
+    for (const signal of view.local.signals) list.append(signalRow(signal));
+    // §4.2: the verdict's REMAINING weaknesses/suggestions surface only here.
+    if (view.jev.state === 'verdict' && view.jev.verdict) {
+      for (const weakness of view.jev.verdict.weaknesses.slice(1)) {
+        list.append(verbatimRow('Weakness', weakness));
+      }
+      for (const suggestion of view.jev.verdict.suggestions.slice(1)) {
+        list.append(verbatimRow('Suggestion', suggestion));
+      }
+    }
+    return list;
+  }
+
+  function aiBlock(view: AnalyzedView): HTMLElement {
+    const box = el('div', { className: 'ai-block', testid: OVERLAY_TESTIDS.jev });
+    box.dataset.jevState = view.jev.state;
+    switch (view.jev.state) {
+      case 'pending':
+        box.append(
+          el('p', { className: 'notice', testid: OVERLAY_TESTIDS.jevNotice, text: OVERLAY_COPY.pendingLong }),
+        );
+        break;
+      case 'ready': {
+        // VAL-SETUP-010: with autoAnalyze off, typing stayed local-only and free (zero Jev
+        // requests); the network half runs ONLY when the user activates the link, exactly once.
+        const notice = el('p', { className: 'notice', testid: OVERLAY_TESTIDS.jevNotice });
+        notice.append(el('span', { text: OVERLAY_COPY.readyLongBefore }));
+        notice.append(
+          linkButton(OVERLAY_COPY.readyLink, OVERLAY_TESTIDS.analyze, () => {
+            // The manual trigger re-captures the draft synchronously. That re-capture is the
+            // overlay's own doing, not a user edit, so it must NOT collapse the block the user
+            // is looking at (VAL-SETUP-010).
+            manualCapture = true;
+            options.requestAnalysis();
+          }),
+        );
+        notice.append(el('span', { text: OVERLAY_COPY.readyLongAfter }));
+        box.append(notice);
+        break;
+      }
+      case 'verdict': {
+        const verdict = view.jev.verdict!;
+        const head = el('div', { className: 'ai-head' });
+        const chip = el('span', {
+          className: 'ai-chip',
+          testid: OVERLAY_TESTIDS.jevBand,
+          text: `${OVERLAY_COPY.verdictChipPrefix}${bandLabel(verdict)}`,
+        });
+        chip.dataset.band = verdict.band;
+        chip.dataset.treatment = JEVD_BAND_TREATMENT[verdict.band];
+        head.append(chip);
+        if (verdict.weaknesses.length > 0) {
+          head.append(
+            el('span', { className: 'weakness', testid: OVERLAY_TESTIDS.jevWeakness, text: verdict.weaknesses[0]! }),
+          );
+        }
+        box.append(head);
+        const pct = Math.round(verdict.confidence * 100);
+        const tryText =
+          verdict.suggestions.length > 0
+            ? `${OVERLAY_COPY.tryPrefix} ${verdict.suggestions[0]!}${OVERLAY_COPY.confidenceSuffix(pct)}`
+            : OVERLAY_COPY.confidenceOnly(pct);
+        box.append(el('p', { className: 'try-line', testid: OVERLAY_TESTIDS.jevTryLine, text: tryText }));
+        break;
+      }
+      case 'no-key': {
+        const notice = el('p', { className: 'notice', testid: OVERLAY_TESTIDS.jevNotice });
+        notice.append(el('span', { text: OVERLAY_COPY.noKeyLongBefore }));
+        notice.append(linkButton(OVERLAY_COPY.noKeyLink, OVERLAY_TESTIDS.connectJev, () => options.openOptions()));
+        notice.append(el('span', { text: OVERLAY_COPY.noKeyLongAfter }));
+        box.append(notice);
+        break;
+      }
+      case 'off':
+        box.append(
+          el('p', { className: 'notice', testid: OVERLAY_TESTIDS.jevNotice, text: OVERLAY_COPY.offLong }),
+        );
+        break;
+      case 'error': {
+        const reason = view.jev.reason ?? OVERLAY_COPY.errorReasons.network;
+        const line = el('p', { className: 'notice', testid: OVERLAY_TESTIDS.jevNotice });
+        line.append(el('span', { text: `${OVERLAY_COPY.errorLong(view.headline, reason)} ` }));
+        line.append(
+          linkButton(OVERLAY_COPY.retryLink, OVERLAY_TESTIDS.retry, () => {
+            manualCapture = true;
+            options.requestAnalysis();
+          }),
+        );
+        box.append(line);
+        break;
+      }
     }
     return box;
   }
 
-  function renderViewInto(panel: HTMLElement, view: OverlayView): void {
-    panel.dataset.state = view.phase;
-    const header = el('header');
-    header.append(
-      el('span', { className: 'title', text: OVERLAY_COPY.panelTitle }),
-      el('span', { className: 'subtitle', text: OVERLAY_COPY.panelSubtitle }),
-    );
-    panel.append(header);
-
-    // M5: the panel only ever renders the `analyzed` view — there is no awaiting/empty balloon
-    // and no score-less panel. No qualifying draft means NOTHING is mounted at all, so the
-    // composer area is left completely free (VAL-DRAFT-005/014).
-    if (view.phase !== 'analyzed') return;
-
-    // analyzed: the gauge (hybrid when a verdict is in), then the two clearly separated halves.
-    const gauge = el('div', { className: 'gauge', testid: OVERLAY_TESTIDS.gauge });
-    gauge.dataset.headlineSource = view.headlineSource;
-    const number = el('span', {
-      className: 'number',
-      testid: OVERLAY_TESTIDS.headline,
-      text: String(view.headline),
-    });
-    number.dataset.tier = headlineTier(view.headline);
-    gauge.append(number, el('span', { className: 'gauge-label', text: OVERLAY_COPY.gaugeLabel }));
-    panel.append(gauge);
-    panel.append(
-      el('p', {
-        className: 'gauge-note',
-        text: view.headlineSource === 'hybrid' ? OVERLAY_COPY.hybridNote : OVERLAY_COPY.localNote,
-      }),
-    );
-
-    const signals = el('section', { testid: OVERLAY_TESTIDS.signals });
-    signals.append(el('h3', { text: OVERLAY_COPY.signalsHeading }));
-    const signalList = el('ul');
-    for (const signal of view.local.signals) signalList.append(signalRow(signal));
-    signals.append(signalList);
-    panel.append(signals);
-
-    const jev = el('section', { testid: OVERLAY_TESTIDS.jev });
-    jev.dataset.jevState = view.jev.state;
-    jev.append(el('h3', { text: OVERLAY_COPY.jevHeading }));
-    switch (view.jev.state) {
-      case 'pending':
-        jev.append(el('p', { className: 'pending', testid: OVERLAY_TESTIDS.jevPending, text: OVERLAY_COPY.pending }));
-        break;
-      case 'ready': {
-        // VAL-SETUP-010: with autoAnalyze off, typing stayed local-only and free (zero Jev
-        // requests); the network half runs ONLY when the user activates this action, exactly once
-        // per activation.
-        jev.append(el('p', { className: 'notice', testid: OVERLAY_TESTIDS.jevNotice, text: OVERLAY_COPY.ready }));
-        const analyze = el('button', { testid: OVERLAY_TESTIDS.analyze, text: OVERLAY_COPY.analyzeButton });
-        analyze.addEventListener('click', () => {
-          // The manual trigger re-captures the draft synchronously. That re-capture is the
-          // overlay's own doing, not a user edit, so it must NOT collapse the panel the user is
-          // looking at: they asked for the verdict to appear right here (VAL-SETUP-010).
-          manualCapture = true;
-          options.requestAnalysis();
-        });
-        jev.append(analyze);
-        break;
-      }
-      case 'verdict':
-        if (view.jev.verdict) jev.append(verdictBlock(view.jev.verdict));
-        break;
-      case 'no-key': {
-        jev.append(el('p', { className: 'notice', testid: OVERLAY_TESTIDS.jevNotice, text: OVERLAY_COPY.noKey }));
-        const connect = el('button', { testid: OVERLAY_TESTIDS.connectJev, text: OVERLAY_COPY.connectJev });
-        connect.addEventListener('click', () => options.openOptions());
-        jev.append(connect);
-        break;
-      }
-      case 'off':
-        jev.append(el('p', { className: 'notice', testid: OVERLAY_TESTIDS.jevNotice, text: OVERLAY_COPY.off }));
-        break;
-      case 'error':
-        jev.append(el('p', { className: 'notice', testid: OVERLAY_TESTIDS.jevNotice, text: OVERLAY_COPY.error }));
-        jev.append(el('p', { className: 'error-reason', text: view.jev.reason ?? OVERLAY_COPY.errorReasons.network }));
-        break;
-    }
-    panel.append(jev);
-    panel.append(optimizerSection(view));
+  function renderExpandedInto(block: HTMLElement, view: AnalyzedView): void {
+    block.dataset.state = view.phase;
+    block.append(chipsSection(view));
+    block.append(aiBlock(view));
+    const optimizer = optimizerSection(view);
+    if (optimizer) block.append(optimizer);
   }
 
   /**
-   * The COLLAPSED PILL (VAL-DRAFT-032): the headline number and NOTHING else — no label, no
-   * breakdown, no notices. Its accessible name carries the full English sentence for assistive
-   * tech, and the AI half-state rides a data attribute plus a dashed border so the pill never
-   * grows while typing (VAL-CROSS-016 keeps the copy in the table, not here). `data-state` is
-   * always 'analyzed' — a pill exists only for a qualifying draft — and the panel carries the
-   * same attribute, so a consumer can read either surface's phase the same way.
+   * The COLLAPSED STATUS ROW (VAL-DRAFT-032): the fixed 36px anatomy — tier dot + headline
+   * score, "Viral potential", the up-to-2-signal summary, the AI-state dot + short label, and
+   * the chevron. The whole row is ONE `<button aria-expanded>`; its accessible name carries the
+   * full English sentence for assistive tech. The row never changes height while the user types.
    */
-  function pillButton(view: Extract<OverlayView, { phase: 'analyzed' }>): HTMLElement {
-    const pill = el('button', { className: 'pill', testid: OVERLAY_TESTIDS.pill, text: String(view.headline) });
-    pill.dataset.state = 'analyzed';
-    pill.dataset.tier = headlineTier(view.headline);
-    pill.dataset.jevState = view.jev.state;
-    pill.dataset.headlineSource = view.headlineSource;
-    pill.setAttribute('aria-expanded', 'false');
-    pill.setAttribute('aria-label', OVERLAY_COPY.pillLabel.replace('{n}', String(view.headline)));
-    pill.title = OVERLAY_COPY.pillLabel.replace('{n}', String(view.headline));
-    pill.addEventListener('click', () => {
+  function rowButton(view: AnalyzedView): HTMLElement {
+    const row = el('button', { className: 'row', testid: OVERLAY_TESTIDS.row });
+    row.dataset.state = 'analyzed';
+    row.dataset.tier = headlineTier(view.headline);
+    row.dataset.jevState = view.jev.state;
+    row.dataset.headlineSource = view.headlineSource;
+    row.setAttribute('aria-expanded', String(expanded));
+    row.setAttribute('aria-label', rowLabel(view));
+
+    const dot = el('span', { className: 'dot' });
+    dot.dataset.tier = headlineTier(view.headline);
+    row.append(dot);
+    row.append(el('span', { className: 'score', testid: OVERLAY_TESTIDS.headline, text: String(view.headline) }));
+    row.append(el('span', { className: 'viral-label', text: OVERLAY_COPY.viralLabel }));
+    // §3: "· " + up to 2 short phrases of the highest-|points| signals; nothing when none scored.
+    const summaryText = view.summary.length > 0 ? `\u00B7 ${view.summary.join(' \u00B7 ')}` : '';
+    row.append(el('span', { className: 'summary', testid: OVERLAY_TESTIDS.summary, text: summaryText }));
+    const ai = el('span', { className: 'ai', testid: OVERLAY_TESTIDS.aiState });
+    const aiDot = el('span', { className: 'ai-dot' });
+    aiDot.dataset.state = view.jev.state;
+    ai.append(aiDot);
+    ai.append(el('span', { className: 'ai-label', text: aiShortLabel(view) }));
+    row.append(ai);
+    const chevron = el('span', { className: 'chevron', text: '\u2304' });
+    chevron.setAttribute('aria-hidden', 'true');
+    row.append(chevron);
+
+    row.addEventListener('click', () => {
       if (destroyed || capture === null) return;
       expanded = true;
       render();
     });
-    return pill;
+    return row;
   }
 
   function render(): void {
@@ -555,7 +783,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       optimizer: optimizerSlot,
     });
     // No qualifying draft ⇒ NO extension UI near the composer at all: the host is removed, not
-    // merely emptied (VAL-DRAFT-005/014 — no pill, no panel, no awaiting balloon).
+    // merely emptied (VAL-DRAFT-005/014 — no row, no expanded block, no awaiting balloon).
     if (view.phase === 'empty') {
       if (mounted) unmountHost();
       return;
@@ -565,25 +793,20 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     const host = hostElement();
     if (!root || !host) return;
     host.dataset.expanded = String(expanded);
+    const row = rowButton(view);
     if (!expanded) {
-      // Remember the panel's size while it was last visible so expanding never measures a
-      // collapsed pill (the placement math measures the host box).
-      const measured = host.getBoundingClientRect();
-      if (measured.width > 0 && measured.height > 0) {
-        expandedSize = { width: measured.width, height: measured.height };
-      }
-      root.replaceChildren(pillButton(view));
+      root.replaceChildren(row);
     } else {
-      const panel = el('div', { className: 'panel', testid: OVERLAY_TESTIDS.panel });
-      renderViewInto(panel, view);
-      root.replaceChildren(panel);
+      const block = el('div', { className: 'expanded', testid: OVERLAY_TESTIDS.panel });
+      renderExpandedInto(block, view);
+      root.replaceChildren(row, block);
     }
-    reposition();
+    scheduleReposition(); // fallback placement only; a no-op in flow mode
   }
 
   /**
-   * Collapses the expanded panel back to the pill (VAL-DRAFT-035/036/037). Idempotent and
-   * cheap: with nothing expanded it is a no-op, so the composer-edit lane can call it freely.
+   * Collapses the expanded block back to the row (VAL-DRAFT-035/036/037). Idempotent and cheap:
+   * with nothing expanded it is a no-op, so the composer-edit lane can call it freely.
    */
   function collapse(): void {
     if (!expanded) return;
@@ -591,109 +814,39 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     render();
   }
 
-  // ---- placement ----
+  // ---- fallback placement (toolbar not found) ----
 
-  function panelElement(): HTMLElement | null {
-    return hostElement()?.shadowRoot?.querySelector<HTMLElement>('.panel') ?? null;
-  }
-
-  function pillElement(): HTMLElement | null {
-    return hostElement()?.shadowRoot?.querySelector<HTMLElement>('.pill') ?? null;
-  }
-
-  /**
-   * True while X's OWN composer mention typeahead (autocomplete dropdown) is open for the
-   * WATCHED composer: the user is mid-mention, so the watched composer holds focus AND at least
-   * one typeahead row is rendered. Presence is the honest signal — X's React tree unmounts the
-   * rows when the dropdown closes — and it is the only check that also works without a layout
-   * engine (happy-dom rects are all-zero). The focus scoping keeps unrelated typeaheads (the
-   * top-bar search) from ever hiding the pill.
-   */
-  function composerTypeaheadOpen(): boolean {
-    if (composer === null) return false;
-    const active = doc.activeElement;
-    const composerFocused = active !== null && (active === composer || composer.contains(active));
-    if (!composerFocused) return false;
-    return SELECTORS.composerTypeahead.some((selector) => doc.querySelector(selector) !== null);
+  function expandedElement(): HTMLElement | null {
+    return hostElement()?.shadowRoot?.querySelector<HTMLElement>('.expanded') ?? null;
   }
 
   function reposition(): void {
     const host = hostElement();
-    if (!host || !composer) return;
-    // PLACEMENT anchors to the furniture-containing region (m5-overlay-scroll-reach): the real
-    // site's extraction region is a tight text-row wrapper whose bottom sits ABOVE the furniture
-    // row, so anchoring there covered the media controls, the counter and the Post button. The
-    // climb degrades to the extraction region wherever the furniture is not found.
+    if (!host || !composer || host.dataset.placement !== 'fallback') return;
+    // PLACEMENT anchors to the furniture-containing region (m5-overlay-scroll-reach); the
+    // fallback degrades to the extraction region wherever the furniture is not found.
     const region = findComposerAnchorRegion(composer);
-    // happy-dom's zero rects have no `right`; treat a missing edge as unmeasured so placement
-    // falls back to the left-anchored branch.
     const regionBox =
       region instanceof Element
         ? region.getBoundingClientRect()
         : { top: 0, bottom: 0, left: 0, width: 0, height: 0, right: 0 };
-    const panel = panelElement();
-    // Measure the surface's NATURAL size: the state being rendered decides which cached size is
-    // authoritative, and measuring a stale cap would shrink the decision input and let the cap
-    // oscillate off on the next reposition (VAL-DRAFT-023).
-    panel?.style.removeProperty('max-height');
+    const block = expandedElement();
+    // Measure the block's NATURAL size: a stale cap would shrink the decision input and let the
+    // cap oscillate off on the next reposition (VAL-DRAFT-023).
+    block?.style.removeProperty('max-height');
     const hostBox = host.getBoundingClientRect();
-    const fallbackWidth = expanded ? OVERLAY_PLACEMENT.fallbackWidth : OVERLAY_PLACEMENT.pillWidth;
-    const fallbackHeight = expanded ? OVERLAY_PLACEMENT.fallbackHeight : OVERLAY_PLACEMENT.pillHeight;
-    const width = hostBox.width || (expanded ? expandedSize.width : collapsedSize.width) || fallbackWidth;
-    const height = hostBox.height || (expanded ? expandedSize.height : collapsedSize.height) || fallbackHeight;
-    if (!expanded && hostBox.width > 0 && hostBox.height > 0) collapsedSize = { width, height };
-    const placement = {
-      regionRect: { top: regionBox.top, bottom: regionBox.bottom, left: regionBox.left, right: regionBox.right },
+    const width = hostBox.width || OVERLAY_PLACEMENT.fallbackWidth;
+    const height = hostBox.height || OVERLAY_PLACEMENT.fallbackHeight;
+    const position = computeAnchorPosition({
+      regionRect: { top: regionBox.top, bottom: regionBox.bottom, left: regionBox.left },
       overlaySize: { width, height },
       viewport: { width: win.innerWidth, height: win.innerHeight },
       scroll: { x: win.scrollX, y: win.scrollY },
-    };
-    // The COLLAPSED pill lives in the composer furniture row; the EXPANDED panel keeps the
-    // below-the-region placement so it never covers the composer at all (VAL-DRAFT-033).
-    const position = expanded ? computeAnchorPosition(placement) : computePillPosition(placement);
-    let top = position.top;
-    let left = position.left;
-    if (!expanded) {
-      // The real x.com furniture row puts the Post button at the region's RIGHT edge — exactly
-      // where the pill's right-aligned inset lands — so when the pill's box would cover a
-      // MEASURABLE Post button, it slides left of it (clearing the counter too). Where no layout
-      // engine runs (happy-dom zero rects) or the button sits elsewhere, the pure math stands.
-      const post = SELECTORS.composerPostButton
-        .map((selector) => region.querySelector(selector))
-        .find((match): match is Element => match !== null);
-      const postBox = post?.getBoundingClientRect();
-      const cleared = clampPillClearOfControl(
-        { top, left },
-        { width, height },
-        postBox && postBox.width > 0 && postBox.height > 0
-          ? {
-              top: postBox.top + win.scrollY,
-              bottom: postBox.bottom + win.scrollY,
-              left: postBox.left + win.scrollX,
-              right: postBox.right + win.scrollX,
-            }
-          : null,
-        OVERLAY_PLACEMENT.pillPostClearance,
-        placement.scroll.x + OVERLAY_PLACEMENT.viewportMargin,
-      );
-      top = cleared.top;
-      left = cleared.left;
-    }
-    host.style.position = 'absolute';
-    host.style.top = `${top}px`;
-    host.style.left = `${left}px`;
-    // The height cap (null = natural size): the surface scrolls internally while capped, so it
-    // stays inside the viewport at short-window geometry.
-    if (position.maxHeight === null) panel?.style.removeProperty('max-height');
-    else panel?.style.setProperty('max-height', `${position.maxHeight}px`);
-    // VAL-DRAFT-040 (the user-reported defect, reproduced live 2026-10-04): the collapsed pill
-    // sits in the furniture row where X's own mention dropdown extends, and with the host's
-    // top-most z-index the pill COVERED a sliver of the dropdown — hit-tested live. While X's
-    // composer typeahead is open the pill therefore YIELDS (hidden entirely); it returns when
-    // the dropdown closes. The expanded panel never coexists with the typeahead: the '@'
-    // keystroke is a composer edit and collapses the panel first (VAL-DRAFT-036).
-    const pill = pillElement();
-    if (pill !== null) pill.style.visibility = !expanded && composerTypeaheadOpen() ? 'hidden' : '';
+    });
+    host.style.top = `${position.top}px`;
+    host.style.left = `${position.left}px`;
+    if (position.maxHeight === null) block?.style.removeProperty('max-height');
+    else block?.style.setProperty('max-height', `${Math.max(position.maxHeight, 0)}px`);
   }
 
   /** Coalesces mutation/resize-driven repositions into one rAF callback (idempotent placement). */
@@ -710,12 +863,8 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
 
   const onResize = (): void => scheduleReposition();
   win.addEventListener('resize', onResize);
-  // Focus changes re-evaluate the typeahead yield (its check requires the watched composer to
-  // hold focus), so focus moving in or out of the composer re-runs the placement pass.
-  const onFocusIn = (): void => scheduleReposition();
-  doc.addEventListener('focusin', onFocusIn, true);
 
-  /** Escape collapses the expanded panel back to the pill (VAL-DRAFT-035). */
+  /** Escape collapses the expanded block back to the row (VAL-DRAFT-035). */
   const onKeyDown = (event: Event): void => {
     if ((event as KeyboardEvent).key !== 'Escape') return;
     collapse();
@@ -723,67 +872,23 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
   doc.addEventListener('keydown', onKeyDown, true);
 
   /**
-   * The ONE user-approved exception to the extension's no-pointer-capture convention, and only
-   * while the panel is EXPANDED (VAL-DRAFT-037): the first click outside the panel collapses it
-   * and is NOT forwarded to the page, so nothing behind it activates. The next identical click
-   * finds no panel and reaches the page natively.
-   *
-   * Only the CLICK is captured, never the preceding pointerdown/mousedown: swallowing those would
-   * also cancel the default focus behaviour, so clicking the composer to keep typing (or any
-   * other focusable control) would silently do nothing. The click is where every activation
-   * actually happens — link navigation, button handlers, the Post control — so stopping it there
-   * is exactly "does not reach the page".
-   *
-   * Clicks that START inside our own shadow root (panel, its buttons, its scrolled content) are
-   * never intercepted: they are the extension's own, which is why the panel re-enables pointer
-   * events on itself while open. A click whose propagation a page handler already stopped never
-   * reaches this listener at all, so nothing is ever double-handled.
+   * Outside click collapses AND is FORWARDED (VAL-DRAFT-037, the M6 design): the listener only
+   * collapses — it never preventDefaults, stops propagation, or captures. The click proceeds
+   * natively to the page element behind it. Clicks inside our own shadow root (row, expanded
+   * block, its buttons, its scrolled content) are never ours to collapse on.
    */
-  const onOutsideClick = (event: Event): void => {
+  const onDocClick = (event: Event): void => {
     if (destroyed || !expanded) return;
+    if (insideClicks.has(event)) return;
     const host = hostElement();
     if (host === null) return;
-    const root = host.shadowRoot;
     const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
-    // A composed click retargets to the host, so `path.includes(host)` is the normal case. The
-    // shadow-root check is the fallback for events that do not cross the boundary.
     if (path.includes(host)) return;
+    const root = host.shadowRoot;
     if (root !== null && path.some((node) => node instanceof win.Node && root.contains(node))) return;
     collapse();
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
   };
-  doc.addEventListener('click', onOutsideClick, true);
-
-  /**
-   * Internal scrolling for a capped panel (VAL-DRAFT-023) without breaking the pointer
-   * discipline: the host stays pointer-events:none, but while the panel is EXPANDED it takes hits,
-   * so a wheel over it naturally targets the panel and never the page. This listener only has to
-   * route the wheel for engines that do not resolve a pointer-events:none subtree from the hit
-   * test, and never while collapsed — where every wheel must belong to the page (VAL-DRAFT-038).
-   */
-  const onWheel = (event: WheelEvent): void => {
-    if (!expanded) return; // collapsed: the page keeps every wheel (only the pill is interactive)
-    const panel = panelElement();
-    if (!panel || panel.scrollHeight <= panel.clientHeight) return; // nothing to scroll (common case)
-    const box = panel.getBoundingClientRect();
-    const withinPanel =
-      event.clientX >= box.left && event.clientX <= box.right &&
-      event.clientY >= box.top && event.clientY <= box.bottom;
-    if (!withinPanel) return;
-    // Firefox emits line-mode deltas; scrollTop is px (the line height lives in the config).
-    const delta =
-      event.deltaMode === WheelEvent.DOM_DELTA_LINE
-        ? event.deltaY * OVERLAY_PLACEMENT.wheelLineHeight
-        : event.deltaY;
-    const atTop = panel.scrollTop <= 0;
-    const atBottom = panel.scrollTop + panel.clientHeight >= panel.scrollHeight;
-    if (delta < 0 ? atTop : atBottom) return; // at the edge: the page keeps the scroll
-    panel.scrollTop += delta;
-    event.preventDefault();
-  };
-  doc.addEventListener('wheel', onWheel, { passive: false });
+  doc.addEventListener('click', onDocClick, false);
 
   // ---- state updates ----
 
@@ -817,10 +922,9 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
 
   return {
     /**
-     * Collapses the expanded panel without touching the captured draft (VAL-DRAFT-036). Called on
-     * the watcher's IMMEDIATE user-edit lane, so typing collapses the panel at the keystroke
-     * instead of ~700ms later when the debounced capture lands. Idempotent: a no-op when the
-     * panel is already collapsed (or never opened).
+     * Collapses the expanded block without touching the captured draft (VAL-DRAFT-036). Called on
+     * the watcher's IMMEDIATE user-edit lane, so typing collapses the block at the keystroke
+     * instead of ~700ms later when the debounced capture lands.
      */
     collapsePanel() {
       collapse();
@@ -842,12 +946,11 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     },
     onDraftCaptured(event) {
       if (manualCapture) {
-        // The user's own Analyze action: keep the panel open and let the local half repaint.
+        // The user's own Analyze action: keep the block open and let the local half repaint.
         manualCapture = false;
       } else {
-        // VAL-DRAFT-036 (the anti-occlusion guarantee): ANY other capture is a user edit, so the
-        // expanded panel collapses back to the pill BEFORE the new draft paints. While typing only
-        // the pill exists, which is what structurally keeps X's mention/emoji/GIF popups uncovered.
+        // VAL-DRAFT-036: ANY other capture is a user edit, so the expanded block collapses back
+        // to the row BEFORE the new draft paints.
         collapse();
       }
       const hash = draftIdentity(event.snapshot);
@@ -871,6 +974,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       composer = event.composer;
       clearAnalysisState();
       expanded = false; // a new composer (SPA navigation) always starts collapsed
+      neutralRowsVisible = false;
       render();
     },
     onAnalysisDispatched(snapshot) {
@@ -905,8 +1009,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       // The transport failure carries the failing draft's identity — the same identity successes
       // use — so ONLY that dispatch settles (VAL-DRAFT-018): an older in-flight analysis stays
       // pending, and the failing draft's local score shows with an explicit transport error
-      // instead of spinning forever. The failure is recorded under ITS OWN hash, so a later
-      // failure for another draft can never displace this draft's terminal state.
+      // instead of spinning forever.
       const hash = draftIdentity(snapshot);
       if (pendingCount(hash) <= 0) return; // unknown or already-settled dispatch: nothing to settle
       settlePending(hash);
@@ -940,10 +1043,8 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       destroyed = true;
       manualCapture = false;
       win.removeEventListener('resize', onResize);
-      doc.removeEventListener('focusin', onFocusIn, true);
-      doc.removeEventListener('wheel', onWheel);
       doc.removeEventListener('keydown', onKeyDown, true);
-      doc.removeEventListener('click', onOutsideClick, true);
+      doc.removeEventListener('click', onDocClick, false);
       themeDetector.destroy();
       unmountHost();
       clearAnalysisState();

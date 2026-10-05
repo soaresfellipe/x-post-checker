@@ -22,6 +22,13 @@ export interface SignalEntry {
   readonly direction: SignalDirection;
   /** False when the signal exists but did not affect the score (e.g. follow state not visible). */
   readonly applied: boolean;
+  /**
+   * The Design 1b short phrase (library/design-1b.md §5, verbatim) for the signal CHIPS and the
+   * status row's summary. Present only for signals that can render as a chip (points ≠ 0); the
+   * baseline has none (it is the score's floor, not an applied signal) and neither do zero-point
+   * entries — they surface only in the full rows list.
+   */
+  readonly short?: string;
 }
 
 /** The local heuristic result for one draft. Pure data; rendering belongs to the overlay. */

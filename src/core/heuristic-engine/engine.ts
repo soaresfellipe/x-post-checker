@@ -12,6 +12,7 @@ import {
   LIST_ITEM_PATTERN,
   SHAREABLE_FORMATS,
   STRONG_CLAIM_PATTERNS,
+  type LengthBand,
 } from './config';
 import { classifyLink, linkHost } from './links';
 import type { LocalScore, SignalEntry } from './types';
@@ -82,7 +83,12 @@ function clampHeadline(totalPoints: number): number {
   return Math.round(Math.min(max, Math.max(min, base + totalPoints)));
 }
 
-function entry(signal: keyof typeof SIGNAL_IDS, value: string, points: number): SignalEntry {
+/**
+ * Builds one breakdown entry. `short` (optional) is the Design 1b chip phrase
+ * (library/design-1b.md §5) — only for cases that can ever render as a chip (points ≠ 0);
+ * zero-point cases pass none and surface only in the overlay's full rows list.
+ */
+function entry(signal: keyof typeof SIGNAL_IDS, value: string, points: number, short?: string): SignalEntry {
   return {
     id: SIGNAL_IDS[signal],
     label: SIGNAL_LABELS[signal],
@@ -90,6 +96,7 @@ function entry(signal: keyof typeof SIGNAL_IDS, value: string, points: number): 
     points,
     direction: points > 0 ? 'positive' : points < 0 ? 'negative' : 'neutral',
     applied: points !== 0,
+    ...(short === undefined ? {} : { short }),
   };
 }
 
@@ -111,10 +118,10 @@ function replyMagnetSignal(contentText: string): SignalEntry {
   const { question, strongClaim, maxPoints } = HEURISTIC_CONFIG.replyMagnet;
 
   if (isQuestion && isStrongClaim) {
-    return entry('replyMagnet', 'question + strong claim (capped)', Math.min(question + strongClaim, maxPoints));
+    return entry('replyMagnet', 'question + strong claim (capped)', Math.min(question + strongClaim, maxPoints), 'Question + strong claim');
   }
-  if (isQuestion) return entry('replyMagnet', 'question', question);
-  if (isStrongClaim) return entry('replyMagnet', 'strong claim', strongClaim);
+  if (isQuestion) return entry('replyMagnet', 'question', question, 'Question');
+  if (isStrongClaim) return entry('replyMagnet', 'strong claim', strongClaim, 'Strong claim');
   return entry('replyMagnet', 'none detected', 0);
 }
 
@@ -132,20 +139,36 @@ function copyLinkSignal(contentText: string): SignalEntry {
     if (format.patterns.some((pattern) => pattern.test(contentText))) detected.push(format.label);
   }
   if (detected.length === 0) return entry('copyLink', 'no shareable format', 0);
-  return entry('copyLink', detected.join(', '), HEURISTIC_CONFIG.weights.copyLinkTrigger);
+  return entry('copyLink', detected.join(', '), HEURISTIC_CONFIG.weights.copyLinkTrigger, `Shareable: ${detected.join(', ')}`);
 }
 
 function dmShareSignal(contentText: string): SignalEntry {
   const matched = DM_SHARE_PATTERNS.filter((pattern) => pattern.test(contentText));
   if (matched.length === 0) return entry('dmShare', 'no send-to-a-friend phrasing', 0);
-  return entry('dmShare', 'send/share-to-a-friend phrasing', HEURISTIC_CONFIG.weights.shareDmTrigger);
+  return entry('dmShare', 'send/share-to-a-friend phrasing', HEURISTIC_CONFIG.weights.shareDmTrigger, 'DM-worthy phrasing');
 }
 
 function lengthSignal(charCount: number): SignalEntry {
   const band =
     HEURISTIC_CONFIG.lengthBands.find((candidate) => charCount >= candidate.min && charCount <= candidate.max) ??
     HEURISTIC_CONFIG.lengthBands[HEURISTIC_CONFIG.lengthBands.length - 1]!;
-  return entry('length', `${charCount} chars (${band.label})`, band.points);
+  return entry('length', `${charCount} chars (${band.label})`, band.points, lengthShortPhrase(band.id, charCount));
+}
+
+/** The Design 1b length-band chip phrases (§5); unscored bands have none. */
+function lengthShortPhrase(bandId: LengthBand['id'], charCount: number): string | undefined {
+  switch (bandId) {
+    case 'ideal':
+      return 'Ideal length';
+    case 'good':
+      return 'Good length';
+    case 'very-short':
+      return `Very short · ${charCount} chars`;
+    case 'overlong':
+      return `Overlong · ${charCount} chars`;
+    default:
+      return undefined; // 'short' scores 0 — never a chip
+  }
 }
 
 function hashtagSignal(count: number): SignalEntry {
@@ -153,7 +176,9 @@ function hashtagSignal(count: number): SignalEntry {
     HEURISTIC_CONFIG.hashtagBands.find((candidate) => count <= candidate.max) ??
     HEURISTIC_CONFIG.hashtagBands[HEURISTIC_CONFIG.hashtagBands.length - 1]!;
   const noun = count === 1 ? 'hashtag' : 'hashtags';
-  return entry('hashtags', `${count} ${noun} - ${band.note}`, band.points);
+  const short =
+    band.points > 0 ? `${count} ${noun}` : band.points < 0 ? `Too many hashtags (${count})` : undefined;
+  return entry('hashtags', `${count} ${noun} - ${band.note}`, band.points, short);
 }
 
 /**
@@ -181,7 +206,12 @@ function linkSignal(urls: readonly string[]): SignalEntry {
   for (const link of unknown) parts.push(`${link.url} (destination not visible - never guessed)`);
 
   // One flat minor negative per draft while any off-platform link is present (config comment).
-  return entry('links', parts.join('; '), external.length > 0 ? HEURISTIC_CONFIG.weights.externalLink : 0);
+  return entry(
+    'links',
+    parts.join('; '),
+    external.length > 0 ? HEURISTIC_CONFIG.weights.externalLink : 0,
+    external.length > 0 ? 'External link' : undefined,
+  );
 }
 
 function pluralLinks(count: number): string {
@@ -199,7 +229,7 @@ function onPlatformHosts(links: readonly { url: string }[]): string {
 
 function mediaSignal(hasMedia: boolean): SignalEntry {
   return hasMedia
-    ? entry('media', 'media attached', HEURISTIC_CONFIG.weights.media)
+    ? entry('media', 'media attached', HEURISTIC_CONFIG.weights.media, 'Media attached')
     : entry('media', 'none', 0);
 }
 
@@ -214,7 +244,12 @@ function replyMutualSignal(snapshot: DraftSnapshot): SignalEntry {
 
   const followed = snapshot.replyToFollowedByViewer;
   if (followed === true) {
-    return entry('replyMutual', 'reply to an account the viewer follows (visible)', HEURISTIC_CONFIG.weights.replyMutualBoost);
+    return entry(
+      'replyMutual',
+      'reply to an account the viewer follows (visible)',
+      HEURISTIC_CONFIG.weights.replyMutualBoost,
+      'Reply to someone you follow',
+    );
   }
   if (followed === false) {
     return entry('replyMutual', 'reply to an account the viewer does not follow (visible)', 0);
@@ -226,7 +261,12 @@ function baitSignal(contentText: string): SignalEntry {
   for (const pattern of BAIT_PATTERNS) {
     const match = pattern.exec(contentText);
     if (match) {
-      return entry('engagementBait', `bait pattern: "${match[0].toLowerCase()}"`, HEURISTIC_CONFIG.weights.engagementBait);
+      return entry(
+        'engagementBait',
+        `bait pattern: "${match[0].toLowerCase()}"`,
+        HEURISTIC_CONFIG.weights.engagementBait,
+        `Engagement bait: "${match[0].toLowerCase()}"`,
+      );
     }
   }
   return entry('engagementBait', 'clean', 0);
@@ -249,7 +289,15 @@ function moderationSignal(contentText: string): SignalEntry {
   }
 
   if (flags.length === 0) return entry('moderation', 'clean', 0);
-  return entry('moderation', flags.join(', '), points);
+  return entry('moderation', flags.join(', '), points, moderationShortPhrase(flags));
+}
+
+/** The Design 1b moderation chip phrases (§5), derived from the flagged cases. */
+function moderationShortPhrase(flags: readonly string[]): string {
+  const phrases: string[] = [];
+  if (flags.some((flag) => flag.startsWith('ALL-CAPS'))) phrases.push('ALL-CAPS');
+  if (flags.some((flag) => flag.startsWith('excessive punctuation'))) phrases.push('Excessive punctuation');
+  return phrases.join(', ');
 }
 
 function countMatches(text: string, pattern: RegExp): number {

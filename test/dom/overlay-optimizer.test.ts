@@ -3,29 +3,32 @@ import { DRAFT_DEBOUNCE_MS, type DraftSnapshot } from '../../src/core/draft-snap
 import { draftCacheKey } from '../../src/core/jev-client/hash';
 import { DEFAULT_SETTINGS, type Settings } from '../../src/core/settings-store';
 import type { HookVariant, Optimization, OptimizationResult } from '../../src/core/optimizer';
-import { OVERLAY_HOST_ID, OVERLAY_PILL_TESTID, createScoreOverlay, type ScoreOverlay } from '../../src/dom/overlay';
+import { OVERLAY_HOST_ID, OVERLAY_ROW_TESTID, OVERLAY_TESTID, createScoreOverlay, type ScoreOverlay } from '../../src/dom/overlay';
 import { createComposerWatcher } from '../../src/dom/composer-watcher';
 
 /**
- * The optimizer section of the score overlay (m4-optimizer), DOM-tier: availability gates with
- * clear reasons (VAL-OPT-001), loading -> success/error lifecycle (VAL-OPT-002/010), exact-text
- * clipboard copy (VAL-OPT-004) that never touches the composer (VAL-OPT-005), the over-limit
- * flag (VAL-OPT-007), per-draft identity (stale replies never paint), and the reset on draft
- * change that makes repeat Optimize a cache-served no-op at the API layer (VAL-OPT-009).
+ * The optimizer section of the expanded inline block (m4-optimizer, restyled by M6 Design 1b),
+ * DOM-tier: availability gates (VAL-OPT-001 — the section is HIDDEN entirely without AI), the
+ * loading -> success/error lifecycle (VAL-OPT-002/010), exact-text clipboard copy (VAL-OPT-004)
+ * that never touches the composer (VAL-OPT-005), the over-limit flag (VAL-OPT-007), per-draft
+ * identity (stale replies never paint), and the reset on draft change (VAL-OPT-009).
  *
- * Migrated to the M5 collapsed-first model: the section lives INSIDE the expanded panel, so every
- * flow now begins with a pill click, and typing a new draft collapses the panel (which each test
- * re-expands). Coverage is unchanged — only its location in the interaction.
+ * Migrated to the M6 model: the section lives INSIDE the expanded block, so every flow begins
+ * with a row click, and typing a new draft collapses the block (which each test re-expands).
  */
 
 const HOME_HTML = `
 <div id="react-root">
 <div data-testid="primaryColumn">
-  <div data-testid="toolBar">
-    <div data-testid="tweetTextarea_0RichTextInputContainer">
-      <div data-testid="tweetTextarea_0" role="textbox" contenteditable="true" class="public-DraftEditor-content"></div>
+  <div>
+    <div>
+      <div data-testid="tweetTextarea_0RichTextInputContainer">
+        <div data-testid="tweetTextarea_0" role="textbox" contenteditable="true" class="public-DraftEditor-content"></div>
+      </div>
     </div>
-    <button type="button" data-testid="tweetButtonInline" aria-disabled="true">Postar</button>
+    <div data-testid="toolBar">
+      <button type="button" data-testid="tweetButtonInline" aria-disabled="true">Postar</button>
+    </div>
   </div>
 </div>
 </div>`;
@@ -95,8 +98,8 @@ interface Harness {
   pushSettings(partial: Partial<Settings>): void;
   optimizeReply(result: OptimizationResult, draft?: DraftSnapshot): void;
   optimizeFail(draft?: DraftSnapshot): void;
-  /** The expanded panel, clicking the pill first when collapsed (the only way to get it). */
-  panel(): HTMLElement;
+  /** The expanded block, clicking the row first when collapsed (the only way to get it). */
+  expanded(): HTMLElement;
 }
 
 /** Live harnesses, stopped + destroyed after EVERY test: a leaked MutationObserver survives the
@@ -104,7 +107,9 @@ interface Harness {
  * scanner-suite lesson from library/environment.md). */
 const harnesses: Harness[] = [];
 
-function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: boolean } = {}): Harness {
+async function startHarness(
+  overrides: { settings?: Partial<Settings>; keyPresent?: boolean } = {},
+): Promise<Harness> {
   document.body.innerHTML = HOME_HTML;
   const settings: Settings = { ...DEFAULT_SETTINGS, ...overrides.settings };
   let keyPresent = overrides.keyPresent ?? true;
@@ -133,6 +138,8 @@ function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: bo
 
   overlay.onSettings(settings, 1);
   watcher.start();
+  // Drain the watcher's first scan so the composer is attached before any test types.
+  await vi.advanceTimersByTimeAsync(0);
 
   const harness: Harness = {
     overlay,
@@ -153,18 +160,18 @@ function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: bo
     optimizeFail(draft) {
       overlay.onOptimizeFailed(draft ?? optimizeRequests.at(-1)!);
     },
-    panel(): HTMLElement {
+    expanded(): HTMLElement {
       const shadow = document.querySelector<HTMLElement>(HOST_SELECTOR)?.shadowRoot;
       if (shadow === null || shadow === undefined) throw new Error('the overlay host is not mounted');
-      if (shadow.querySelector(`[data-testid="amplifyx-overlay"]`) === null) {
-        // M5: the panel only exists after an explicit pill click.
-        const pill = shadow.querySelector<HTMLElement>(`[data-testid="${OVERLAY_PILL_TESTID}"]`);
-        if (pill === null) throw new Error('the score pill is not rendered');
-        pill.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
+      if (shadow.querySelector(`[data-testid="${OVERLAY_TESTID}"]`) === null) {
+        // M6: the expanded block only exists after an explicit row click.
+        const row = shadow.querySelector<HTMLElement>(`[data-testid="${OVERLAY_ROW_TESTID}"]`);
+        if (row === null) throw new Error('the status row is not rendered');
+        row.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
       }
-      const panel = shadow.querySelector<HTMLElement>('[data-testid="amplifyx-overlay"]');
-      if (panel === null) throw new Error('the pill click did not expand the detail panel');
-      return panel;
+      const block = shadow.querySelector<HTMLElement>(`[data-testid="${OVERLAY_TESTID}"]`);
+      if (block === null) throw new Error('the row click did not expand the inline analysis');
+      return block;
     },
   };
   harnesses.push(harness);
@@ -173,6 +180,15 @@ function startHarness(overrides: { settings?: Partial<Settings>; keyPresent?: bo
 
 const find = (root: ParentNode, testid: string): HTMLElement | null =>
   root.querySelector<HTMLElement>(`[data-testid="${testid}"]`);
+
+/** The LIVE status row (re-queried after every re-render). */
+const rowOf = (): HTMLElement => {
+  const row = document
+    .querySelector<HTMLElement>(HOST_SELECTOR)
+    ?.shadowRoot?.querySelector<HTMLElement>(`[data-testid="${OVERLAY_ROW_TESTID}"]`);
+  if (row === null || row === undefined) throw new Error('the status row is not rendered');
+  return row;
+};
 
 /**
  * A bubbling, composed click. happy-dom normalizes a `MouseEvent` click init to `composed:false`
@@ -199,62 +215,60 @@ afterEach(() => {
 });
 
 async function analyzeHarness(overrides?: Parameters<typeof startHarness>[0]): Promise<Harness> {
-  const harness = startHarness(overrides);
-  await vi.advanceTimersByTimeAsync(0);
+  const harness = await startHarness(overrides);
   typeText(composer(), DRAFT_TEXT);
   await settleCapture();
   return harness;
 }
 
-describe('Optimize availability (VAL-OPT-001)', () => {
-  it('shows an enabled Optimize action for a qualifying draft with a key', async () => {
+describe('Optimizer availability (VAL-OPT-001, M6 decision D3)', () => {
+  it('shows the enabled "Find stronger hooks" outline action for a qualifying draft with a key', async () => {
     const harness = await analyzeHarness();
-    const section = find(harness.panel(), 'overlay-optimizer')!;
+    const section = find(harness.expanded(), 'overlay-optimizer')!;
     const optimize = find(section, 'overlay-optimize')!;
-    expect(optimize.dataset.state).toBe('enabled');
-    expect(optimize.textContent).toBe('Optimize');
+    expect(optimize.textContent).toBe('Find stronger hooks');
+    expect(optimize.tagName).toBe('BUTTON');
   });
 
-  it('disables Optimize without a key and points the guidance to Options', async () => {
+  it('hides the optimizer section ENTIRELY without a Jev key (user decision D3)', async () => {
     const harness = await analyzeHarness({ keyPresent: false });
-    const section = find(harness.panel(), 'overlay-optimizer')!;
-    expect(find(section, 'overlay-optimize')!.dataset.state).toBe('disabled');
-    const notice = find(section, 'overlay-optimizer-notice')!;
-    expect(notice.textContent).toMatch(/Options/);
-    expect(find(section, 'overlay-optimizer-connect')).not.toBeNull();
+    // No section, no disabled button, no guidance notice — but the AI block still carries the
+    // Connect Jev prompt and the row keeps the local score.
+    expect(find(harness.expanded(), 'overlay-optimizer')).toBeNull();
+    expect(find(harness.expanded(), 'overlay-connect-jev')).not.toBeNull();
+    expect(find(harness.expanded(), 'overlay-signals')).not.toBeNull();
+    expect(find(rowOf(), 'overlay-headline')).not.toBeNull();
   });
 
-  it('disables Optimize with a reason while the AI lane is off in Settings', async () => {
+  it('hides the optimizer section while the AI lane is off in Settings', async () => {
     const harness = await analyzeHarness({ settings: { jevForDrafts: false } });
-    const section = find(harness.panel(), 'overlay-optimizer')!;
-    expect(find(section, 'overlay-optimize')!.dataset.state).toBe('disabled');
-    expect(find(section, 'overlay-optimizer-notice')!.textContent).toMatch(/off in Settings/);
+    expect(find(harness.expanded(), 'overlay-optimizer')).toBeNull();
+    expect(find(harness.expanded(), 'overlay-jev')).not.toBeNull(); // the AI block says why
   });
 
   it('renders no overlay UI at all for an empty (below-minimum) draft', async () => {
-    startHarness();
-    await vi.advanceTimersByTimeAsync(0);
-    // M5: no qualifying draft means no host, no pill and no panel — so there is no Optimize
-    // affordance anywhere near the composer (the old panel rendered an empty state instead).
+    await startHarness();
     expect(document.querySelector(HOST_SELECTOR)).toBeNull();
     expect(find(document, 'overlay-optimizer')).toBeNull();
-    expect(find(document, OVERLAY_PILL_TESTID)).toBeNull();
+    expect(find(document, OVERLAY_ROW_TESTID)).toBeNull();
   });
 });
 
-describe('Optimize lifecycle (VAL-OPT-002, VAL-OPT-003)', () => {
+describe('Optimizer lifecycle (VAL-OPT-002, VAL-OPT-003)', () => {
   it('click -> loading with one dispatch; reply renders ranked variants with kind labels', async () => {
     const harness = await analyzeHarness();
-    const section = () => find(harness.panel(), 'overlay-optimizer')!;
+    const section = () => find(harness.expanded(), 'overlay-optimizer')!;
 
     click(find(section(), 'overlay-optimize')!);
     expect(section().dataset.optimizerState).toBe('loading');
-    expect(find(section(), 'overlay-optimizer-pending')).not.toBeNull();
+    expect(find(section(), 'overlay-optimizer-pending')!.textContent).toContain('Finding stronger hooks…');
     expect(harness.optimizeRequests).toHaveLength(1);
     expect(harness.optimizeRequests[0]!.text).toBe(DRAFT_TEXT);
 
     harness.optimizeReply(optimized(harness.optimizeRequests[0]!));
     expect(section().dataset.optimizerState).toBe('done');
+    expect(section().textContent).toContain('Stronger hooks');
+    expect(section().textContent).toContain('copy only · composer untouched');
     const items = section().querySelectorAll<HTMLElement>('[data-testid="overlay-optimizer-variant"]');
     expect(items).toHaveLength(2);
     expect(items[0]!.dataset.variantKind).toBe('question');
@@ -262,16 +276,16 @@ describe('Optimize lifecycle (VAL-OPT-002, VAL-OPT-003)', () => {
     expect(find(section(), 'overlay-optimizer-hashtags')).not.toBeNull();
   });
 
-  it('renders hashtag suggestions with rationales and drop advice when present', async () => {
+  it('renders hashtag suggestions as accent links with rationale titles, plus drop advice', async () => {
     const harness = await analyzeHarness();
-    click(find(harness.panel(), 'overlay-optimize')!);
+    click(find(harness.expanded(), 'overlay-optimize')!);
     harness.optimizeReply(optimized(harness.optimizeRequests[0]!, DEFAULT_VARIANTS, 'You use 5 hashtags. Drop #Grind, #Hustle.'));
 
-    const box = find(harness.panel(), 'overlay-optimizer-hashtags')!;
+    const box = find(harness.expanded(), 'overlay-optimizer-hashtags')!;
     const suggestions = box.querySelectorAll<HTMLElement>('[data-testid="overlay-optimizer-hashtag"]');
     expect(suggestions).toHaveLength(2);
-    expect(suggestions[0]!.textContent).toContain('#System');
-    expect(suggestions[0]!.textContent).toContain('Comes straight from your draft');
+    expect(suggestions[0]!.textContent).toBe('#System');
+    expect(suggestions[0]!.getAttribute('title')).toContain('Comes straight from your draft');
     expect(find(box, 'overlay-optimizer-drop-advice')!.textContent).toMatch(/Drop #Grind/);
   });
 });
@@ -279,10 +293,10 @@ describe('Optimize lifecycle (VAL-OPT-002, VAL-OPT-003)', () => {
 describe('Copy action (VAL-OPT-004, VAL-OPT-005)', () => {
   it('puts exactly the variant text on the clipboard and never changes the composer', async () => {
     const harness = await analyzeHarness();
-    click(find(harness.panel(), 'overlay-optimize')!);
+    click(find(harness.expanded(), 'overlay-optimize')!);
     harness.optimizeReply(optimized(harness.optimizeRequests[0]!));
 
-    const copy = find(harness.panel(), 'overlay-optimizer-copy')!;
+    const copy = find(harness.expanded(), 'overlay-optimizer-copy')!;
     click(copy);
     await vi.advanceTimersByTimeAsync(0);
     expect(harness.copied).toEqual([VARIANT_QUESTION]); // EXACT text, no labels or extra text
@@ -294,7 +308,7 @@ describe('Copy action (VAL-OPT-004, VAL-OPT-005)', () => {
 describe('Over-limit flag (VAL-OPT-007)', () => {
   it('flags an over-limit variant and leaves within-limit variants unflagged', async () => {
     const harness = await analyzeHarness();
-    click(find(harness.panel(), 'overlay-optimize')!);
+    click(find(harness.expanded(), 'overlay-optimize')!);
     harness.optimizeReply(
       optimized(harness.optimizeRequests[0]!, [
         variant('question', VARIANT_QUESTION, 0.9, 300, true),
@@ -302,90 +316,84 @@ describe('Over-limit flag (VAL-OPT-007)', () => {
       ]),
     );
 
-    const items = harness.panel().querySelectorAll<HTMLElement>('[data-testid="overlay-optimizer-variant"]');
+    const items = harness.expanded().querySelectorAll<HTMLElement>('[data-testid="overlay-optimizer-variant"]');
     expect(items[0]!.dataset.overLimit).toBe('true');
-    expect(find(items[0]!, 'overlay-optimizer-variant-chars')!.textContent).toMatch(/280-character limit/);
+    expect(find(items[0]!, 'overlay-optimizer-variant-chars')!.textContent).toBe('300 · over limit');
     expect(items[1]!.dataset.overLimit).toBe('false');
-    expect(find(items[1]!, 'overlay-optimizer-variant-chars')!.textContent).toMatch(/120 characters/);
+    expect(find(items[1]!, 'overlay-optimizer-variant-chars')!.textContent).toBe('120 chars');
   });
 });
 
 describe('Failure and identity (VAL-OPT-009, VAL-OPT-010)', () => {
-  it('shows an explicit non-blocking error: local score and composer intact, retry available', async () => {
+  it('shows an explicit non-blocking error with Retry: local score and composer intact', async () => {
     const harness = await analyzeHarness();
-    click(find(harness.panel(), 'overlay-optimize')!);
+    click(find(harness.expanded(), 'overlay-optimize')!);
     harness.optimizeFail();
 
-    const section = find(harness.panel(), 'overlay-optimizer')!;
+    const section = find(harness.expanded(), 'overlay-optimizer')!;
     expect(section.dataset.optimizerState).toBe('error');
-    expect(find(section, 'overlay-optimizer-notice')!.textContent).toMatch(/failed/i);
-    expect(find(section, 'overlay-optimize')!.dataset.state).toBe('enabled');
+    expect(find(section, 'overlay-optimizer-notice')!.textContent).toContain(
+      'Optimization failed — your draft and local score are untouched.',
+    );
     // Non-blocking: the local analysis half is still fully rendered.
-    expect(find(harness.panel(), 'overlay-headline')).not.toBeNull();
-    expect(find(harness.panel(), 'overlay-signals')).not.toBeNull();
+    expect(find(harness.expanded(), 'overlay-signals')).not.toBeNull();
+    expect(find(rowOf(), 'overlay-headline')).not.toBeNull();
     expect(composer().textContent).toBe(DRAFT_TEXT);
   });
 
   it('discards a reply for a different draft (the user kept typing)', async () => {
     const harness = await analyzeHarness();
-    click(find(harness.panel(), 'overlay-optimize')!);
+    click(find(harness.expanded(), 'overlay-optimize')!);
     const dispatchA = harness.optimizeRequests[0]!;
 
     typeText(composer(), 'A different draft that also clears the minimum length bar.');
     await settleCapture();
     harness.optimizeReply(optimized(dispatchA), dispatchA);
 
-    const section = find(harness.panel(), 'overlay-optimizer')!;
+    const section = find(harness.expanded(), 'overlay-optimizer')!;
     expect(section.dataset.optimizerState).toBe('idle'); // B never sees A's result
   });
 
   it('resets the section on a draft change so a re-click is a fresh (cache-served) dispatch', async () => {
     const harness = await analyzeHarness();
-    click(find(harness.panel(), 'overlay-optimize')!);
+    click(find(harness.expanded(), 'overlay-optimize')!);
     harness.optimizeReply(optimized(harness.optimizeRequests[0]!));
-    expect(find(harness.panel(), 'overlay-optimizer')!.dataset.optimizerState).toBe('done');
+    expect(find(harness.expanded(), 'overlay-optimizer')!.dataset.optimizerState).toBe('done');
 
     typeText(composer(), 'Another draft, also long enough to analyze properly here.');
     await settleCapture();
-    expect(find(harness.panel(), 'overlay-optimizer')!.dataset.optimizerState).toBe('idle');
+    expect(find(harness.expanded(), 'overlay-optimizer')!.dataset.optimizerState).toBe('idle');
 
     // Re-click dispatches again — the API-level dedup (max one call per unique draft) lives in
     // the background's optimizer cache; identical text re-served without a network call.
-    click(find(harness.panel(), 'overlay-optimize')!);
+    click(find(harness.expanded(), 'overlay-optimize')!);
     expect(harness.optimizeRequests).toHaveLength(2);
   });
 
-  it('does not dispatch while the AI lane is off even if the button state is forced', async () => {
+  it('does not dispatch while the AI lane is off (the section, and with it the button, is hidden)', async () => {
     const harness = await analyzeHarness({ settings: { jevForDrafts: false } });
-    click(find(harness.panel(), 'overlay-optimize')!);
+    expect(find(harness.expanded(), 'overlay-optimize')).toBeNull();
     expect(harness.optimizeRequests).toHaveLength(0);
   });
 });
 
 describe('English-only optimizer surface (VAL-CROSS-016)', () => {
-  it('renders only English text across idle, no-key, loading, done, and error states', async () => {
+  it('renders only English text across idle, loading, done, and error states', async () => {
     const english = /^[A-Za-z0-9 .,:;!?%'"()\-–—/+·…#]*$/;
     const visibleText = (root: ParentNode): string =>
       [...root.querySelectorAll('*')].map((node) => node.textContent ?? '').join(' ');
 
-    const noKey = await analyzeHarness({ keyPresent: false });
-    expect(visibleText(find(noKey.panel(), 'overlay-optimizer')!)).toMatch(english);
-    // One live harness at a time: the first harness's watcher must be stopped BEFORE the second
-    // harness replaces the body, or its observer re-attaches and its host wins the id race.
-    noKey.watcher.stop();
-    noKey.overlay.destroy();
-
     const harness = await analyzeHarness();
-    expect(visibleText(find(harness.panel(), 'overlay-optimizer')!)).toMatch(english); // idle
-    click(find(harness.panel(), 'overlay-optimize')!);
-    expect(visibleText(find(harness.panel(), 'overlay-optimizer')!)).toMatch(english); // loading
+    expect(visibleText(find(harness.expanded(), 'overlay-optimizer')!)).toMatch(english); // idle
+    click(find(harness.expanded(), 'overlay-optimize')!);
+    expect(visibleText(find(harness.expanded(), 'overlay-optimizer')!)).toMatch(english); // loading
     harness.optimizeReply(optimized(harness.optimizeRequests[0]!));
-    expect(visibleText(find(harness.panel(), 'overlay-optimizer')!)).toMatch(english); // done
+    expect(visibleText(find(harness.expanded(), 'overlay-optimizer')!)).toMatch(english); // done
 
     typeText(composer(), 'A second draft long enough for the error state sweep here.');
     await settleCapture();
-    click(find(harness.panel(), 'overlay-optimize')!);
+    click(find(harness.expanded(), 'overlay-optimize')!);
     harness.optimizeFail();
-    expect(visibleText(find(harness.panel(), 'overlay-optimizer')!)).toMatch(english); // error
+    expect(visibleText(find(harness.expanded(), 'overlay-optimizer')!)).toMatch(english); // error
   });
 });

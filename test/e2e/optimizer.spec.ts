@@ -105,15 +105,14 @@ function collectErrors(page: Page): string[] {
 }
 
 const panelOf = (page: Page) => page.getByTestId('amplifyx-overlay');
-const pillOf = (page: Page) => page.getByTestId('amplifyx-overlay-pill');
+const rowOf = (page: Page) => page.getByTestId('amplifyx-overlay-row');
 
 /**
  * Clears the composer (select-all + backspace) and types `text`, so sequential drafts in one test
  * are independent (a leftover previous draft would change the draft hash and the request state).
  *
- * Collapses first when the panel is open: the first click outside an expanded panel is
- * deliberately captured to close it (VAL-DRAFT-037) and never reaches the composer, so the
- * select-all shortcut only lands once the pill (collapsed state) is the surface again.
+ * Collapses first when the expanded block is open: a new user edit collapses it (VAL-DRAFT-036),
+ * so the select-all shortcut only lands once the row (collapsed state) is the surface again.
  */
 async function typeDraft(page: Page, text: string): Promise<void> {
   if ((await panelOf(page).count()) > 0) {
@@ -127,16 +126,16 @@ async function typeDraft(page: Page, text: string): Promise<void> {
 }
 
 /**
- * Expands the collapsed panel through the score pill — the only way the detail panel (and with it
- * the Optimizer section) comes into existence in the M5 collapsed-first model (VAL-OPT-001,
- * VAL-DRAFT-034). Idempotent, so a flow may call it again after typing collapsed the panel.
+ * Expands the inline analysis through the status row — the only way the expanded block (and with
+ * it the Optimizer section) comes into existence in the M6 in-flow model (VAL-OPT-001,
+ * VAL-DRAFT-034). Idempotent, so a flow may call it again after typing collapsed the block.
  *
- * It also waits for the panel's own state to reach 'analyzed', so a panel is never read before
+ * It also waits for the block's own state to reach 'analyzed', so it is never read before
  * the watcher's debounced capture (~700ms after typing) has landed.
  */
 async function expand(page: Page): Promise<void> {
   if ((await panelOf(page).count()) === 0) {
-    await pillOf(page).click();
+    await rowOf(page).click();
   }
   await expect(panelOf(page)).toBeVisible();
   await expect(panelOf(page)).toHaveAttribute('data-state', 'analyzed', { timeout: 10_000 });
@@ -157,7 +156,7 @@ async function typeDraftAndAwaitCapture(page: Page, text: string): Promise<void>
   const before = Number((await marker.getAttribute('data-watcher-dispatches')) ?? '0');
   await typeDraft(page, text);
   await expect(marker).toHaveAttribute('data-watcher-dispatches', String(before + 1), { timeout: 15_000 });
-  await expect(panelOf(page)).toHaveCount(0); // typing collapses the panel; only the pill is up
+  await expect(panelOf(page)).toHaveCount(0); // typing collapses the block; only the row is up
 }
 
 /** The fresh capture's optimizer slot: 'idle' — no Optimize result for THIS draft yet. */
@@ -174,32 +173,33 @@ test.describe('optimizer (m4-optimizer)', () => {
     const page = await openFixture(context);
     const errors = collectErrors(page);
 
-    // Empty draft: M5 renders NO extension UI at all, so there is no Optimize affordance.
+    // Empty draft: M6 renders NO extension UI at all, so there is no Optimize affordance.
     await expect(page.locator('#amplifyx-overlay-host')).toHaveCount(0);
-    await expect(pillOf(page)).toHaveCount(0);
+    await expect(rowOf(page)).toHaveCount(0);
     await expect(page.getByTestId('overlay-optimizer')).toHaveCount(0);
 
-    // Qualifying draft + key: the collapsed pill appears, and one click reveals the enabled
-    // Optimize action inside the expanded panel.
+    // Qualifying draft + key: the in-flow row appears, and one click reveals the "Find stronger
+    // hooks" action inside the expanded block.
     await typeDraft(page, FIXED_DRAFT);
     await expand(page);
-    await expect(page.getByTestId('overlay-optimize')).toHaveAttribute('data-state', 'enabled');
-    await expect(page.getByTestId('overlay-optimize')).toHaveText('Optimize');
+    await expect(page.getByTestId('overlay-optimize')).toBeVisible();
+    await expect(page.getByTestId('overlay-optimize')).toHaveText('Find stronger hooks');
     expect(errors).toEqual([]);
   });
 
-  test('no key renders the disabled state whose guidance points to Options (VAL-OPT-001)', async ({ context }) => {
+  test('no key hides the optimizer section entirely; the AI block carries the Connect Jev prompt (VAL-OPT-001, M6 decision D3)', async ({ context }) => {
     await interceptJev(context, () => ({ action: 'fulfill', body: VERIFIED_JEV_RESPONSE }));
     const page = await openFixture(context);
     await typeDraft(page, FIXED_DRAFT);
-    await expect(pillOf(page)).toBeVisible();
+    await expect(rowOf(page)).toBeVisible();
     await expand(page);
 
-    const section = page.getByTestId('overlay-optimizer');
-    await expect(section).toHaveAttribute('data-optimizer-state', 'no-key');
-    await expect(page.getByTestId('overlay-optimize')).toHaveAttribute('data-state', 'disabled');
-    await expect(page.getByTestId('overlay-optimizer-notice')).toContainText('Connect Jev in Options');
-    await expect(page.getByTestId('overlay-optimizer-connect')).toBeVisible();
+    // D3: no disabled button, no guidance notice — the section is not rendered at all.
+    await expect(page.getByTestId('overlay-optimizer')).toHaveCount(0);
+    await expect(page.getByTestId('overlay-optimize')).toHaveCount(0);
+    // The AI block's Connect Jev prompt is the path to enabling AI (and with it the optimizer).
+    await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'no-key');
+    await expect(page.getByTestId('overlay-connect-jev')).toBeVisible();
   });
 
   test('click -> loading -> deterministic ranked variants and hashtag suggestions (VAL-OPT-002, VAL-OPT-003, VAL-OPT-006)', async ({ context }) => {
@@ -210,7 +210,7 @@ test.describe('optimizer (m4-optimizer)', () => {
     const page = await openFixture(context);
     const errors = collectErrors(page);
     await typeDraft(page, FIXED_DRAFT);
-    await expect(pillOf(page)).toBeVisible();
+    await expect(rowOf(page)).toBeVisible();
     await expand(page);
 
     await page.getByTestId('overlay-optimize').click();
@@ -240,13 +240,14 @@ test.describe('optimizer (m4-optimizer)', () => {
 
     // Hashtag suggestions: top three by the fixture's topicality probabilities, each with a
     // one-line rationale naming the draft term (VAL-OPT-006 evidence for the manual review).
+    // Hashtag suggestions: top three by the fixture's topicality probabilities, rendered as
+    // "Add #Tag · #Tag" links with the one-line rationale in the title tooltip (design-1b §4.3).
     const suggestions = page.getByTestId('overlay-optimizer-hashtag');
     await expect(suggestions).toHaveCount(3);
-    await expect(suggestions.nth(0)).toHaveAttribute('data-tag', 'System');
-    await expect(suggestions.nth(0)).toContainText('#System');
-    await expect(suggestions.nth(0)).toContainText('Comes straight from your draft ("system")');
-    await expect(suggestions.nth(1)).toHaveAttribute('data-tag', 'Productivity');
-    await expect(suggestions.nth(2)).toHaveAttribute('data-tag', 'Complicated');
+    await expect(suggestions.nth(0)).toHaveText('#System');
+    await expect(suggestions.nth(0)).toHaveAttribute('title', 'Comes straight from your draft ("system").');
+    await expect(suggestions.nth(1)).toHaveText('#Productivity');
+    await expect(suggestions.nth(2)).toHaveText('#Complicated');
     expect(errors).toEqual([]);
   });
 
@@ -258,7 +259,7 @@ test.describe('optimizer (m4-optimizer)', () => {
     await saveKeyViaOptions(context);
     const page = await openFixture(context);
     await typeDraft(page, FIXED_DRAFT);
-    await expect(pillOf(page)).toBeVisible();
+    await expect(rowOf(page)).toBeVisible();
     await expand(page);
 
     await page.getByTestId('overlay-optimize').click();
@@ -288,7 +289,7 @@ test.describe('optimizer (m4-optimizer)', () => {
     await saveKeyViaOptions(context);
     const page = await openFixture(context);
     await typeDraft(page, FIXED_DRAFT);
-    await expect(pillOf(page)).toBeVisible();
+    await expect(rowOf(page)).toBeVisible();
     await expand(page);
 
     await page.getByTestId('overlay-optimize').click();
@@ -296,16 +297,17 @@ test.describe('optimizer (m4-optimizer)', () => {
     await expect.poll(() => optimizeCalls(calls).length, { timeout: 10_000 }).toBe(1);
     const firstText = await page.getByTestId('overlay-optimizer-variant-text').first().innerText();
 
-    // Second click on the SAME draft: served by the background's optimizer cache.
-    await page.getByTestId('overlay-optimize').click();
-    await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'done');
-    await expect.poll(() => optimizeCalls(calls).length, { timeout: 10_000 }).toBe(1); // still one
+    // The DONE section renders its result and stays put: there is no re-run affordance on an
+    // unchanged draft (the design-1b done state shows the ranked cards, not another action), and
+    // the single exchange stays the only one.
+    await expect(page.getByTestId('overlay-optimize')).toHaveCount(0);
     await expect(page.getByTestId('overlay-optimizer-variant-text').first()).toHaveText(firstText);
+    await expect.poll(() => optimizeCalls(calls).length, { timeout: 10_000 }).toBe(1); // still one
 
     // A CHANGED draft is a new identity and pays its own (second) optimize call. The NEW capture
     // must land before clicking: the watcher's debounce keeps the OLD draft's analysis (and its
     // done-slot) current for ~700ms after typing, and an early Optimize click would (correctly)
-    // be served from the old draft's cache. Typing also collapses the panel (M5 collapsed-first),
+    // be served from the old draft's cache. Typing also collapses the block (VAL-DRAFT-036),
     // so the flow re-expands it and waits for the optimizer section to flip back to 'idle' — the
     // exact moment the new draft's capture invalidates the old done-slot (draft-identity match).
     // That is the deterministic ready signal.
@@ -326,7 +328,7 @@ test.describe('optimizer (m4-optimizer)', () => {
     // A ~270-char two-sentence draft: the story/question scaffolds push past 280 X-weighted.
     const longDraft = `${'Writing threads that people actually finish takes deliberate structure, disciplined editing, and a reason to keep reading every single line you publish online today'}. ${'The draft body continues here so the reorder variant has two sentences to work with and stays deterministic'}.`;
     await typeDraft(page, longDraft);
-    await expect(pillOf(page)).toBeVisible();
+    await expect(rowOf(page)).toBeVisible();
     await expand(page);
 
     await page.getByTestId('overlay-optimize').click();
@@ -337,9 +339,7 @@ test.describe('optimizer (m4-optimizer)', () => {
     await expect(items).toHaveCount(3);
     const overLimit = page.locator('[data-testid="overlay-optimizer-variant"][data-over-limit="true"]');
     await expect(overLimit).toHaveCount(2); // question + story scaffolds push ~270 chars past 280
-    await expect(overLimit.first().getByTestId('overlay-optimizer-variant-chars')).toContainText(
-      'Over the 280-character limit',
-    );
+    await expect(overLimit.first().getByTestId('overlay-optimizer-variant-chars')).toContainText('over limit');
   });
 
   test('failure is explicit and non-blocking: local score intact, composer usable (VAL-OPT-010)', async ({ context }) => {
@@ -350,7 +350,7 @@ test.describe('optimizer (m4-optimizer)', () => {
     const page = await openFixture(context);
     const errors = collectErrors(page);
     await typeDraft(page, FIXED_DRAFT);
-    await expect(pillOf(page)).toBeVisible();
+    await expect(rowOf(page)).toBeVisible();
     await expand(page);
     await expect(page.getByTestId('overlay-headline')).toBeVisible(); // local score first
 
@@ -358,7 +358,7 @@ test.describe('optimizer (m4-optimizer)', () => {
     await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'error');
     await expect(page.getByTestId('overlay-optimizer-notice')).toContainText('Optimization failed');
     await expect(page.getByTestId('overlay-optimizer-notice')).toContainText('untouched');
-    await expect(page.getByTestId('overlay-optimize')).toHaveAttribute('data-state', 'enabled'); // retry available
+    await expect(page.getByTestId('overlay-retry')).toBeVisible(); // Retry runs the same action
 
     // Non-blocking: local scoring stays fully rendered and the composer keeps working. Typing
     // collapses the panel; the re-expanded 'idle' section proves the NEW draft's capture + local
@@ -391,7 +391,7 @@ test.describe('optimizer (m4-optimizer)', () => {
     const english = /^[A-Za-z0-9 .,:;!?%'"()\-–—/+·…#\n]*$/;
 
     await typeDraft(page, FIXED_DRAFT);
-    await expect(pillOf(page)).toBeVisible();
+    await expect(rowOf(page)).toBeVisible();
     await expand(page);
     const sectionText = await page.getByTestId('overlay-optimizer').innerText();
     expect(sectionText).toMatch(english);
@@ -422,7 +422,7 @@ test.describe('optimizer (m4-optimizer)', () => {
     await typeDraftAndAwaitCapture(page, FIXED_DRAFT);
     await expand(page);
 
-    // The Optimizer section is the panel's LAST block: its final variant's Copy button is the
+    // The Optimizer section is the block's LAST block: its final variant's Copy button is the
     // deepest control the scroll must reach (this round's user complaint, verbatim).
     await page.getByTestId('overlay-optimize').click();
     await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'done');
@@ -430,7 +430,12 @@ test.describe('optimizer (m4-optimizer)', () => {
     const variants = page.getByTestId('overlay-optimizer-variant');
     await expect(variants).toHaveCount(3);
 
-    // Short viewport: the panel must cap to the available space and scroll internally.
+    // Overflow the block's 420px budget (D2): the hooks carousel is one horizontal row, so the
+    // vertical height comes from revealing the FULL signal rows list via the "N neutral ›"
+    // toggle (a local toggle that must not re-render or collapse the block).
+    const toggle = page.getByTestId('overlay-neutral-toggle');
+    if ((await toggle.count()) > 0) await toggle.click();
+    await expect(page.getByTestId('overlay-signal-rows')).toBeVisible();
     await page.setViewportSize({ width: 900, height: 500 });
     const panelMetrics = async (): Promise<{ scrollTop: number; clientHeight: number; scrollHeight: number } | null> =>
       page.evaluate(() => {
@@ -447,8 +452,8 @@ test.describe('optimizer (m4-optimizer)', () => {
       }, { timeout: 5_000 })
       .toBe(true); // the cap engaged: more content than the capped box shows
 
-    // WHEEL pass: notches over the panel's center must be redirected INTO the panel until its
-    // very end, while the page beneath stays put (the redirect only yields at the panel's edge).
+    // WHEEL pass: notches over the block's center scroll the BLOCK internally (its own
+    // overflow) until its very end, while the page beneath stays put.
     const panelBox = await panelOf(page).boundingBox();
     await page.mouse.move(panelBox!.x + panelBox!.width / 2, panelBox!.y + panelBox!.height / 2);
     for (let notch = 0; notch < 25; notch += 1) {
@@ -461,14 +466,15 @@ test.describe('optimizer (m4-optimizer)', () => {
     expect(atEnd!.scrollTop + atEnd!.clientHeight).toBeGreaterThanOrEqual(atEnd!.scrollHeight - 1);
     expect(await page.evaluate(() => window.scrollY)).toBe(0);
 
-    // The LAST variant's Copy button is fully inside the viewport RIGHT NOW — reachable by the
-    // scroll alone, not by Playwright's automatic scroll-into-view on click.
+    // The LAST variant's Copy button is fully inside the BLOCK's visible area RIGHT NOW —
+    // reachable by the internal scroll alone, not by Playwright's automatic scroll-into-view.
+    const blockBoxAfter = await panelOf(page).boundingBox();
     const lastVariant = variants.last();
     await expect(lastVariant).toHaveAttribute('data-variant-kind', 'story');
     const copyBox = await lastVariant.getByTestId('overlay-optimizer-copy').boundingBox();
     expect(copyBox).not.toBeNull();
-    expect(copyBox!.y).toBeGreaterThanOrEqual(0);
-    expect(copyBox!.y + copyBox!.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+    expect(copyBox!.y).toBeGreaterThanOrEqual(blockBoxAfter!.y - 1);
+    expect(copyBox!.y + copyBox!.height).toBeLessThanOrEqual(blockBoxAfter!.y + blockBoxAfter!.height + 1);
 
     // Clicking it copies EXACTLY that variant's text — and the composer is byte-identical
     // (VAL-OPT-004's exact transfer and VAL-OPT-005's untouched composer, at the panel's end).

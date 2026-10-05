@@ -15,6 +15,7 @@ import { draftCacheKey } from '@/core/jev-client/hash';
 import type { DraftAnalysis } from '@/core/analyzer';
 import type { JevAnalysisFailure } from '@/core/jev-client/client';
 import type { Settings } from '@/core/settings-store';
+import { neutralCount, signalChips, summaryPhrases } from './chips';
 import { OVERLAY_COPY } from './config';
 import type { JevSection, OptimizerSection, OptimizerSlot, OverlayView, OverlayViewInputs } from './types';
 
@@ -37,7 +38,7 @@ export function failureReason(failure: JevAnalysisFailure): string {
     case 'no-key':
       // The analyzer maps a missing key to 'skipped-no-key' (the Connect Jev prompt), so a
       // no-key failure never reaches the error path; keeping the mapping total is still right.
-      return OVERLAY_COPY.noKey;
+      return `${OVERLAY_COPY.noKeyLongBefore}${OVERLAY_COPY.noKeyLink}${OVERLAY_COPY.noKeyLongAfter}`;
   }
 }
 
@@ -129,6 +130,12 @@ export function deriveOverlayView(inputs: OverlayViewInputs): OverlayView {
         : local.headline
       : composeHeadline(local.headline, verdict?.ordinal),
     headlineSource: verdict ? 'hybrid' : 'local',
+    // The Design 1b chip model: the row summary (top-2), the expanded block's chips (max 4) and
+    // the "N neutral ›" count all derive from the SAME selection, so they can never disagree
+    // (VAL-DRAFT-044).
+    summary: summaryPhrases(local.signals),
+    chips: signalChips(local.signals),
+    neutralCount: neutralCount(local.signals),
     jev,
     optimizer: optimizerSection,
   };
@@ -136,10 +143,10 @@ export function deriveOverlayView(inputs: OverlayViewInputs): OverlayView {
 
 /**
  * Derives the Optimize-half section (m4-optimizer). LIVE SETTINGS TAKE PRECEDENCE, mirroring the
- * Jev half: with `jevForDrafts` off the section says so (the optimizer is an AI feature), and
- * without a key it renders the disabled state whose guidance points to Options (VAL-OPT-001).
- * Otherwise the draft's own slot decides: loading -> done/error, matched by draft identity so a
- * stale reply never paints a newer draft.
+ * Jev half: with `jevForDrafts` off, or without a key, the state is one the renderer HIDES
+ * entirely (M6 user decision D3 — no optimizer button without AI), so only the remaining states
+ * ever reach the DOM. Otherwise the draft's own slot decides: loading -> done/error, matched by
+ * draft identity so a stale reply never paints a newer draft.
  */
 function deriveOptimizerSection(
   settings: Settings,

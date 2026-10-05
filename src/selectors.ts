@@ -28,6 +28,12 @@ export const SELECTORS = {
    * anchors below it; the collapsed pill keeps clear of the Post button).
    */
   composerFurniture: ['[data-testid="toolBar"]', '[data-testid="tweetButtonInline"]', '[data-testid="tweetButton"]'],
+  /**
+   * The composer's furniture-row toolbar — the overlay's IN-FLOW anchor (M6 Design 1b): the
+   * status-row host is inserted as this element's immediately preceding sibling. Absent → the
+   * overlay falls back to absolute placement (same row anatomy).
+   */
+  composerToolBar: ['[data-testid="toolBar"]'],
   composerPostButton: ['[data-testid="tweetButtonInline"]', '[data-testid="tweetButton"]'],
   /** Media chips attached to a composer; always queried scoped to the composer region. */
   composerMedia: [
@@ -39,20 +45,9 @@ export const SELECTORS = {
   ],
   /** Primary "replying to" handle chip in a composer region (structural fallback is scan-based). */
   replyToHandle: ['[data-testid="replyToHandle"]'],
-  /**
-   * X's OWN composer mention typeahead (the autocomplete dropdown the overlay must never cover —
-   * VAL-DRAFT-040). Verified live 2026-10-04 (read-only real-x smoke): mention results render as
-   * light-DOM `typeaheadResult` rows containing `TypeaheadUser` entries. The wrapped-container
-   * testids seen in earlier probes (`typeaheadDropdownWrapped-*`, `DropdownWrapper-*`) are kept
-   * as lower-priority fallbacks; callers MUST scope the match to the focused composer so the
-   * top-bar search typeahead never crosses over.
-   */
-  composerTypeahead: [
-    '[data-testid="typeaheadResult"]',
-    '[data-testid="TypeaheadUser"]',
-    '[data-testid^="typeaheadDropdownWrapped"]',
-    '[data-testid^="DropdownWrapper"]',
-  ],
+  // NOTE (M6): the M5 `composerTypeahead` chain is DELETED with the visibility-yield mechanism —
+  // nothing floats over the composer any more, so X's @mention dropdown needs no cooperation
+  // from extension surfaces (library/x-dom.md: the dropdown draws over in-flow siblings).
   // NOTE: no follow-state selector is registered. The real reply composer exposes NO marker that
   // the viewer follows the reply target (verified read-only inspection 2026-10-03, see
   // library/x-dom.md); `socialContext` is generic context and `userFollowIndicator` means the

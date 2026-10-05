@@ -10,6 +10,7 @@ import type { Optimization, OptimizationResult } from '@/core/optimizer';
 import type { JevAnalysisFailure } from '@/core/jev-client/client';
 import type { Settings } from '@/core/settings-store';
 import type { ComposerChangeEvent, DraftEvent } from '@/dom/composer-watcher';
+import type { SignalChip } from './chips';
 
 /**
  * Which Jev-half state the panel shows. `pending` = an analysis is in flight for this draft;
@@ -27,10 +28,11 @@ export interface JevSection {
 }
 
 /**
- * Which Optimize-half state the panel shows (m4-optimizer). `no-key` renders a disabled Optimize
- * with guidance to Options (VAL-OPT-001); `loading`/`done`/`error` are the action's own lifecycle
- * (loading -> success or explicit error, VAL-OPT-002/010), tracked PER DRAFT like the analysis
- * replies so a draft change resets it and a stale reply never paints a newer draft.
+ * Which Optimize-half state the expanded block shows. M6 (user decision D3): `no-key` (and the
+ * AI-off state) render NO optimizer section at all — the button is hidden entirely. `loading`/
+ * `done`/`error` are the action's own lifecycle (loading -> success or explicit error,
+ * VAL-OPT-002/010), tracked PER DRAFT like the analysis replies so a draft change resets it and
+ * a stale reply never paints a newer draft.
  */
 export type OptimizerSection =
   | { readonly state: 'idle' }
@@ -48,18 +50,24 @@ export type OptimizerSlot =
 
 /**
  * The pure view model for the current draft (all DOM-free; `deriveOverlayView` produces it).
- * M5 is COLLAPSED-FIRST: `empty` (no qualifying draft) renders NOTHING at all — no pill, no
- * panel, no awaiting balloon — and `analyzed` is what the collapsed PILL renders from. The detail
- * panel renders the same view, and only after an explicit pill click.
+ * M6 (Design 1b): `empty` (no qualifying draft) renders NOTHING at all — no row, no expanded
+ * block — and `analyzed` is what the collapsed status ROW renders from (plus the inline expanded
+ * block, only after an explicit row click).
  */
 export type OverlayView =
   | { readonly phase: 'empty'; readonly minDraftLength: number }
   | {
       readonly phase: 'analyzed';
       readonly local: LocalScore;
-      /** The gauge number: hybrid when a verdict is in, the local headline otherwise. */
+      /** The headline number: hybrid when a verdict is in, the local headline otherwise. */
       readonly headline: number;
       readonly headlineSource: 'local' | 'hybrid';
+      /** Up to 2 short phrases of the highest-|points| signals (the row summary). */
+      readonly summary: readonly string[];
+      /** The expanded block's signal chips (max 4, |points| desc, signed points). */
+      readonly chips: readonly SignalChip[];
+      /** Signals not shown as chips — the "N" of the "N neutral ›" toggle. */
+      readonly neutralCount: number;
       readonly jev: JevSection;
       readonly optimizer: OptimizerSection;
     };
