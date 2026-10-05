@@ -178,6 +178,10 @@ async function startHarness(
     draftEvents.push(event);
     overlay.onDraftCaptured(event);
   });
+  // The production wiring (content.ts): the IMMEDIATE user-edit lane owns collapse (VAL-DRAFT-036);
+  // the capture lane never collapses — a capture for an edit that predates a re-expansion must not
+  // slam the block shut (the VAL-CROSS-002 divergence).
+  watcher.onUserEdit(() => overlay.collapsePanel());
   watcher.onComposerChange((event) => overlay.onComposerChange(event));
 
   overlay.onSettings(settings, 1);
@@ -1089,6 +1093,65 @@ describe('hybrid headline only at the AI verdict (VAL-DRAFT-045)', () => {
     });
     expect(find(harness.row(), OVERLAY_TESTIDS.headline)!.textContent).toBe(String(local.headline));
     expect(harness.row().querySelector('.dot')!.getAttribute('data-tier')).toBe(headlineTierOf(local.headline));
+  });
+});
+
+describe('key lands mid-session: row and block move together (VAL-CROSS-002 regression)', () => {
+  /** The row and the expanded block must always sample the SAME view's Jev state. */
+  function assertRowBlockAgree(harness: Harness): { row: string; block: string } {
+    const rowState = harness.row().getAttribute('data-jev-state');
+    const blockState = find(harness.expanded(), OVERLAY_TESTIDS.jev)!.getAttribute('data-jev-state');
+    expect(blockState).toBe(rowState);
+    return { row: rowState!, block: blockState! };
+  }
+
+  it('a key landing while the block is EXPANDED re-renders row and block to the same new state', async () => {
+    const harness = await startHarness({ keyPresent: false, settings: { autoAnalyze: false } });
+    typeText(composer(), 'A draft expanded while no key was configured for the extension');
+    await settleCapture(); // autoAnalyze off: captured, never dispatched; optimistic no-key
+    harness.expand();
+    expect(assertRowBlockAgree(harness)).toEqual({ row: 'no-key', block: 'no-key' });
+
+    // The key lands mid-session (the content script's key lane: gate accepts -> presence flips ->
+    // overlay.onKeyPresenceChanged). The block must leave the stale no-key section IN PLACE and
+    // match the row's new state — a stuck no-key block next to a current row is the regression.
+    harness.setKeyPresent(true);
+    harness.overlay.onKeyPresenceChanged();
+    expect(assertRowBlockAgree(harness)).toEqual({ row: 'ready', block: 'ready' });
+    // The stale Connect Jev prompt is gone from the block.
+    expect(find(harness.expanded(), OVERLAY_TESTIDS.connectJev)).toBeNull();
+  });
+
+  it('a key landing while COLLAPSED, then expanding, shows the block at the row\u2019s state', async () => {
+    const harness = await startHarness({ keyPresent: false, settings: { autoAnalyze: false } });
+    typeText(composer(), 'A draft collapsed while no key was configured for the extension');
+    await settleCapture(); // autoAnalyze off: captured, never dispatched; optimistic no-key
+    harness.setKeyPresent(true);
+    harness.overlay.onKeyPresenceChanged();
+    harness.expand();
+    expect(assertRowBlockAgree(harness)).toEqual({ row: 'ready', block: 'ready' });
+  });
+
+  it('a capture for a draft typed BEFORE a re-expansion never slams the block shut', async () => {
+    const harness = await startHarness({ keyPresent: false });
+    typeText(composer(), 'Draft A analyzed while the extension had no Jev key at all');
+    await settleCapture();
+    harness.replyFor(harness.requests[0]!, { jev: undefined }); // skipped-no-key
+    harness.expand();
+    // Draft B is typed (the immediate edit lane collapses the block), and the user RE-EXPANDS
+    // during the ~700ms capture-debounce window — before draft B's capture lands.
+    typeText(composer(), 'Draft B typed after a key landed in Options mid-session here');
+    expect(harness.isExpanded()).toBe(false); // the edit collapsed it (VAL-DRAFT-036)
+    harness.expand();
+    expect(harness.isExpanded()).toBe(true);
+    // The debounced capture for draft B lands: the block must STAY OPEN and repaint with draft
+    // B's current view — never collapse (the capture belongs to an edit older than the click).
+    await settleCapture();
+    expect(harness.isExpanded()).toBe(true);
+    expect(assertRowBlockAgree(harness)).toEqual({ row: 'no-key', block: 'no-key' }); // draft B, optimistic
+    // And the verdict (the background HAS the key) updates row and block together.
+    harness.replyFor(harness.requests[1]!);
+    expect(assertRowBlockAgree(harness)).toEqual({ row: 'verdict', block: 'verdict' });
   });
 });
 

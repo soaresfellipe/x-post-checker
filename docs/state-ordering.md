@@ -139,6 +139,19 @@ spins forever, and no draft silently downgrades to the ready phase
 - A per-draft failure renders the honest degraded state: the local score stays usable with an
   explicit transport-error notice — the failure never throws into the UI and never fabricates a
   verdict.
+- **Collapse is owned by the immediate user-edit lane ONLY** (m6-fix-key-landing-row-block-
+  divergence): `collapsePanel` fires at the keystroke (`watcher.onUserEdit`); the debounced
+  capture NEVER collapses. A capture is the delayed RESULT of an edit that already fired that
+  lane — collapsing again would slam shut a block the user (re-)opened during the debounce
+  window (after the edit, before the capture), which is exactly the observed row/block
+  divergence of the VAL-CROSS-002 escalation. While expanded, a landing capture repaints the
+  block in place with the new draft's current view, so row and block always sample ONE state.
+- **Key presence is a render trigger, not just a variable** (same fix): a key-only storage write
+  carries no settings key, so the settings-sync funnel ignores it and the background broadcasts
+  nothing. The content script's key lane therefore calls `overlay.onKeyPresenceChanged()` (and
+  `badges.onSettingsChanged()`) whenever its keyRevision gate admits a fact — the open tab
+  re-renders row, block and badges the moment a key lands or clears, instead of waiting for the
+  next natural render (VAL-CROSS-002).
 
 Pinned interleavings (regression tests, `test/dom/overlay.test.ts`, "transport-failure identity"):
 

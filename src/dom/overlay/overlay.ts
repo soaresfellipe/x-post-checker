@@ -27,6 +27,7 @@
  */
 import type { DraftSnapshot } from '@/core/draft-snapshot';
 import { JEV_BAND_LABELS, type JevVerdict, type SignalEntry } from '@/core/heuristic-engine';
+import { logOrdering } from '@/core/ordering-log';
 import { DEFAULT_SETTINGS, type Settings } from '@/core/settings-store';
 import type { DraftAnalysis, DraftAnalysisResult } from '@/core/analyzer';
 import { VARIANT_LABELS, type HookVariant, type OptimizationResult } from '@/core/optimizer';
@@ -783,6 +784,15 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       transportFailures,
       optimizer: optimizerSlot,
     });
+    logOrdering({
+      src: 'overlay.render',
+      phase: view.phase,
+      expanded,
+      jevState: view.phase === 'analyzed' ? view.jev.state : undefined,
+      headlineSource: view.phase === 'analyzed' ? view.headlineSource : undefined,
+      keyPresent: options.getKeyPresence(),
+      pendingCount: view.phase === 'analyzed' ? (pending.get(draftIdentity(capture!)) ?? 0) : undefined,
+    });
     // No qualifying draft ⇒ NO extension UI near the composer at all: the host is removed, not
     // merely emptied (VAL-DRAFT-005/014 — no row, no expanded block, no awaiting balloon).
     if (view.phase === 'empty') {
@@ -945,14 +955,27 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       }
       render();
     },
+    onKeyPresenceChanged() {
+      // A key-only write never passes the settings-sync funnel (no settings key changed), so this
+      // lane is the ONLY render trigger for a key landing/clearing mid-session. Without it the
+      // current view stays stale until the next capture/reply — and if a render lands in between
+      // (e.g. the next draft's optimistic view), the row and the expanded block can be observed
+      // disagreeing about the key fact (VAL-CROSS-002 escalation, library/m6-row-model.md item 10).
+      logOrdering({ src: 'overlay.onKeyPresenceChanged', keyPresent: options.getKeyPresence() });
+      render();
+    },
     onDraftCaptured(event) {
+      // NO collapse here — collapse is OWNED by the immediate user-edit lane (collapsePanel, wired
+      // to watcher.onUserEdit in the content script), which fires at the keystroke. A capture is
+      // the ~debounced RESULT of an edit that already fired that lane; collapsing here would slam
+      // shut a block the user (re-)opened DURING the debounce window — after the edit, before the
+      // capture — and the reopened block would then never repaint (it is gone, while the row moves
+      // on to the verdict): the observed row/block divergence of the VAL-CROSS-002 escalation
+      // (library/m6-row-model.md item 10). While expanded, a landing capture simply repaints the
+      // block with the new draft's current view — row and block stay on ONE state.
       if (manualCapture) {
         // The user's own Analyze action: keep the block open and let the local half repaint.
         manualCapture = false;
-      } else {
-        // VAL-DRAFT-036: ANY other capture is a user edit, so the expanded block collapses back
-        // to the row BEFORE the new draft paints.
-        collapse();
       }
       const hash = draftIdentity(event.snapshot);
       if (reply !== null && reply.hash !== hash) reply = null;
@@ -981,6 +1004,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     onAnalysisDispatched(snapshot) {
       const hash = draftIdentity(snapshot);
       pending.set(hash, (pending.get(hash) ?? 0) + 1);
+      logOrdering({ src: 'overlay.dispatched', hash: hash.slice(0, 8) });
       render();
     },
     onAnalysisResult(result: DraftAnalysisResult, dispatched?: DraftSnapshot) {
@@ -1000,6 +1024,7 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
       const hash = result.meta.draftHash;
       settlePending(hash);
       transportFailures.delete(hash); // the draft's own success retires its failure
+      logOrdering({ src: 'overlay.result', hash: hash.slice(0, 8), jevStatus: result.meta.jevStatus });
       // Stale-response discard (VAL-DRAFT-011): only the newest draft's result may render.
       if (capture !== null && draftIdentity(capture) === hash) {
         reply = { hash, result };

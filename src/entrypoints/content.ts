@@ -1,6 +1,7 @@
 import { onSettingsBroadcast, sendMessage } from '@/core/message-protocol/client';
 import { createRevisionGate } from '@/core/message-protocol/broadcast';
 import { createSettingsSync } from '@/core/message-protocol/settings-sync';
+import { logOrdering } from '@/core/ordering-log';
 import { createLocalSettingsStore, DEFAULT_SETTINGS, type Settings } from '@/core/settings-store';
 import { E2E_SEED_APPLIED_MESSAGE_TYPE, E2E_SEED_MESSAGE_TYPE, isE2EBuild } from '@/core/test-hooks';
 import { stampMarkerRevision } from '@/dom/marker';
@@ -198,6 +199,7 @@ export default defineContentScript({
     const sync = createSettingsSync((settings, revision) => {
       const previous = current;
       current = settings;
+      logOrdering({ src: 'sync.apply', revision, enabled: settings.enabled, keyPresent });
       overlay.onSettings(settings, revision);
       // The marker mounts FIRST so the scanner's start-up diagnostics land on it.
       applyEnabled(settings.enabled, onMounted);
@@ -220,10 +222,31 @@ export default defineContentScript({
     });
 
     const store = createLocalSettingsStore();
-    onSettingsBroadcast((broadcast) => void sync.accept(broadcast));
+    onSettingsBroadcast((broadcast) => {
+      logOrdering({ src: 'broadcast.recv', revision: broadcast.revision, changedKeys: broadcast.changedKeys });
+      void sync.accept(broadcast);
+    });
     store.subscribe((change) => {
       // Key-presence facts ride the same storage events (presence only, gated on keyRevision).
-      if (keyGate.accept(change.keyRevision)) keyPresent = change.apiKeyPresent;
+      const keyAccepted = keyGate.accept(change.keyRevision);
+      logOrdering({
+        src: 'storage.event',
+        changedKeys: change.changedKeys,
+        revision: change.revision,
+        keyRevision: change.keyRevision,
+        apiKeyPresent: change.apiKeyPresent,
+        keyAccepted,
+      });
+      if (keyAccepted) {
+        keyPresent = change.apiKeyPresent;
+        // A key-only write changes no settings key (sync.accept ignores it), so WITHOUT this
+        // re-render the open tab learns a landed key only at its NEXT natural render — the
+        // expanded block can then sit on a stale no-key section while the row (rendered later,
+        // from a fresher capture) already shows the verdict. Render NOW so row and block move
+        // to the new key fact together (VAL-CROSS-002).
+        overlay.onKeyPresenceChanged();
+        badges.onSettingsChanged();
+      }
       void sync.accept(change);
     });
 
@@ -233,6 +256,7 @@ export default defineContentScript({
     void store.getSettings().then((settings) => {
       if (sync.hasAppliedAny()) return;
       current = settings;
+      logOrdering({ src: 'initial.settings', enabled: settings.enabled });
       overlay.onSettings(settings);
       applyEnabled(settings.enabled, onMounted);
       if (settings.enabled) {
@@ -245,6 +269,7 @@ export default defineContentScript({
     });    // Initial key-presence fact (presence only). The gate drops it when a storage event already
     // delivered a presence fact at this or a newer keyRevision.
     void store.getApiKeyWithRevision().then(({ apiKeyPresent, keyRevision }) => {
+      logOrdering({ src: 'initial.key', keyRevision, apiKeyPresent });
       if (keyGate.accept(keyRevision)) keyPresent = apiKeyPresent;
     });
   },

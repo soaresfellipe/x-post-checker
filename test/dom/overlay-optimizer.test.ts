@@ -135,6 +135,8 @@ async function startHarness(
     dispatchAnalysis: (dispatch) => overlay.onAnalysisDispatched(dispatch.snapshot),
   });
   watcher.onDraft((event) => overlay.onDraftCaptured(event));
+  // Production wiring (content.ts): the immediate user-edit lane owns collapse (VAL-DRAFT-036).
+  watcher.onUserEdit(() => overlay.collapsePanel());
   watcher.onComposerChange((event) => overlay.onComposerChange(event));
 
   overlay.onSettings(settings, 1);

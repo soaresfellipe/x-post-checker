@@ -146,6 +146,14 @@ export interface ScoreOverlay {
    * open tab without a reload.
    */
   onSettings(settings: Settings, revision?: number): void;
+  /**
+   * A key-presence fact changed in this tab (a key landed or was cleared mid-session). A key-only
+   * write carries no settings key, so the settings-sync funnel ignores it — without this lane the
+   * open tab would render the new key fact only at its NEXT natural render (the next capture or
+   * reply), leaving the current view (row AND expanded block) stale in the meantime
+   * (VAL-CROSS-002). Re-renders so row and block move to the new fact together.
+   */
+  onKeyPresenceChanged(): void;
   /** The watcher's debounced captures — the newest draft wins. */
   onDraftCaptured(event: DraftEvent): void;
   /** Composer attach/detach (SPA navigation): anchors, resets state, mounts/unmounts the host. */
