@@ -483,6 +483,66 @@ test.describe('score overlay states', () => {
     expect(calls.length).toBeGreaterThanOrEqual(3);
   });
 
+  test('a failed draft\'s Retry shows the pending state until the retry settles, on both failure paths (VAL-DRAFT-010, M6-SCRUTINY-003)', async ({ context }) => {
+    const drafts = {
+      result: 'Retry pending draft one: what small habit changed your mornings?',
+      transport: 'Retry pending draft two: why does the hook decide everything?',
+    };
+    // Draft one: the FIRST Jev call fails with an HTTP 500 (a Jev-result failure); its RETRY call
+    // is parked (held in flight) until the test releases it. Draft two: the first dispatch burns
+    // the Jev client's own 3 transport attempts (all aborted — network errors retry twice),
+    // surfacing the transport error; its RETRY call is parked too.
+    const counts = new Map<string, number>();
+    const { calls, parked } = await interceptJev(context, ({ state }) => {
+      const prefix = (Object.values(drafts) as string[]).find((d) => state.startsWith(d));
+      if (prefix === undefined) return { action: 'fulfill', body: jevResponse({ ordinal: 3 }) };
+      const n = (counts.get(prefix) ?? 0) + 1;
+      counts.set(prefix, n);
+      if (prefix === drafts.result) {
+        return n === 1
+          ? { action: 'status', status: 500, text: 'boom' }
+          : { action: 'park', body: jevResponse({ ordinal: 4 }) };
+      }
+      return n <= 3 ? { action: 'abort' } : { action: 'park', body: jevResponse({ ordinal: 3 }) };
+    });
+    await saveKeyViaOptions(context);
+    const page = await openFixture(context);
+    const errors = collectErrors(page);
+
+    // ---- leg 1: the Jev-result failure path ----
+    await typeDraft(page, drafts.result);
+    await expand(page);
+    await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'error', { timeout: 10_000 });
+    await page.getByTestId('overlay-retry').click();
+    // While the retried response is held: pending in row AND block, local score kept, no live Retry.
+    await expect(rowOf(page)).toHaveAttribute('data-jev-state', 'pending');
+    await expect(rowOf(page)).toHaveAttribute('data-headline-source', 'local');
+    await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'pending');
+    await expect(page.getByTestId('overlay-jev-notice')).toContainText('AI judgment on its way');
+    await expect(page.getByTestId('overlay-retry')).toHaveCount(0);
+    parked[0]!.release();
+    await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'verdict', { timeout: 10_000 });
+    await collapse(page);
+
+    // ---- leg 2: the transport-error path ----
+    await typeDraft(page, drafts.transport);
+    await expect.poll(
+      () => calls.filter((call) => call.state.startsWith(drafts.transport)).length,
+      { timeout: 10_000 },
+    ).toBe(3); // the first dispatch exhausts the client's own retry attempts
+    await expand(page);
+    await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'error', { timeout: 10_000 });
+    await page.getByTestId('overlay-retry').click();
+    await expect(rowOf(page)).toHaveAttribute('data-jev-state', 'pending');
+    await expect(rowOf(page)).toHaveAttribute('data-headline-source', 'local');
+    await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'pending');
+    await expect(page.getByTestId('overlay-jev-notice')).toContainText('AI judgment on its way');
+    await expect(page.getByTestId('overlay-retry')).toHaveCount(0);
+    parked[1]!.release();
+    await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'verdict', { timeout: 10_000 });
+    expect(errors).toEqual([]);
+  });
+
   test('stays local-only without implying AI ran when jevForDrafts is off (VAL-DRAFT-021)', async ({ context }) => {
     const { calls } = await interceptJev(context, () => ({ action: 'fulfill', body: jevResponse({ ordinal: 3 }) }));
     const options = await saveKeyViaOptions(context); // key PRESENT: the setting, not the key, gates
@@ -690,6 +750,46 @@ test.describe('overlay coexistence and lifecycle', () => {
         await expect(page.locator(OVERLAY_HOST)).toHaveCount(1);
       }
     }
+  });
+
+  test('a fallback-mounted row becomes the toolbar sibling when a toolbar appears (VAL-DRAFT-041, M6-SCRUTINY-002)', async ({ context }) => {
+    const { calls } = await interceptJev(context, () => ({ action: 'fulfill', body: jevResponse({ ordinal: 3 }) }));
+    await saveKeyViaOptions(context);
+    const page = await openFixture(context);
+    const errors = collectErrors(page);
+
+    // Remove the toolbar BEFORE typing: the draft must mount in the absolute fallback.
+    await page.evaluate(() => {
+      const toolBar = document.querySelector('[data-testid="toolBar"]');
+      (window as unknown as Record<string, unknown>)['__toolBarParent'] = toolBar!.parentElement;
+      toolBar!.remove();
+    });
+    await typeDraft(page, 'A draft long enough to mount its row without a toolbar present');
+    await expect(rowOf(page)).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(OVERLAY_HOST)).toHaveAttribute('data-placement', 'fallback');
+    await expect(page.locator(OVERLAY_HOST)).toHaveCount(1);
+
+    // React inserts a toolbar into the composer region WITHOUT touching the connected host:
+    // the SAME host must reconcile to the toolbar's immediate preceding sibling.
+    await page.evaluate(() => {
+      const toolBar = document.createElement('div');
+      toolBar.setAttribute('data-testid', 'toolBar');
+      ((window as unknown as Record<string, unknown>)['__toolBarParent'] as HTMLElement).append(toolBar);
+    });
+    await expect(page.locator(OVERLAY_HOST)).toHaveAttribute('data-placement', 'flow', { timeout: 10_000 });
+    const geometry = await page.evaluate(() => {
+      const host = document.querySelector('#amplifyx-overlay-host');
+      const toolBar = document.querySelector('[data-testid="toolBar"]');
+      return {
+        isPreviousSibling: toolBar!.previousElementSibling === host,
+        sharesParent: host!.parentElement === toolBar!.parentElement,
+        hosts: document.querySelectorAll('#amplifyx-overlay-host').length,
+        rowVisible: host!.shadowRoot!.querySelector('[data-testid="amplifyx-overlay-row"]') !== null,
+      };
+    });
+    expect(geometry).toEqual({ isPreviousSibling: true, sharesParent: true, hosts: 1, rowVisible: true });
+    expect(calls.length).toBe(1); // the reconciliation itself sends no Jev request
+    expect(errors).toEqual([]);
   });
 
   test('Escape collapses the expanded block and keeps the row (VAL-DRAFT-035)', async ({ context }) => {

@@ -42,6 +42,16 @@ export function failureReason(failure: JevAnalysisFailure): string {
   }
 }
 
+/** The Jev-half statuses that render as the terminal error state (VAL-DRAFT-018). */
+export function isFailureJevStatus(status: DraftAnalysis['meta']['jevStatus']): boolean {
+  return (
+    status === 'failed-network' ||
+    status === 'failed-http' ||
+    status === 'failed-malformed' ||
+    status === 'rate-limited'
+  );
+}
+
 /**
  * Derives the Jev-half section for the current draft. LIVE SETTINGS TAKE PRECEDENCE (VAL-DRAFT-021):
  * when `jevForDrafts` is off, the off state wins over anything a settled reply carried — a verdict
@@ -65,10 +75,20 @@ function deriveJevSection(
   pendingCount: number,
 ): JevSection {
   if (!settings.jevForDrafts) return { state: 'off' };
-  if (reply) {
-    const { jevStatus, jevFailure } = reply.meta;
-    if ((jevStatus === 'ok' || jevStatus === 'cached') && reply.jev) {
-      return { state: 'verdict', verdict: reply.jev };
+  // M6-SCRUTINY-003 (VAL-DRAFT-010): an in-flight attempt for THIS draft outranks that draft's
+  // settled terminal failure — while a retry is pending, the row and block show the pending
+  // state (never the old "AI unavailable" with a live Retry button), on BOTH failure paths
+  // (Jev-result failures ride in `reply`, transport failures in `transportFailures`). Draft
+  // identity and the stale-response guards are untouched: `pendingCount` is keyed by this
+  // draft's own hash. A settled VERDICT still wins over pending (a re-dispatch of an identical
+  // draft returns an identical result, so flipping back to a spinner would only be noise).
+  const inFlight = pendingCount > 0;
+  const settledReply =
+    reply !== null && inFlight && isFailureJevStatus(reply.meta.jevStatus) ? null : reply;
+  if (settledReply) {
+    const { jevStatus, jevFailure } = settledReply.meta;
+    if ((jevStatus === 'ok' || jevStatus === 'cached') && settledReply.jev) {
+      return { state: 'verdict', verdict: settledReply.jev };
     }
     switch (jevStatus) {
       case 'skipped-no-key':
@@ -87,9 +107,13 @@ function deriveJevSection(
         return { state: 'off' };
     }
   }
-  if (transportFailed) return { state: 'error', reason: OVERLAY_COPY.errorReasons.transport };
+  // A dispatch in flight takes precedence over the optimistic phase AND over the terminal
+  // transport failure a retry retires: the pending state shows from the dispatch tick until the
+  // response settles (VAL-DRAFT-010). LIVE KEY FACTS still outrank it (VAL-DRAFT-017): with no
+  // key configured the honest state is 'no-key' even while the refusal-making dispatch travels.
   if (!keyPresent) return { state: 'no-key' };
-  if (pendingCount > 0) return { state: 'pending' };
+  if (inFlight) return { state: 'pending' };
+  if (transportFailed) return { state: 'error', reason: OVERLAY_COPY.errorReasons.transport };
   if (!settings.autoAnalyze) return { state: 'ready' };
   return { state: 'pending' };
 }

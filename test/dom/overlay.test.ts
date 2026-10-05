@@ -822,6 +822,76 @@ describe('Jev failure degradation (VAL-DRAFT-018)', () => {
     expect(harness.row().dataset.jevState).toBe('error');
     expect(harness.row().dataset.headlineSource).toBe('local');
   });
+
+  it('a Jev-result failure retry shows the pending state in row and block until the retry settles (VAL-DRAFT-010, M6-SCRUTINY-003)', async () => {
+    const harness = await startHarness();
+    typeText(composer(), 'A draft whose first Jev analysis fails with a typed failure');
+    await settleCapture();
+    const first = harness.requests[0]!;
+    const expectedLocal = scoreDraft(first.snapshot);
+    harness.replyFor(first, {
+      jev: undefined,
+      jevStatus: 'failed-network',
+      jevFailure: { kind: 'network', reason: 'unreachable' },
+    });
+    expect(harness.row().dataset.jevState).toBe('error');
+    const block = harness.expand();
+    expect(find(block, OVERLAY_TESTIDS.jev)!.dataset.jevState).toBe('error');
+
+    // Retry: a SAME-draft dispatch leaves the tab (draft identity preserved).
+    clickInside(find(block, OVERLAY_TESTIDS.retry)!);
+    const retry = harness.requests[1]!;
+    expect(draftCacheKey(retry.snapshot)).toBe(draftCacheKey(first.snapshot));
+    // While that response is held: pending in row AND block, the local score kept, and no live
+    // Retry button from the retired failure.
+    const row = harness.row();
+    expect(row.dataset.jevState).toBe('pending');
+    expect(row.dataset.headlineSource).toBe('local');
+    expect(find(row, OVERLAY_TESTIDS.headline)!.textContent).toBe(String(expectedLocal.headline));
+    const jev = find(harness.expanded(), OVERLAY_TESTIDS.jev)!;
+    expect(jev.dataset.jevState).toBe('pending');
+    expect(find(jev, OVERLAY_TESTIDS.jevNotice)!.textContent).toBe(
+      'AI judgment on its way — the local score above already counts.',
+    );
+    expect(find(jev, OVERLAY_TESTIDS.retry)).toBeNull();
+
+    // The retried attempt settles to ITS OWN outcome (a fresh failure, not the stale one).
+    harness.replyFor(retry, {
+      jev: undefined,
+      jevStatus: 'failed-http',
+      jevFailure: { kind: 'http-error', status: 503 },
+    });
+    expect(harness.row().dataset.jevState).toBe('error');
+    expect(find(harness.expanded(), OVERLAY_TESTIDS.jev)!.dataset.jevState).toBe('error');
+  });
+
+  it('a transport-error retry shows the pending state in row and block until the retry settles (VAL-DRAFT-010, M6-SCRUTINY-003)', async () => {
+    const harness = await startHarness();
+    typeText(composer(), 'A draft whose transport fails and whose retry then succeeds');
+    await settleCapture();
+    harness.failTransport();
+    expect(harness.row().dataset.jevState).toBe('error');
+    const block = harness.expand();
+    expect(find(block, OVERLAY_TESTIDS.jev)!.dataset.jevState).toBe('error');
+
+    // Retry: the same draft dispatches again while its response is held.
+    clickInside(find(block, OVERLAY_TESTIDS.retry)!);
+    const retry = harness.requests[1]!;
+    const row = harness.row();
+    expect(row.dataset.jevState).toBe('pending');
+    expect(find(row, OVERLAY_TESTIDS.headline)!.textContent).toBe(
+      String(scoreDraft(retry.snapshot).headline),
+    );
+    const jev = find(harness.expanded(), OVERLAY_TESTIDS.jev)!;
+    expect(jev.dataset.jevState).toBe('pending');
+    expect(find(jev, OVERLAY_TESTIDS.jevNotice)!.textContent).toContain('AI judgment on its way');
+    expect(find(jev, OVERLAY_TESTIDS.retry)).toBeNull();
+
+    // The retried attempt settles with a verdict.
+    harness.replyFor(retry);
+    expect(harness.row().dataset.jevState).toBe('verdict');
+    expect(find(harness.expanded(), OVERLAY_TESTIDS.jev)!.dataset.jevState).toBe('verdict');
+  });
 });
 
 describe('in-flow host placement (VAL-DRAFT-041)', () => {
@@ -859,6 +929,79 @@ describe('in-flow host placement (VAL-DRAFT-041)', () => {
     // Expanding works identically.
     harness.expand();
     expect(find(harness.expanded(), OVERLAY_TESTIDS.signals)).not.toBeNull();
+  });
+
+  it('a fallback-mounted host becomes the toolBar sibling when a toolbar appears (M6-SCRUTINY-002)', async () => {
+    const harness = await startHarness({ html: REPLY_VIEW_HTML });
+    typeText(composer(), 'A qualifying draft mounted in the fallback before any toolbar exists');
+    await settleCapture();
+    const host = harness.host()!;
+    expect(host.dataset.placement).toBe('fallback');
+    // React inserts a toolbar into the composer region WITHOUT touching the (still connected)
+    // host: the reconciliation must move the host to the toolbar's immediate preceding sibling.
+    const container = document.querySelector('[data-testid="replyComposerContainer"]')!;
+    const toolBar = document.createElement('div');
+    toolBar.setAttribute('data-testid', 'toolBar');
+    container.append(toolBar);
+    await settleDom();
+    expect(host.dataset.placement).toBe('flow'); // reconciled in place — the SAME host node
+    expect(toolBar.previousElementSibling).toBe(host); // the toolbar's immediate preceding sibling
+    expect(host.parentElement).toBe(container);
+    expect(host.style.top).toBe(''); // the fallback's absolute-placement inline styles are retired
+    expect(document.querySelectorAll(HOST_SELECTOR).length).toBe(1); // exactly one host at all times
+    expect(harness.row()).not.toBeNull(); // the row kept rendering throughout
+  });
+
+  it('a surviving host re-inserts when the toolbar is replaced at a new position (M6-SCRUTINY-002)', async () => {
+    const harness = await startHarness();
+    typeText(composer(), 'A qualifying draft whose toolbar is replaced by a re-render');
+    await settleCapture();
+    const host = harness.host()!;
+    expect(host.dataset.placement).toBe('flow');
+    // A re-render swaps the toolbar node AND lands the replacement at a different position
+    // (before the host) — the surviving host must re-insert before the NEW toolbar.
+    const oldToolBar = document.querySelector('[data-testid="toolBar"]')!;
+    const parent = oldToolBar.parentElement!;
+    oldToolBar.remove();
+    const newToolBar = document.createElement('div');
+    newToolBar.setAttribute('data-testid', 'toolBar');
+    parent.prepend(newToolBar);
+    await settleDom();
+    expect(harness.row()).not.toBeNull(); // the surviving host still renders the row
+    expect(host.dataset.placement).toBe('flow');
+    expect(newToolBar.previousElementSibling).toBe(host); // re-inserted before the NEW toolbar
+    expect(document.querySelectorAll(HOST_SELECTOR).length).toBe(1);
+  });
+
+  it('a surviving host follows the toolbar when React reparents it (M6-SCRUTINY-002)', async () => {
+    const harness = await startHarness();
+    typeText(composer(), 'A qualifying draft whose toolbar is reparented by a re-render');
+    await settleCapture();
+    const host = harness.host()!;
+    const toolBar = document.querySelector('[data-testid="toolBar"]')!;
+    // What React does in a re-render: a new wrapper appears and the toolbar MOVES into it.
+    const newParent = document.createElement('div');
+    toolBar.parentElement!.insertBefore(newParent, toolBar);
+    newParent.append(toolBar);
+    await settleDom();
+    expect(host.dataset.placement).toBe('flow');
+    expect(host.parentElement).toBe(newParent);
+    expect(toolBar.previousElementSibling).toBe(host); // sibling geometry restored at the new home
+    expect(document.querySelectorAll(HOST_SELECTOR).length).toBe(1);
+  });
+
+  it('a host mounted in flow returns to the fallback when the toolbar disappears (M6-SCRUTINY-002)', async () => {
+    const harness = await startHarness();
+    typeText(composer(), 'A qualifying draft whose toolbar is removed by a re-render');
+    await settleCapture();
+    const host = harness.host()!;
+    expect(host.dataset.placement).toBe('flow');
+    document.querySelector('[data-testid="toolBar"]')!.remove();
+    await settleDom();
+    expect(host.dataset.placement).toBe('fallback');
+    expect(host.parentElement).toBe(document.body); // absolute placement again, same host
+    expect(harness.row()).not.toBeNull(); // the same row anatomy keeps rendering
+    expect(document.querySelectorAll(HOST_SELECTOR).length).toBe(1);
   });
 });
 

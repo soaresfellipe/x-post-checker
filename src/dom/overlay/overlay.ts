@@ -44,7 +44,7 @@ import {
   OVERLAY_TESTIDS,
 } from './config';
 import { computeAnchorPosition } from './position';
-import { deriveOverlayView, draftIdentity } from './view-model';
+import { deriveOverlayView, draftIdentity, isFailureJevStatus } from './view-model';
 import type { OptimizerSlot, OverlayView, ScoreOverlay, ScoreOverlayOptions } from './types';
 
 /** The `analyzed` view — every render surface exists only for a qualifying draft. */
@@ -327,14 +327,58 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     mutationObserver.observe(doc.body ?? doc, { childList: true, subtree: true });
   }
 
-  function onDocMutated(): void {
-    if (mounted && shouldMount() && hostElement() === null) {
-      // A React re-render detached the host: re-insert it as if freshly mounted (same anchor
-      // rules, same idempotency — X's own nodes are never touched). The fresh host starts empty;
-      // render() repaints the current view into it.
-      insertHost(createHostElement());
-      render();
+  /**
+   * M6-SCRUTINY-002 (VAL-DRAFT-041): reconciles a CONNECTED host against the CURRENT toolbar.
+   * Mounting only places a FRESH host; the toolbar can appear, be replaced or be reparented while
+   * the host survives — the placement must follow it in both directions: fallback → flow (a
+   * toolbar arrives; the host becomes its immediate preceding sibling), flow → flow (the toolbar
+   * is replaced/reparented; the host re-inserts before it), and flow → fallback (the toolbar
+   * disappears; back to absolute placement below the region). ONLY the extension-owned host is
+   * ever moved — never a native X node — and there is exactly one host at all times. Idempotent:
+   * an already-correct placement is a no-op, so observing our own reconciliation terminates.
+   */
+  function reconcileHost(): void {
+    const host = hostElement();
+    if (host === null || !shouldMount()) return;
+    const toolBar = anchorToolBar();
+    const parent = toolBar?.parentElement ?? null;
+    if (toolBar && parent) {
+      // The host sits as the toolbar's IMMEDIATE PRECEDING SIBLING: the toolbar's own
+      // previousElementSibling is the host (the reverse check would look on the wrong side).
+      const placed =
+        host.dataset.placement === 'flow' &&
+        host.parentElement === parent &&
+        toolBar.previousElementSibling === host;
+      if (!placed) {
+        const wasFallback = host.dataset.placement === 'fallback';
+        insertHost(host); // moves ONLY our host (insertBefore), never X's own nodes
+        if (wasFallback) {
+          // Leaving the fallback: the absolute-placement inline styles (and the expanded block's
+          // measured cap) are dead weight in flow.
+          host.style.removeProperty('top');
+          host.style.removeProperty('left');
+          expandedElement()?.style.removeProperty('max-height');
+        }
+      }
       return;
+    }
+    if (host.dataset.placement !== 'fallback') insertHost(host); // toolbar gone → fallback again
+  }
+
+  function onDocMutated(): void {
+    if (mounted && shouldMount()) {
+      if (hostElement() === null) {
+        // A React re-render detached the host: re-insert it as if freshly mounted (same anchor
+        // rules, same idempotency — X's own nodes are never touched). The fresh host starts empty;
+        // render() repaints the current view into it.
+        insertHost(createHostElement());
+        render();
+        return;
+      }
+      // The host survived but its anchor relationship may have changed (toolbar appeared,
+      // replaced, reparented or removed): reconcile placement against the current toolbar
+      // (M6-SCRUTINY-002) instead of only scheduling a fallback reposition.
+      reconcileHost();
     }
     scheduleReposition(); // fallback placement upkeep; a no-op in flow mode
   }
@@ -1003,6 +1047,15 @@ export function createScoreOverlay(options: ScoreOverlayOptions): ScoreOverlay {
     },
     onAnalysisDispatched(snapshot) {
       const hash = draftIdentity(snapshot);
+      // M6-SCRUTINY-003 (VAL-DRAFT-010): a NEW attempt for a draft retires that draft's terminal
+      // failure at dispatch time, so the pending indication leads the retried request on BOTH
+      // retry paths (a Jev-result failure rides in `reply`, a transport failure in
+      // `transportFailures`). Draft identity and the stale-response guards are untouched:
+      // everything stays keyed by the draft's own hash.
+      transportFailures.delete(hash);
+      if (reply !== null && reply.hash === hash && isFailureJevStatus(reply.result.meta.jevStatus)) {
+        reply = null;
+      }
       pending.set(hash, (pending.get(hash) ?? 0) + 1);
       logOrdering({ src: 'overlay.dispatched', hash: hash.slice(0, 8) });
       render();
