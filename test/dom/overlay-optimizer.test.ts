@@ -4,6 +4,7 @@ import { draftCacheKey } from '../../src/core/jev-client/hash';
 import { DEFAULT_SETTINGS, type Settings } from '../../src/core/settings-store';
 import type { HookVariant, Optimization, OptimizationResult } from '../../src/core/optimizer';
 import { OVERLAY_HOST_ID, OVERLAY_ROW_TESTID, OVERLAY_TESTID, createScoreOverlay, type ScoreOverlay } from '../../src/dom/overlay';
+import { OPTIMIZER_COPY_RESET_MS } from '../../src/dom/overlay/config';
 import { createComposerWatcher } from '../../src/dom/composer-watcher';
 
 /**
@@ -302,6 +303,27 @@ describe('Copy action (VAL-OPT-004, VAL-OPT-005)', () => {
     expect(harness.copied).toEqual([VARIANT_QUESTION]); // EXACT text, no labels or extra text
     expect(composer().textContent).toBe(DRAFT_TEXT); // composer untouched
     expect(copy.textContent).toBe('Copied');
+  });
+
+  it('reverts the Copied label to Copy exactly 1500ms later and re-enables the button (VAL-OPT-004)', async () => {
+    const harness = await analyzeHarness();
+    click(find(harness.expanded(), 'overlay-optimize')!);
+    harness.optimizeReply(optimized(harness.optimizeRequests[0]!));
+
+    const copy = find(harness.expanded(), 'overlay-optimizer-copy')! as HTMLButtonElement;
+    click(copy);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(copy.textContent).toBe('Copied');
+    expect(copy.disabled).toBe(true);
+
+    // One millisecond BEFORE the reset boundary: still the copied state.
+    await vi.advanceTimersByTimeAsync(OPTIMIZER_COPY_RESET_MS - 1);
+    expect(copy.textContent).toBe('Copied');
+
+    // AT the boundary (exactly 1500ms after the copy): label reverted, button usable again.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(copy.textContent).toBe('Copy');
+    expect(copy.disabled).toBe(false);
   });
 });
 

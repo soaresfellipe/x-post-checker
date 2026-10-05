@@ -276,6 +276,12 @@ test.describe('optimizer (m4-optimizer)', () => {
     const clipboard = await page.evaluate(() => navigator.clipboard.readText());
     expect(clipboard).toBe(expectedText);
 
+    // The copied state REVERTS to Copy (the DOM suite pins the exact 1500ms boundary with fake
+    // timers; here the real-clock revert is observed on the live page).
+    await page.waitForTimeout(1_600);
+    await expect(firstCopy).toHaveText('Copy');
+    await expect(firstCopy).toBeEnabled();
+
     // VAL-OPT-005: generating and copying never touch the composer text.
     const composerText = await page.locator(HOME_COMPOSER).innerText();
     expect(composerText).toContain(FIXED_DRAFT);
@@ -500,5 +506,50 @@ test.describe('optimizer (m4-optimizer)', () => {
     }
     const trackpadEnd = await panelMetrics();
     expect(trackpadEnd!.scrollTop + trackpadEnd!.clientHeight).toBeGreaterThanOrEqual(trackpadEnd!.scrollHeight - 1);
+
+    // HORIZONTAL carousel leg: 3 × 232px cards overflow the fixture's 600px composer, so the
+    // LAST card is reachable only by wheeling the CAROUSEL itself horizontally (the same
+    // wheel/trackpad pipeline). First the overflow and the spec-pinned 232px card width:
+    const carouselMetrics = async (): Promise<{ scrollLeft: number; clientWidth: number; scrollWidth: number } | null> =>
+      page.evaluate(() => {
+        const hooks = document
+          .querySelector('#amplifyx-overlay-host')
+          ?.shadowRoot?.querySelector('[data-testid="overlay-optimizer-variants"]');
+        if (!hooks) return null;
+        return { scrollLeft: hooks.scrollLeft, clientWidth: hooks.clientWidth, scrollWidth: hooks.scrollWidth };
+      });
+    await expect
+      .poll(async () => {
+        const m = await carouselMetrics();
+        return m !== null && m.scrollWidth > m.clientWidth;
+      })
+      .toBe(true);
+    const firstCardBox = await variants.first().boundingBox();
+    expect(Math.round(firstCardBox!.width)).toBe(232);
+
+    // Horizontal wheel notches over the carousel carry it to its very end.
+    const carouselBox = await page.getByTestId('overlay-optimizer-variants').boundingBox();
+    await page.mouse.move(carouselBox!.x + carouselBox!.width / 2, carouselBox!.y + carouselBox!.height / 2);
+    for (let hNotch = 0; hNotch < 25; hNotch += 1) {
+      await page.mouse.wheel(300, 0);
+      await page.waitForTimeout(60);
+      const m = await carouselMetrics();
+      if (m && m.scrollLeft + m.clientWidth >= m.scrollWidth - 1) break;
+    }
+    const hEnd = await carouselMetrics();
+    expect(hEnd!.scrollLeft + hEnd!.clientWidth).toBeGreaterThanOrEqual(hEnd!.scrollWidth - 1);
+
+    // Scrolled to the end WITHOUT Playwright's auto-scroll-into-view: the LAST card's Copy is
+    // fully inside the carousel's visible area, and it copies EXACTLY that card's text.
+    const lastCopy = variants.last().getByTestId('overlay-optimizer-copy');
+    const lastCopyBox = await lastCopy.boundingBox();
+    const carouselBoxAfter = await page.getByTestId('overlay-optimizer-variants').boundingBox();
+    expect(lastCopyBox!.x).toBeGreaterThanOrEqual(carouselBoxAfter!.x - 1);
+    expect(lastCopyBox!.x + lastCopyBox!.width).toBeLessThanOrEqual(
+      carouselBoxAfter!.x + carouselBoxAfter!.width + 1,
+    );
+    const lastTextHorizontal = await variants.last().getByTestId('overlay-optimizer-variant-text').innerText();
+    await lastCopy.click();
+    await expect(page.evaluate(() => navigator.clipboard.readText())).resolves.toBe(lastTextHorizontal);
   });
 });
