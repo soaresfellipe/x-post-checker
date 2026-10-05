@@ -624,6 +624,14 @@ test.describe('target badges (fixture E2E)', () => {
     // Viewport clamp: a narrow viewport pushes the popover's left edge to the 8px margin.
     await page.setViewportSize({ width: 360, height: 800 });
     await expect(popover).toBeVisible();
+    // The clamp repositions on the resize event via rAF, so poll for the settled box instead of
+    // sampling immediately (a loaded run can outrun the frame). Same contract, deterministic.
+    await expect
+      .poll(async () => {
+        const box = await popover.boundingBox();
+        return box ? box.x + box.width : Number.POSITIVE_INFINITY;
+      })
+      .toBeLessThanOrEqual(360 - 8);
     const clampedBox = await popover.boundingBox();
     expect(clampedBox!.width).toBe(300);
     expect(clampedBox!.x).toBeGreaterThanOrEqual(8);
