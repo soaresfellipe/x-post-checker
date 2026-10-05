@@ -35,6 +35,30 @@ you type it, and across your timeline. It works in Chrome and Firefox (both Mani
   `api.typesafe.ai` for the Jev requests. It reads no other sites and ships no analytics.
 - Clearing the key in the Options page deletes it from storage immediately.
 
+### Logging and log scrubbing
+
+The extension ships **no telemetry**; the only logging surface is the local browser console.
+Product code (`src/`) logs **only** through the redaction-first logger in `src/core/logging/`:
+
+- Every argument a log call receives passes through the scrubber (`redactValue`) before the sink
+  sees it. Secret-named fields (`apiKey`, `auth_token`, `ct0`, `cookie`, `password`, `secret`,
+  `authorization`, ...) collapse to `[REDACTED]`, and free-form strings are pattern-scrubbed for
+  Bearer tokens, session cookies, key-bearing query parameters, and credentialed URLs.
+- The default level is `warn`, so release builds log nothing in normal operation; debug noise is
+  opt-in per logger (`createLogger({ scope, level })`).
+- The scrubber is depth- and size-capped, so passing a large payload for context cannot produce
+  an unbounded log line, and it never mutates the value it scrubs.
+
+Rules for new code:
+
+- Never log (or pass to a logger) the Jev API key, X session cookies, or draft/post text.
+- New log call sites go through `createLogger({ scope })` from `@/core/logging` — never a bare
+  `console.*` call in `src/`.
+- Errors from `window`/network surfaces that reach the console are logged via `redactError`, so
+  an error quoting a URL or header cannot leak a credential.
+- Screenshots and network captures from live-site runs land in `test-results/` (gitignored) and
+  must stay redacted the same way: no cookies, keys, headers, or personal timeline content.
+
 ## Install (unpacked, from source)
 
 You need Node.js 22+ and pnpm 9. Then:

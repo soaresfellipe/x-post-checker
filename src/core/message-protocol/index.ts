@@ -9,6 +9,10 @@ import type { TargetAnalysisResult } from '@/core/target-analysis';
 import type { OptimizationResult } from '@/core/optimizer';
 import type { ConnectionTestResult } from '@/core/jev-client/connection-test';
 import type { ApiKeyWriteResult, Settings, SettingsWriteResult } from '@/core/settings-store/types';
+import { createLogger, redactError } from '@/core/logging';
+
+/** Redaction-first logger: handler failures are surfaced for debugging without leaking secrets. */
+const log = createLogger({ scope: 'message-protocol' });
 
 export const PROTOCOL_VERSION = 1;
 
@@ -170,7 +174,13 @@ export async function handleRequest<T extends MessageType>(
   try {
     const handler = handlers[request.type] as (payload: Request<T>['payload']) => Promise<MessageMap[T]['response']> | MessageMap[T]['response'];
     return { ok: true, data: await handler(request.payload) };
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  } catch (thrown) {
+    // Handler failures used to vanish (the envelope error is usually swallowed by the sender's
+    // .catch(() => undefined)); a redacted warn keeps local debugging possible without leaking
+    // secrets (an error quoting a key or a credentialed URL) into the console.
+    log.warn(`request ${request.type} failed`, redactError(thrown));
+    // The envelope message is unchanged: it goes to the extension's own trusted pages, not to a
+    // log, and its exact text is part of the protocol the UI surfaces.
+    return { ok: false, error: thrown instanceof Error ? thrown.message : String(thrown) };
   }
 }
