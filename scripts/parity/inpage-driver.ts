@@ -347,6 +347,66 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
         return { overlay: panelSummary(), epoch: epoch() };
       }
 
+      case 'neutral-rows-toggle': {
+        await typeDraft('tweetTextarea_0', TEXTS['neutral']!);
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'local analysis');
+        await expandPanel();
+        // The "N neutral ›" toggle is a LOCAL expansion: clicking it appends/removes the full
+        // rows list without re-rendering the rest of the block (design-1b §4.1). The flow
+        // records the whole hidden → shown → hidden cycle (VAL-DRAFT-025).
+        const toggle = (): HTMLElement | null =>
+          (overlayPanel()?.querySelector('[data-testid="overlay-neutral-toggle"]') as HTMLElement | null) ?? null;
+        await waitFor(() => (toggle() !== null ? true : null), 10_000, 'the "N neutral ›" toggle');
+        const rowsState = (): Record<string, unknown> => {
+          const rows = overlayPanel()?.querySelector('[data-testid="overlay-signal-rows"]') ?? null;
+          return {
+            toggleText: toggle()?.textContent ?? null,
+            ariaExpanded: toggle()?.getAttribute('aria-expanded') ?? null,
+            rowsPresent: rows !== null,
+            rowCount: rows?.querySelectorAll('li').length ?? 0,
+          };
+        };
+        const toggleHidden = rowsState(); // hidden: the rows list renders only after the toggle
+        toggle()!.click();
+        await waitFor(() => (rowsState()['rowsPresent'] === true ? true : null), 5_000, 'rows revealed by the toggle');
+        const toggleOpen = rowsState(); // shown
+        toggle()!.click();
+        await waitFor(() => (rowsState()['rowsPresent'] === false ? true : null), 5_000, 'rows hidden by the second toggle');
+        const toggleClosed = rowsState(); // hidden again
+        // Snapshot the expanded overlay BEFORE the popover leg: the badge click below is an
+        // outside click, which legitimately collapses the block (VAL-DRAFT-037) on its way in.
+        const overlay = panelSummary();
+        // The badge popover carries the SAME 1b chip model with its own toggle (its rows list
+        // starts hidden): exercise the same open/close cycle there.
+        const badges = await stableBadges();
+        if (badges.length === 0) throw new Error('no badges present for the popover toggle leg');
+        const firstBadgeHost = document.querySelector(`[${BADGE_HOST_ATTR}]`) as HTMLElement;
+        const badgeButton = firstBadgeHost.shadowRoot!.querySelector('[data-testid="amplifyx-target-badge"]') as HTMLElement;
+        badgeButton.click();
+        await waitFor(() => (popoverSummary().present ? true : null), 10_000, 'popover opened');
+        const popoverRows = (): HTMLElement | null =>
+          (document.getElementById(POPOVER_ID)?.shadowRoot?.querySelector('[data-testid="amplifyx-popover-signal-rows"]') as HTMLElement | null) ?? null;
+        const popoverToggleEl = (): HTMLElement | null =>
+          (document.getElementById(POPOVER_ID)?.shadowRoot?.querySelector('[data-testid="amplifyx-popover-neutral-toggle"]') as HTMLElement | null) ?? null;
+        await waitFor(() => (popoverToggleEl() !== null ? true : null), 10_000, 'popover neutral toggle');
+        const popoverPhase = (): string => (popoverRows()?.hasAttribute('hidden') ?? true ? 'hidden' : 'shown');
+        const popoverBefore = popoverPhase(); // hidden
+        popoverToggleEl()!.click();
+        await waitFor(() => (popoverPhase() === 'shown' ? true : null), 5_000, 'popover rows revealed');
+        const popoverOpen = popoverPhase(); // shown
+        popoverToggleEl()!.click();
+        await waitFor(() => (popoverPhase() === 'hidden' ? true : null), 5_000, 'popover rows hidden again');
+        const popoverClosed = popoverPhase(); // hidden again
+        return {
+          overlay,
+          toggleHidden,
+          toggleOpen,
+          toggleClosed,
+          popoverToggle: { before: popoverBefore, open: popoverOpen, closed: popoverClosed },
+          epoch: epoch(),
+        };
+      }
+
       case 'jev-pending-success': {
         await typeDraft('tweetTextarea_0', TEXTS['pending']!);
         await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'analyzed with pending AI');
@@ -373,6 +433,19 @@ export function fixtureDriverMain(flow: string, arg: DriverArg): Promise<FlowOut
         await expandPanel();
         await waitFor(() => (jevSection()?.getAttribute('data-jev-state') === 'error' ? true : null), 20_000, 'jev error state');
         return { overlay: panelSummary(), epoch: epoch() };
+      }
+
+      case 'draft-ai-off': {
+        // The mock's call log is cumulative for the whole leg (only this flow and stale-response
+        // count it) — reset it first so the count below is THIS flow's own.
+        await fetch('/__mock/jev/reset', { method: 'POST' });
+        await typeDraft('tweetTextarea_0', TEXTS['off']!);
+        await waitFor(() => (surfaceState() === 'analyzed' ? true : null), 15_000, 'local analysis with the AI lane off');
+        await expandPanel();
+        // The off state is FINAL for this draft: no pending, no verdict, and no Jev request may
+        // leave at all (the mock's call log must stay empty) — the local score in the row and
+        // the block's local chips are the whole surface (VAL-DRAFT-025 / VAL-DRAFT-021).
+        return { overlay: panelSummary(), mockCalls: await mockJevCalls(), epoch: epoch() };
       }
 
       case 'clearing': {

@@ -19,12 +19,17 @@ import type { DriverArg, FlowOutcome } from './inpage-driver';
  * single-writer store sanitizes and stamps them), the synthetic-or-empty key, and the Jev
  * endpoint override ('' = cleared, so the outage flows hit the REAL blocked endpoint).
  */
-function seedPayload(options: { key: string | null; endpointOverride: string | null; jevForTargets?: boolean }): Record<string, unknown> {
+function seedPayload(options: {
+  key: string | null;
+  endpointOverride: string | null;
+  jevForDrafts?: boolean;
+  jevForTargets?: boolean;
+}): Record<string, unknown> {
   return {
     settings: {
       enabled: true,
       autoAnalyze: true,
-      jevForDrafts: true,
+      jevForDrafts: options.jevForDrafts ?? true,
       jevForTargets: options.jevForTargets ?? false,
       minDraftLength: 10,
       targetThreshold: 70,
@@ -157,6 +162,43 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
     },
   },
   {
+    // VAL-DRAFT-025 (M6-SCRUTINY-009): the "N neutral ›" toggle is a required parity leg —
+    // the full rows list must open and close through the toggle in BOTH browsers, on the draft
+    // overlay AND on the badge popover (the same 1b chip model on both surfaces).
+    name: 'neutral-rows-toggle',
+    arg: {
+      seed: seedPayload({ key: null, endpointOverride: null }),
+      texts: { neutral: 'Neutral toggle draft: list the steady routines that quietly compound into a stronger week.' },
+    },
+    expect: (outcome): string | null => {
+      const overlay = overlayOf(outcome);
+      const collapsed = rowFirstViolation(overlay);
+      if (collapsed !== null) return collapsed;
+      if (overlay['neutralToggle'] !== true) return 'the "N neutral ›" toggle is missing from the expanded block';
+      // hidden → shown → hidden: the toggle's full open/close cycle, observed on the page.
+      const before = (outcome['toggleHidden'] as Record<string, unknown>) ?? {};
+      const open = (outcome['toggleOpen'] as Record<string, unknown>) ?? {};
+      const closed = (outcome['toggleClosed'] as Record<string, unknown>) ?? {};
+      if (before['ariaExpanded'] !== 'false' || before['rowsPresent'] !== false) {
+        return `rows before the toggle: ${JSON.stringify(before)}`;
+      }
+      if (open['ariaExpanded'] !== 'true' || open['rowsPresent'] !== true) {
+        return `rows after opening: ${JSON.stringify(open)}`;
+      }
+      if (Number(open['rowCount']) < 1) return `rows list empty when opened: ${JSON.stringify(open)}`;
+      if (!/^\d+ neutral ›$/.test(String(open['toggleText'] ?? ''))) return `toggle label: ${String(open['toggleText'])}`;
+      if (closed['ariaExpanded'] !== 'false' || closed['rowsPresent'] !== false) {
+        return `rows after closing: ${JSON.stringify(closed)}`;
+      }
+      // The badge popover's own toggle: its rows list starts hidden and opens/closes the same way.
+      const popover = (outcome['popoverToggle'] as Record<string, unknown>) ?? {};
+      if (popover['before'] !== 'hidden' || popover['open'] !== 'shown' || popover['closed'] !== 'hidden') {
+        return `popover rows toggle: ${JSON.stringify(popover)}`;
+      }
+      return null;
+    },
+  },
+  {
     name: 'both-surfaces',
     arg: { seed: seedPayload({ key: null, endpointOverride: null }), texts: { both: 'Both surfaces draft: the composer and the timeline badges coexist peacefully here.' } },
     expect: (outcome): string | null => {
@@ -220,6 +262,39 @@ export const PARITY_FLOWS: readonly ParityFlow[] = [
       if (!String(overlay['jevErrorReason'] ?? '').includes('HTTP 500')) return `error reason: ${String(overlay['jevErrorReason'])}`;
       if (overlay['headlineSource'] !== 'local') return `headline source after failure: ${String(overlay['headlineSource'])}`;
       if (Number(overlay['signals']) < 1) return 'local signals missing after failure';
+      return null;
+    },
+  },
+  {
+    // VAL-DRAFT-025 (M6-SCRUTINY-009): the draft's AI 'off' state is a required parity leg —
+    // seeded with jevForDrafts:false (key + endpoint still configured, so 'off' wins over key
+    // presence) and asserting the 1b off copy plus the pure local score in row and block.
+    name: 'draft-ai-off',
+    arg: {
+      seed: seedPayload({ key: SYNTHETIC_KEY, endpointOverride: mockEndpoint('draft-ai-off', 'ok'), jevForDrafts: false }),
+      texts: { off: 'Off draft: the local score carries this panel while the AI lane sits out.' },
+    },
+    expect: (outcome): string | null => {
+      const overlay = overlayOf(outcome);
+      const collapsed = rowFirstViolation(overlay);
+      if (collapsed !== null) return collapsed;
+      // The 1b off copy, verbatim: short label on the row, long notice in the block (config.ts).
+      if (overlay['jevState'] !== 'off') return `jev state: ${String(overlay['jevState'])}`;
+      if (overlay['aiShort'] !== 'Local only') return `row AI label: ${String(overlay['aiShort'])}`;
+      if (overlay['headlineSource'] !== 'local') return `headline source: ${String(overlay['headlineSource'])}`;
+      if (String(overlay['jevNotice'] ?? '') !== 'Local signals only. AI analysis is off in Settings.') {
+        return `off copy: ${String(overlay['jevNotice'])}`;
+      }
+      // The pure LOCAL score in row and block: the row headline is the same number the collapsed
+      // row showed, and the expanded block still renders the local signal chips.
+      const collapsedText = String((overlay['collapsed'] as Record<string, unknown> | null)?.['text'] ?? '');
+      if (collapsedText !== String(overlay['headline'])) {
+        return `row headline: "${collapsedText}" != "${String(overlay['headline'])}"`;
+      }
+      if (Number(overlay['signals']) < 1) return 'local signal chips missing while off';
+      if (overlay['connectJev'] !== false) return 'unexpected Connect Jev link in the off state';
+      // No AI request may leave while jevForDrafts is off — even with a key and endpoint set.
+      if (outcome['mockCalls'] !== 0) return `Jev calls with the AI lane off: ${String(outcome['mockCalls'])}`;
       return null;
     },
   },
