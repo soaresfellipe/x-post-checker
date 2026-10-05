@@ -7,10 +7,14 @@ import { FIXTURE_PORT } from '../../scripts/build-variants';
 export const TEST_EXTENSION_DIR = path.resolve('.output/chrome-mv3-e2e');
 export const FIXTURE_URL = `http://localhost:${FIXTURE_PORT}/`;
 
-export async function launchExtensionContext(profileDir: string): Promise<BrowserContext> {
+export async function launchExtensionContext(
+  profileDir: string,
+  options: { reducedMotion?: 'reduce' | 'no-preference' } = {},
+): Promise<BrowserContext> {
   return chromium.launchPersistentContext(profileDir, {
     channel: 'chromium',
     headless: true,
+    reducedMotion: options.reducedMotion,
     args: [`--disable-extensions-except=${TEST_EXTENSION_DIR}`, `--load-extension=${TEST_EXTENSION_DIR}`],
     timeout: 45_000,
   });

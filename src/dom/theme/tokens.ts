@@ -25,6 +25,18 @@ export interface ThemeTokens {
   weak: string;
   weakBg: string;
   shadow: string;
+  /**
+   * A11y text variants (VAL-THEME-003, m6-theme-a11y-sweep). The spec's --good/--weak FAIL
+   * 4.5:1 as TEXT in some themes (#00ba7c on the 14% green tint over white is ~2.2:1), so every
+   * textual use of the tier colors renders --good-text/--weak-text instead — same hue family,
+   * computed accessible per theme (pinned by test/unit/theme-contrast.test.ts). --good/--weak
+   * remain for NON-text uses only: dots and the solid hover inversions (white text on them).
+   */
+  goodText: string;
+  weakText: string;
+  /** `--fg2`-toned text sitting on the `--hover` surface (neutral toggles, ok chips): in
+   * lights-out #71767b on #16181c is ~3.9:1, so that theme lifts the text a step. */
+  fg2Hover: string;
 }
 
 export const THEME_TOKENS: Record<XTheme, ThemeTokens> = Object.freeze({
@@ -43,6 +55,9 @@ export const THEME_TOKENS: Record<XTheme, ThemeTokens> = Object.freeze({
     weak: '#f4212e',
     weakBg: 'rgba(244,33,46,.12)',
     shadow: '0 0 15px rgba(101,119,134,.2), 0 0 3px 1px rgba(101,119,134,.15)',
+    goodText: '#007a4d',
+    weakText: '#cc1122',
+    fg2Hover: '#536471',
   }),
   dim: Object.freeze({
     bg: '#15202b',
@@ -59,6 +74,9 @@ export const THEME_TOKENS: Record<XTheme, ThemeTokens> = Object.freeze({
     weak: '#f4212e',
     weakBg: 'rgba(244,33,46,.12)',
     shadow: '0 0 15px rgba(255,255,255,.2), 0 0 3px 1px rgba(255,255,255,.15)',
+    goodText: '#00ba7c',
+    weakText: '#ff5a5f',
+    fg2Hover: '#8b98a5',
   }),
   'lights-out': Object.freeze({
     bg: '#000000',
@@ -75,6 +93,9 @@ export const THEME_TOKENS: Record<XTheme, ThemeTokens> = Object.freeze({
     weak: '#f4212e',
     weakBg: 'rgba(244,33,46,.12)',
     shadow: '0 0 15px rgba(255,255,255,.2), 0 0 3px 1px rgba(255,255,255,.15)',
+    goodText: '#00ba7c',
+    weakText: '#f4212e',
+    fg2Hover: '#80858a',
   }),
 });
 
@@ -94,6 +115,9 @@ const TOKEN_VAR: Record<keyof ThemeTokens, string> = {
   weak: '--weak',
   weakBg: '--weak-bg',
   shadow: '--shadow',
+  goodText: '--good-text',
+  weakText: '--weak-text',
+  fg2Hover: '--fg2-hover',
 };
 
 function declarations(theme: ThemeTokens): string {
