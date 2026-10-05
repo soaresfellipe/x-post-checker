@@ -164,7 +164,7 @@ describe('badge eligibility and content (VAL-TARGET-005/006, DOM tier)', () => {
     expect(isBadgeEligible({ ...score, eligible: false, headline: 0 }, 0)).toBe(false);
   });
 
-  it('renders badges only for posts at or above the threshold, each with score + English reason', async () => {
+  it('renders badges only for posts at or above the threshold: score-only chip, reason via tooltip + aria-label', async () => {
     const harness = startHarness();
     await waitThrottle();
 
@@ -174,9 +174,13 @@ describe('badge eligibility and content (VAL-TARGET-005/006, DOM tier)', () => {
     const scoreText = badge!.querySelector(`[data-testid="${BADGE_TESTIDS.score}"]`)!.textContent ?? '';
     const score = Number(scoreText);
     expect(score).toBeGreaterThanOrEqual(70);
-    const reason = badge!.querySelector(`[data-testid="${BADGE_TESTIDS.reason}"]`)!.textContent ?? '';
-    expect(reason.trim()).not.toBe('');
-    expect(reason).toMatch(/^[A-Za-z]/); // English
+    // Score-only chip (design-1b §7): the chip carries no reason text.
+    expect(badge!.textContent).toBe(scoreText);
+    const reason = badge!.getAttribute('aria-label') ?? '';
+    expect(reason).toBe(`Reply target score ${score}: High engagement velocity`);
+    const shadow = badge!.getRootNode() as ShadowRoot;
+    const tooltip = shadow.querySelector(`[data-testid="${BADGE_TESTIDS.tooltip}"]`)!.textContent ?? '';
+    expect(tooltip).toBe('High engagement velocity · reply target');
 
     // Stale (48h+), out-of-network reply, no-engagement, and bait posts stay badgeless.
     for (const index of [3, 4, 6, 8]) {
@@ -221,10 +225,71 @@ describe('badge eligibility and content (VAL-TARGET-005/006, DOM tier)', () => {
       document.body.append(document.createElement('div'));
     }
   });
+
+  it('renders the green tone at headline >= 70 and the neutral tone above threshold but below 70 (VAL-TARGET-005)', async () => {
+    const harness = startHarness();
+    await waitThrottle();
+    // Post 1 is well above 70: the green (tier-tinted) treatment.
+    expect(harness.badgeOf(POST_ID(0))!.dataset.tone).toBe('good');
+    harness.teardown();
+
+    // Lower the threshold to 50: post 7 (~52) is now above threshold but still below 70 —
+    // the NEUTRAL style, never green.
+    const neutralHarness = startHarness({ settings: { targetThreshold: 50 } });
+    await waitThrottle();
+    const badge = neutralHarness.badgeOf(POST_ID(6));
+    expect(badge).not.toBeNull();
+    expect(badge!.dataset.tone).toBe('neutral');
+    expect(Number(badge!.querySelector(`[data-testid="${BADGE_TESTIDS.score}"]`)!.textContent)).toBeLessThan(70);
+    neutralHarness.teardown();
+  });
+
+  it('places the chip inside User-Name as its last child (after the time link) preceded by the separator (VAL-TARGET-026)', async () => {
+    const harness = startHarness();
+    await waitThrottle();
+    const badge = harness.badgeOf(POST_ID(0))!;
+    expect(badge).not.toBeNull();
+    const host = badge.getRootNode() as ShadowRoot;
+    const hostElement = host.host as HTMLElement;
+    expect(hostElement.dataset.placement).toBe('user-name');
+    const userName = hostElement.parentElement!;
+    expect(userName.getAttribute('data-testid')).toBe('User-Name');
+    // Last child of User-Name, AFTER the time link; the "·" separator precedes the chip.
+    expect(hostElement).toBe(userName.lastElementChild);
+    expect(userName.querySelector('time')).not.toBeNull();
+    const separator = host.querySelector(`[data-testid="${BADGE_TESTIDS.separator}"]`)!.textContent;
+    expect(separator).toBe('·');
+    harness.teardown();
+  });
+
+  it('falls back to the end of the article with the SAME chip anatomy when User-Name is absent (VAL-TARGET-026)', async () => {
+    // A structurally valid post (status link + time) with NO User-Name wrapper.
+    const post = FIXTURE_POSTS[0]!;
+    const fallbackHtml = `<div data-testid="cellInnerDiv"><article data-testid="tweet" role="article" tabindex="0">
+      <a href="/${post.handle}/status/${post.id}" role="link"><time datetime="2026-10-03T11:00:00Z">${post.timeLabel}</time></a>
+      <div data-testid="tweetText" lang="en" dir="auto"><span>${post.text}</span></div>
+      <button data-testid="like" type="button" aria-label="10 Likes. Like"><span data-testid="app-text-transition-container"><span>10</span></span></button>
+      <button data-testid="reply" type="button" aria-label="5 Replies. Reply"><span data-testid="app-text-transition-container"><span>5</span></span></button>
+      <button data-testid="retweet" type="button" aria-label="3 Reposts. Repost"><span data-testid="app-text-transition-container"><span>3</span></span></button>
+    </article></div>`;
+    const harness = startHarness({ fixtureHtml: fallbackHtml, settings: { targetThreshold: 0 } });
+    await waitThrottle();
+    const badge = harness.badgeOf(post.id);
+    expect(badge).not.toBeNull();
+    const host = badge!.getRootNode() as ShadowRoot;
+    const hostElement = host.host as HTMLElement;
+    expect(hostElement.dataset.placement).toBe('article');
+    expect(hostElement.parentElement!.tagName).toBe('ARTICLE');
+    // SAME anatomy: separator + score-only chip + tooltip.
+    expect(host.querySelector(`[data-testid="${BADGE_TESTIDS.separator}"]`)!.textContent).toBe('·');
+    expect(host.querySelector(`[data-testid="${BADGE_TESTID}"]`)!.textContent).toMatch(/^\d+$/);
+    expect(host.querySelector(`[data-testid="${BADGE_TESTIDS.tooltip}"]`)).not.toBeNull();
+    harness.teardown();
+  });
 });
 
 describe('popover interactions (VAL-TARGET-014/015/016, DOM tier)', () => {
-  it('opens with the matching post id, score and breakdown; badge click does not bubble to the article', async () => {
+  it('opens with the matching post id, score and signal chips; badge click does not bubble to the article', async () => {
     const harness = startHarness();
     await waitThrottle();
 
@@ -242,7 +307,74 @@ describe('popover interactions (VAL-TARGET-014/015/016, DOM tier)', () => {
     const scoreInPopover = Number(panel!.querySelector(`[data-testid="${POPOVER_TESTIDS.localScore}"]`)!.textContent);
     const scoreOnBadge = Number(harness.badgeOf(POST_ID(0))!.querySelector(`[data-testid="${BADGE_TESTIDS.score}"]`)!.textContent);
     expect(scoreInPopover).toBe(scoreOnBadge);
-    expect(panel!.querySelectorAll(`[data-testid="${POPOVER_TESTIDS.signals}"] li`).length).toBeGreaterThan(3);
+    // Target-signal chips (short phrases, points) + the "N neutral ›" rows toggle.
+    const chips = [...panel!.querySelectorAll(`[data-testid="${POPOVER_TESTIDS.chip}"]`)];
+    expect(chips.length).toBeGreaterThanOrEqual(3);
+    for (const chip of chips) expect((chip.querySelector('.phrase')!.textContent ?? '').length).toBeGreaterThan(0);
+    expect(panel!.querySelector(`[data-testid="${POPOVER_TESTIDS.neutralToggle}"]`)!.textContent).toMatch(/^\d+ neutral ›$/);
+    harness.teardown();
+  });
+
+  it('the "N neutral ›" toggle reveals the full rows list locally (label / value / points)', async () => {
+    const harness = startHarness();
+    await waitThrottle();
+    harness.clickBadge(POST_ID(0));
+    const panel = harness.popover()!;
+    const rows = panel.querySelector(`[data-testid="${POPOVER_TESTIDS.signalRows}"]`)!;
+    expect(rows.getAttribute('hidden')).not.toBeNull(); // hidden until the toggle
+    panel.querySelector(`[data-testid="${POPOVER_TESTIDS.neutralToggle}"]`)!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect(rows.hasAttribute('hidden')).toBe(false);
+    expect(rows.querySelectorAll('li').length).toBeGreaterThanOrEqual(6);
+    expect(rows.querySelector('li .points')).not.toBeNull();
+    harness.teardown();
+  });
+
+  it('carries the 1b header anatomy: 22px headline, "Reply target", caption, 28px round close', async () => {
+    const harness = startHarness({ settings: { jevForTargets: true }, keyPresent: true });
+    await waitThrottle();
+    harness.clickBadge(POST_ID(0));
+    const panel = harness.popover()!;
+    expect(panel.querySelector(`[data-testid="${POPOVER_TESTIDS.title}"]`)!.textContent).toBe('Reply target');
+    expect(panel.querySelector(`[data-testid="${POPOVER_TESTIDS.caption}"]`)!.textContent).toBe(`local signals · @${FIXTURE_POSTS[0]!.handle}`);
+    const close = panel.querySelector(`[data-testid="${POPOVER_TESTIDS.close}"]`)!;
+    expect(close.className).toContain('close'); // round 28px via the stylesheet
+    harness.teardown();
+  });
+
+  it('footer per state: idle copy + Deep analysis, off copy, and the verdict footer (band chip + angle + disclaimer)', async () => {
+    const harness = startHarness({ settings: { jevForTargets: true }, keyPresent: true });
+    await waitThrottle();
+    harness.clickBadge(POST_ID(0));
+    let panel = harness.popover()!;
+    let footer = panel.querySelector(`[data-testid="${POPOVER_TESTIDS.aiSection}"]`)!;
+    expect(footer.getAttribute('data-ai-state')).toBe('idle');
+    expect(footer.querySelector(`[data-testid="${POPOVER_TESTIDS.aiNotice}"]`)!.textContent).toBe('AI judgment, once, cached');
+    expect(footer.querySelector(`[data-testid="${POPOVER_TESTIDS.deepAnalysis}"]`)!.textContent).toBe('Deep analysis');
+
+    footer.querySelector(`[data-testid="${POPOVER_TESTIDS.deepAnalysis}"]`)!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await Promise.resolve();
+    panel = harness.popover()!;
+    footer = panel.querySelector(`[data-testid="${POPOVER_TESTIDS.aiSection}"]`)!;
+    expect(footer.getAttribute('data-ai-state')).toBe('pending');
+    expect(footer.querySelector(`[data-testid="${POPOVER_TESTIDS.aiNotice}"]`)!.textContent).toBe('Analyzing with AI…');
+    expect(footer.querySelector('.dot')).not.toBeNull(); // pulsing pending dot
+
+    harness.resolveDeepAnalysis.shift()!({
+      kind: 'analyzed',
+      verdict: { ordinal: 4.2, confidence: 0.7, band: 'strong', strengths: [], weaknesses: [], suggestions: [] },
+      angle: { choice: 'share_experience', label: 'Share a short first-hand experience.', confidence: 0.8 },
+      source: 'fresh',
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    panel = harness.popover()!;
+    footer = panel.querySelector(`[data-testid="${POPOVER_TESTIDS.aiSection}"]`)!;
+    expect(footer.getAttribute('data-ai-state')).toBe('verdict');
+    expect(footer.querySelector(`[data-testid="${POPOVER_TESTIDS.verdictBand}"]`)!.textContent).toBe('AI · Strong');
+    expect(footer.querySelector(`[data-testid="${POPOVER_TESTIDS.verdictAngle}"]`)!.textContent).toBe('Suggested angle: Share a short first-hand experience.');
+    expect(footer.querySelector(`[data-testid="${POPOVER_TESTIDS.verdictConfidence}"]`)!.textContent).toBe('70% confidence · a heuristic, not a prediction');
+    // The verdict also flips the header caption to "local signals + AI".
+    expect(panel.querySelector(`[data-testid="${POPOVER_TESTIDS.caption}"]`)!.textContent).toBe(`local signals + AI · @${FIXTURE_POSTS[0]!.handle}`);
     harness.teardown();
   });
 
@@ -288,6 +420,22 @@ describe('popover interactions (VAL-TARGET-014/015/016, DOM tier)', () => {
     expect(styleText).toContain('pointer-events: auto');
     harness.teardown();
   });
+
+  it('re-stamps the OPEN popover host on a live theme switch, without a remount (VAL-THEME-002)', async () => {
+    const harness = startHarness();
+    await waitThrottle();
+    harness.clickBadge(POST_ID(0));
+    const host = document.getElementById(POPOVER_HOST_ID)!;
+    expect(host.getAttribute('data-theme')).toBe('light');
+
+    // The fixture's theme lever: the body background (ThemeDetector's MutationObserver watches it).
+    document.body.style.backgroundColor = 'rgb(0, 0, 0)';
+    await new Promise((resolve) => setTimeout(resolve, 0)); // happy-dom flushes mutations async
+    expect(host.getAttribute('data-theme')).toBe('lights-out');
+    expect(host.isConnected).toBe(true); // same host, no detach/remount
+    expect(harness.popover()).not.toBeNull(); // popover state retained
+    harness.teardown();
+  });
 });
 
 describe('Deep analysis states (VAL-TARGET-017/018/020, VAL-SETUP-012, DOM tier)', () => {
@@ -325,7 +473,7 @@ describe('Deep analysis states (VAL-TARGET-017/018/020, VAL-SETUP-012, DOM tier)
     panel = harness.popover()!;
     const ai = panel.querySelector(`[data-testid="${POPOVER_TESTIDS.aiSection}"]`)!;
     expect(ai.getAttribute('data-ai-state')).toBe('verdict');
-    expect(panel.querySelector(`[data-testid="${POPOVER_TESTIDS.verdictBand}"]`)!.textContent).toBe('Strong');
+    expect(panel.querySelector(`[data-testid="${POPOVER_TESTIDS.verdictBand}"]`)!.textContent).toBe('AI · Strong');
     expect(panel.querySelector(`[data-testid="${POPOVER_TESTIDS.verdictConfidence}"]`)!.textContent).toContain('70%');
     expect(panel.querySelector(`[data-testid="${POPOVER_TESTIDS.verdictAngle}"]`)!.textContent).toContain('first-hand');
     expect(harness.deepAnalysisCalls).toEqual([{ id: POST_ID(0) }]);
@@ -389,8 +537,12 @@ describe('Deep analysis states (VAL-TARGET-017/018/020, VAL-SETUP-012, DOM tier)
     const panel = harness.popover()!;
     const ai = panel.querySelector(`[data-testid="${POPOVER_TESTIDS.aiSection}"]`)!;
     expect(ai.getAttribute('data-ai-state')).toBe('error');
-    expect(panel.querySelector(`[data-testid="${POPOVER_TESTIDS.aiNotice}"]`)!.textContent).toContain('Deep analysis failed.');
-    expect(panel.querySelector(`[data-testid="${POPOVER_TESTIDS.aiErrorReason}"]`)!.textContent).toMatch(/HTTP 500/);
+    // The §6 error line embeds the reason verbatim: "AI unavailable — the {n} above still
+    // applies. {errorReason}" with an inline "Retry" link.
+    const headline = Number(harness.badgeOf(POST_ID(0))!.querySelector(`[data-testid="${BADGE_TESTIDS.score}"]`)!.textContent);
+    expect(panel.querySelector(`[data-testid="${POPOVER_TESTIDS.aiNotice}"]`)!.textContent).toBe(
+      `AI unavailable — the ${headline} above still applies. The AI service returned an error (HTTP 500).`,
+    );
     const retry = panel.querySelector(`[data-testid="${POPOVER_TESTIDS.retry}"]`)!;
     retry.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await Promise.resolve();

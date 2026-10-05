@@ -1,15 +1,19 @@
 /**
- * The target popover: ONE Shadow-DOM host on document.body showing a post's local target score,
- * its signal breakdown, and the on-demand "Deep analysis" AI judgment. Like the score overlay it
- * captures no pointer input — the host and panel are pointer-events: none, and only the panel's
- * own buttons (close, Deep analysis, Try again, Connect Jev) re-enable hits — and it never mounts
- * inside the React-managed x.com tree.
+ * The target popover (Design 1b §8): ONE Shadow-DOM host on document.body — a 300px, radius-16,
+ * borderless card on the shared --shadow, anchored 6px below its badge CHIP and left-aligned to
+ * it (viewport-clamped) — showing the post's 22px headline score, its target-signal chips (with
+ * the "N neutral ›" rows toggle), and the per-state footer with the on-demand "Deep analysis" AI
+ * judgment. Like the score overlay it captures no pointer input — the host and panel are
+ * pointer-events: none, and only the panel's own buttons (close, Deep analysis, Retry, Connect
+ * Jev) re-enable hits — and it never mounts inside the React-managed x.com tree.
  *
  * Click isolation (VAL-TARGET-016) is the badge button's job (stopPropagation + preventDefault);
  * this module additionally closes on its own close control and on Escape (VAL-TARGET-015).
  */
 import type { PostSnapshot } from '@/core/post-snapshot';
 import type { SignalEntry } from '@/core/heuristic-engine';
+import { JEVD_BAND_TREATMENT } from '@/dom/overlay/config';
+import { neutralCount, signalChips } from '@/dom/overlay/chips';
 import { ThemeDetector, applyThemeTokens, setHostTheme } from '@/dom/theme';
 import {
   BADGE_COPY,
@@ -46,11 +50,16 @@ export interface TargetPopover {
 export function createTargetPopover(callbacks: TargetPopoverCallbacks, doc: Document = document): TargetPopover {
   const win = doc.defaultView ?? window;
   // M6 theme foundation: the popover's host carries the shared token block + the live data-theme.
+  // A live theme switch while the popover is OPEN re-stamps the host in place (no remount, no
+  // state loss — VAL-THEME-002's "all extension surfaces" clause).
   const themeDetector = new ThemeDetector({ doc });
   let host: HTMLElement | null = null;
   let view: TargetPopoverView | null = null;
   let anchor: Element | null = null;
   let repositionScheduled = false;
+  themeDetector.subscribe((theme) => {
+    if (host !== null) setHostTheme(host, theme);
+  });
 
   function ensureHost(): HTMLElement {
     if (host?.shadowRoot) return host;
@@ -72,9 +81,11 @@ export function createTargetPopover(callbacks: TargetPopoverCallbacks, doc: Docu
     return element;
   }
 
+  /** Design-1b §4.1: explicit sign, U+2212 minus for negatives (never a bare hyphen). */
   function formatPoints(points: number): string {
     if (points > 0) return `+${points}`;
-    return String(points);
+    if (points < 0) return `\u2212${Math.abs(points)}`;
+    return '0';
   }
 
   function signalRow(signal: SignalEntry): HTMLElement {
@@ -89,66 +100,6 @@ export function createTargetPopover(callbacks: TargetPopoverCallbacks, doc: Docu
     return row;
   }
 
-  function aiSectionContent(section: TargetAiSection, root: HTMLElement): void {
-    const state = section.state;
-    root.dataset.aiState = state;
-    root.append(el('h3', { text: BADGE_COPY.aiHeading }));
-
-    if (state === 'off') {
-      root.append(el('p', { className: 'notice', testid: POPOVER_TESTIDS.aiNotice, text: BADGE_COPY.off }));
-      return;
-    }
-    if (state === 'no-key') {
-      root.append(el('p', { className: 'notice', testid: POPOVER_TESTIDS.aiNotice, text: BADGE_COPY.noKey }));
-      const connect = el('button', { className: 'action', testid: POPOVER_TESTIDS.connectJev, text: BADGE_COPY.connectJev });
-      connect.addEventListener('click', () => callbacks.onConnectOptions());
-      root.append(connect);
-      return;
-    }
-    if (state === 'idle') {
-      root.append(el('p', { className: 'notice', testid: POPOVER_TESTIDS.aiNotice, text: BADGE_COPY.aiIdle }));
-      const deep = el('button', { className: 'action', testid: POPOVER_TESTIDS.deepAnalysis, text: BADGE_COPY.deepAnalysis });
-      deep.addEventListener('click', () => view && callbacks.onDeepAnalysis(view.post));
-      root.append(deep);
-      return;
-    }
-    if (state === 'pending') {
-      root.append(el('p', { className: 'pending', testid: POPOVER_TESTIDS.aiNotice, text: BADGE_COPY.pending }));
-      return;
-    }
-    if (state === 'error') {
-      root.append(el('p', { className: 'notice', testid: POPOVER_TESTIDS.aiNotice, text: BADGE_COPY.error }));
-      root.append(el('p', { className: 'error-reason', testid: POPOVER_TESTIDS.aiErrorReason, text: section.reason ?? BADGE_COPY.errorReasons.network }));
-      const retry = el('button', { className: 'action', testid: POPOVER_TESTIDS.retry, text: BADGE_COPY.retry });
-      retry.addEventListener('click', () => view && callbacks.onDeepAnalysis(view.post));
-      root.append(retry);
-      return;
-    }
-    // verdict
-    const verdict = section.verdict!;
-    const band = el('p');
-    band.append(el('span', { className: 'band', testid: POPOVER_TESTIDS.verdictBand, text: verdictBandLabel(verdict) }));
-    root.append(band);
-    root.append(
-      el('p', {
-        className: 'notice',
-        testid: POPOVER_TESTIDS.verdictConfidence,
-        // The ordinal is NEVER shown as a probability/percentage — only the band + confidence are.
-        text: `${BADGE_COPY.confidenceLabel}: ${Math.round(verdict.confidence * 100)}%`,
-      }),
-    );
-    if (section.angle) {
-      root.append(
-        el('p', {
-          className: 'notice',
-          testid: POPOVER_TESTIDS.verdictAngle,
-          text: `${BADGE_COPY.angleLabel}: ${section.angle.label}`,
-        }),
-      );
-    }
-    root.append(el('p', { className: 'verdict-note', text: BADGE_COPY.verdictNote }));
-  }
-
   const BAND_LABELS: Readonly<Record<string, string>> = {
     weak: 'Weak',
     'below-average': 'Below avg',
@@ -160,6 +111,78 @@ export function createTargetPopover(callbacks: TargetPopoverCallbacks, doc: Docu
     return BAND_LABELS[verdict.band] ?? 'Weak';
   }
 
+  /**
+   * The footer per AI state (design-1b §8): idle → "AI judgment, once, cached" + "Deep analysis";
+   * pending → pulsing dot + "Analyzing with AI…"; verdict → "AI · {band}" chip + "Suggested
+   * angle" + the confidence disclaimer; no-key / off / error → the §6 phrases, "Retry" on error.
+   */
+  function footerContent(section: TargetAiSection, headline: number, root: HTMLElement): void {
+    const state = section.state;
+    root.dataset.aiState = state;
+
+    if (state === 'idle') {
+      root.append(el('p', { className: 'notice', testid: POPOVER_TESTIDS.aiNotice, text: BADGE_COPY.footerIdle }));
+      const deep = el('button', { className: 'link', testid: POPOVER_TESTIDS.deepAnalysis, text: BADGE_COPY.deepAnalysis });
+      deep.addEventListener('click', () => view && callbacks.onDeepAnalysis(view.post));
+      root.append(deep);
+      return;
+    }
+    if (state === 'pending') {
+      const line = el('p', { className: 'pending' });
+      line.append(el('span', { className: 'dot' }));
+      line.append(el('span', { testid: POPOVER_TESTIDS.aiNotice, text: BADGE_COPY.pending }));
+      root.append(line);
+      return;
+    }
+    if (state === 'error') {
+      root.append(
+        el('p', {
+          className: 'notice',
+          testid: POPOVER_TESTIDS.aiNotice,
+          text: BADGE_COPY.errorLine(headline, section.reason ?? BADGE_COPY.errorReasons.network),
+        }),
+      );
+      const retry = el('button', { className: 'link', testid: POPOVER_TESTIDS.retry, text: BADGE_COPY.retry });
+      retry.addEventListener('click', () => view && callbacks.onDeepAnalysis(view.post));
+      root.append(retry);
+      return;
+    }
+    if (state === 'no-key') {
+      const line = el('p', { className: 'notice', testid: POPOVER_TESTIDS.aiNotice });
+      line.append(el('span', { text: BADGE_COPY.noKeyBefore }));
+      const connect = el('button', { className: 'link', testid: POPOVER_TESTIDS.connectJev, text: BADGE_COPY.noKeyLink });
+      connect.addEventListener('click', () => callbacks.onConnectOptions());
+      line.append(connect);
+      line.append(el('span', { text: BADGE_COPY.noKeyAfter }));
+      root.append(line);
+      return;
+    }
+    if (state === 'off') {
+      root.append(el('p', { className: 'notice', testid: POPOVER_TESTIDS.aiNotice, text: BADGE_COPY.off }));
+      return;
+    }
+    // verdict
+    const verdict = section.verdict!;
+    const band = el('span', {
+      className: 'band',
+      testid: POPOVER_TESTIDS.verdictBand,
+      text: `${BADGE_COPY.verdictChipPrefix}${verdictBandLabel(verdict)}`,
+    });
+    band.dataset.treatment = JEVD_BAND_TREATMENT[verdict.band] ?? 'weak';
+    root.append(band);
+    if (section.angle) {
+      root.append(el('p', { className: 'angle-line', testid: POPOVER_TESTIDS.verdictAngle, text: BADGE_COPY.angleLine(section.angle.label) }));
+    }
+    root.append(
+      el('p', {
+        className: 'confidence-line',
+        testid: POPOVER_TESTIDS.verdictConfidence,
+        // The ordinal is NEVER shown as a probability/percentage — only the band + confidence are.
+        text: BADGE_COPY.verdictConfidence(Math.round(verdict.confidence * 100)),
+      }),
+    );
+  }
+
   function renderPanel(): HTMLElement {
     const current = view!;
     const panel = el('div', { className: 'panel', testid: POPOVER_TESTIDS.panel });
@@ -167,30 +190,59 @@ export function createTargetPopover(callbacks: TargetPopoverCallbacks, doc: Docu
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-label', `${BADGE_COPY.popoverTitle} for @${current.post.authorHandle}`);
 
+    // Header: 22px/800 headline + "Reply target" + round 28px close; caption line below.
     const header = el('header');
-    header.append(el('span', { className: 'title', text: BADGE_COPY.popoverTitle }));
-    header.append(el('span', { className: 'subtitle', text: `@${current.post.authorHandle} · post ${current.post.id}` }));
-    const close = el('button', { testid: POPOVER_TESTIDS.close, text: '×' });
+    header.append(el('span', { className: 'headline', testid: POPOVER_TESTIDS.localScore, text: String(current.score.headline) }));
+    header.append(el('span', { className: 'title', testid: POPOVER_TESTIDS.title, text: BADGE_COPY.popoverTitle }));
+    const close = el('button', { className: 'close', testid: POPOVER_TESTIDS.close, text: '×' });
+    close.setAttribute('type', 'button');
     close.setAttribute('aria-label', BADGE_COPY.close);
     close.addEventListener('click', () => close_());
     header.append(close);
     panel.append(header);
 
-    const scoreRow = el('div', { className: 'score-row' });
-    scoreRow.append(el('span', { className: 'number', testid: POPOVER_TESTIDS.localScore, text: String(current.score.headline) }));
-    scoreRow.append(el('span', { className: 'label', text: BADGE_COPY.localScoreLabel }));
-    panel.append(scoreRow);
+    panel.append(
+      el('span', {
+        className: 'caption',
+        testid: POPOVER_TESTIDS.caption,
+        text: BADGE_COPY.caption(current.ai.state === 'verdict', current.post.authorHandle),
+      }),
+    );
 
+    // Target-signal chips (verbatim short phrases, |points| desc, cap 4) + the "N neutral ›"
+    // rows toggle — the same Design 1b chip model as the overlay's expanded block.
     const signals = el('section', { testid: POPOVER_TESTIDS.signals });
-    signals.append(el('h3', { text: BADGE_COPY.signalsHeading }));
-    const list = el('ul');
-    for (const signal of current.score.signals) list.append(signalRow(signal));
-    signals.append(list);
+    const chips = el('div', { className: 'chips' });
+    for (const chip of signalChips(current.score.signals)) {
+      const chipEl = el('span', { className: 'chip', testid: POPOVER_TESTIDS.chip });
+      chipEl.dataset.signalId = chip.id;
+      chipEl.dataset.direction = chip.direction;
+      chipEl.append(el('span', { className: 'phrase', text: chip.phrase }));
+      chipEl.append(el('span', { className: 'points', text: formatPoints(chip.points) }));
+      chips.append(chipEl);
+    }
+    signals.append(chips);
+    const rows = el('ul', { className: 'rows', testid: POPOVER_TESTIDS.signalRows });
+    for (const signal of current.score.signals) rows.append(signalRow(signal));
+    rows.setAttribute('hidden', '');
+    signals.append(rows);
+    const neutral = neutralCount(current.score.signals);
+    if (neutral > 0) {
+      const toggle = el('button', { className: 'neutral-toggle', testid: POPOVER_TESTIDS.neutralToggle, text: BADGE_COPY.neutralToggle(neutral) });
+      toggle.setAttribute('type', 'button');
+      // Local toggle only: revealing/hiding the rows list never re-renders the rest of the panel.
+      toggle.addEventListener('click', () => {
+        if (rows.hasAttribute('hidden')) rows.removeAttribute('hidden');
+        else rows.setAttribute('hidden', '');
+      });
+      signals.append(toggle);
+    }
     panel.append(signals);
 
-    const ai = el('section', { testid: POPOVER_TESTIDS.aiSection });
-    aiSectionContent(current.ai, ai);
-    panel.append(ai);
+    // Footer (hairline-separated): the per-AI-state copy + actions.
+    const footer = el('footer', { className: 'footer', testid: POPOVER_TESTIDS.aiSection });
+    footerContent(current.ai, current.score.headline, footer);
+    panel.append(footer);
     return panel;
   }
 

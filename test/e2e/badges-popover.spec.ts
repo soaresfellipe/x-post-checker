@@ -30,7 +30,6 @@ const EXTENDED = EXTENDED_POSTS.map((post) => post.id); // 13 (69), 14 (~75), 15
 
 const BADGE = '[data-testid="amplifyx-target-badge"]';
 const BADGE_SCORE = '[data-testid="amplifyx-badge-score"]';
-const BADGE_REASON = '[data-testid="amplifyx-badge-reason"]';
 const POPOVER = '[data-testid="amplifyx-target-popover"]';
 const POPOVER_AI = '[data-testid="amplifyx-popover-ai"]';
 const DEEP_ANALYSIS = '[data-testid="amplifyx-popover-deep-analysis"]';
@@ -160,11 +159,15 @@ test.describe('target badges (fixture E2E)', () => {
     const page = await openFixture(context);
     page.on('pageerror', (error) => errors.push(String(error)));
 
-    // At load: post 1 (well above 70) has a badge with its score and its top-signal reason.
+    // At load: post 1 (well above 70) has a score-only chip in the green tone, its reason in the
+    // aria-label (VAL-TARGET-006) — never as chip text.
     const badge1 = page.locator(`${BADGE}[data-amplifyx-post-id="${POST_1}"]`);
     await expect(badge1).toBeVisible();
-    expect(Number(await badge1.locator(BADGE_SCORE).textContent())).toBeGreaterThanOrEqual(70);
-    expect((await badge1.locator(BADGE_REASON).textContent())?.trim()).toBe('High engagement velocity');
+    await expect(badge1).toHaveAttribute('data-tone', 'good');
+    const score1 = Number(await badge1.locator(BADGE_SCORE).textContent());
+    expect(score1).toBeGreaterThanOrEqual(70);
+    expect((await badge1.textContent())?.trim()).toMatch(/^\d+$/);
+    expect(await badge1.getAttribute('aria-label')).toBe(`Reply target score ${score1}: High engagement velocity`);
 
     // With jevForTargets off (default), Deep analysis is unavailable but the badge stays local.
     await badge1.click();
@@ -187,11 +190,13 @@ test.describe('target badges (fixture E2E)', () => {
       expect(rendered, `post ${id} must have no badge`).not.toContain(id);
     }
 
-    // Every rendered badge shows a score >= threshold and a non-empty English reason.
+    // Every rendered badge is an above-70 score-only chip in the green tone with an English
+    // reason in its aria-label.
     for (const id of rendered) {
       const badge = page.locator(`${BADGE}[data-amplifyx-post-id="${id}"]`);
       expect(Number(await badge.locator(BADGE_SCORE).textContent())).toBeGreaterThanOrEqual(70);
-      expect(((await badge.locator(BADGE_REASON).textContent()) ?? '').trim()).toMatch(/^[A-Za-z]/);
+      await expect(badge).toHaveAttribute('data-tone', 'good');
+      expect(await badge.getAttribute('aria-label')).toMatch(/^Reply target score \d+: [A-Za-z]/);
     }
   });
 
@@ -214,7 +219,11 @@ test.describe('target badges (fixture E2E)', () => {
     const scoreOnBadge = Number(await badge1.locator(BADGE_SCORE).textContent());
     const scoreInPopover = Number(await popover.locator('[data-testid="amplifyx-popover-local-score"]').textContent());
     expect(scoreInPopover).toBe(scoreOnBadge);
-    expect(await popover.locator('[data-testid="amplifyx-popover-signals"] li').count()).toBeGreaterThanOrEqual(6);
+    // Target-signal chips with a "N neutral ›" rows toggle (the full rows list starts hidden).
+    expect(await popover.locator('[data-testid="amplifyx-popover-chip"]').count()).toBeGreaterThanOrEqual(3);
+    const toggle = popover.locator('[data-testid="amplifyx-popover-neutral-toggle"]');
+    await expect(toggle).toHaveText(/^\d+ neutral ›$/);
+    expect(await popover.locator('[data-testid="amplifyx-popover-signal-rows"] li').count()).toBeGreaterThanOrEqual(6);
 
     // Close via the control...
     await page.locator('[data-testid="amplifyx-popover-close"]').click();
@@ -255,8 +264,8 @@ test.describe('target badges (fixture E2E)', () => {
     await badge1.click();
     await page.locator(DEEP_ANALYSIS).click();
     await expect(page.locator(`${POPOVER} ${POPOVER_AI}`)).toHaveAttribute('data-ai-state', 'verdict');
-    await expect(page.locator('[data-testid="amplifyx-popover-verdict-band"]')).toHaveText('Strong');
-    await expect(page.locator('[data-testid="amplifyx-popover-verdict-confidence"]')).toContainText('70%');
+    await expect(page.locator('[data-testid="amplifyx-popover-verdict-band"]')).toHaveText('AI · Strong');
+    await expect(page.locator('[data-testid="amplifyx-popover-verdict-confidence"]')).toHaveText('70% confidence · a heuristic, not a prediction');
     await expect(page.locator('[data-testid="amplifyx-popover-verdict-angle"]')).toContainText('Suggested angle');
     expect(jev.count()).toBe(1);
 
@@ -296,9 +305,11 @@ test.describe('target badges (fixture E2E)', () => {
     await expect(page.locator(`${POPOVER} ${POPOVER_AI}`)).toHaveAttribute('data-ai-state', 'pending', { timeout: 3_000 });
     await expect(page.locator('[data-testid="amplifyx-popover-ai-notice"]')).toContainText('Analyzing');
 
-    // ...then the 500 lands: an explicit, recoverable error state.
+    // ...then the 500 lands: an explicit, recoverable error state (the §6 error line embeds the
+    // reason verbatim, with an inline "Retry" link).
     await expect(page.locator(`${POPOVER} ${POPOVER_AI}`)).toHaveAttribute('data-ai-state', 'error', { timeout: 6_000 });
-    await expect(page.locator('[data-testid="amplifyx-popover-ai-error-reason"]')).toContainText('HTTP 500');
+    await expect(page.locator('[data-testid="amplifyx-popover-ai-notice"]')).toContainText('HTTP 500');
+    await expect(page.locator('[data-testid="amplifyx-popover-retry"]')).toBeVisible();
 
     // The popover remains closable and its error survives a close/reopen.
     await page.keyboard.press('Escape');
@@ -329,6 +340,8 @@ test.describe('target badges (fixture E2E)', () => {
     await options.getByTestId('pref-targetThreshold').blur();
     await expect(options.getByTestId('prefs-status')).toHaveAttribute('data-state', 'success');
     await expect(page.locator(`${BADGE}[data-amplifyx-post-id="${JOAODEV_POST}"]`)).toBeVisible();
+    // Above the lowered threshold but still below 70: the NEUTRAL chip tone, never green (VAL-TARGET-005).
+    await expect(page.locator(`${BADGE}[data-amplifyx-post-id="${JOAODEV_POST}"]`)).toHaveAttribute('data-tone', 'neutral');
     await expect(page.locator(`${BADGE}[data-amplifyx-post-id="${BAIT_POST}"]`)).toHaveCount(0);
     await expect(page.locator(`${BADGE}[data-amplifyx-post-id="${STALE_POST}"]`)).toHaveCount(0);
     await expect(page.locator(`${BADGE}[data-amplifyx-post-id="${OON_REPLY_POST}"]`).count()).resolves.toBe(0);
@@ -431,5 +444,191 @@ test.describe('target badges (fixture E2E)', () => {
     await expect(overlay).toHaveCount(0);
     await expect(row).toBeVisible({ timeout: 5_000 });
     await expect(badge1).toBeVisible();
+  });
+
+  test('chip anatomy: inside User-Name after the time link with separator, hover tooltip, User-Name fallback (VAL-TARGET-026)', async ({ context }) => {
+    const errors: string[] = [];
+    const page = await openFixture(context);
+    page.on('pageerror', (error) => errors.push(String(error)));
+    const badge1 = page.locator(`${BADGE}[data-amplifyx-post-id="${POST_1}"]`);
+    await expect(badge1).toBeVisible();
+
+    // Placement: the host sits INSIDE the React-managed User-Name container as its LAST child
+    // (after the time link), preceded by the "·" separator; the chip is score-only.
+    const placement = await page.evaluate((id: string) => {
+      for (const host of document.querySelectorAll('[data-amplifyx-host="badge"]')) {
+        const badge = host.shadowRoot?.querySelector('[data-testid="amplifyx-target-badge"]');
+        if (badge?.getAttribute('data-amplifyx-post-id') !== id) continue;
+        const parent = host.parentElement;
+        return {
+          placement: host.getAttribute('data-placement'),
+          parentTestId: parent?.getAttribute('data-testid') ?? null,
+          isLastChild: parent !== null && parent.lastElementChild === host,
+          parentHasTime: parent?.querySelector('time') !== null,
+          separator: host.shadowRoot?.querySelector('[data-testid="amplifyx-badge-separator"]')?.textContent ?? null,
+        };
+      }
+      return null;
+    }, POST_1);
+    expect(placement).toEqual({
+      placement: 'user-name',
+      parentTestId: 'User-Name',
+      isLastChild: true,
+      parentHasTime: true,
+      separator: '·',
+    });
+
+    // Hover: the chip inverts and the tooltip "{reason} · reply target" opens 6px below it.
+    // The tooltip is the chip's SIBLING in the badge host's shadow root; the geometry is read in
+    // ONE atomic evaluate right after the mouse move (evaluate does not pierce shadow roots, so
+    // the shadow traversal is manual) so a fixture repaint cannot drop :hover mid-assertion.
+    const chipBox = await badge1.boundingBox();
+    await page.mouse.move(chipBox!.x + chipBox!.width / 2, chipBox!.y + chipBox!.height / 2);
+    const tooltipState = await page.evaluate((id: string) => {
+      for (const host of document.querySelectorAll('[data-amplifyx-host="badge"]')) {
+        const badge = host.shadowRoot?.querySelector(`[data-testid="amplifyx-target-badge"][data-amplifyx-post-id="${id}"]`);
+        if (!badge) continue;
+        const tooltip = host.shadowRoot?.querySelector('[data-testid="amplifyx-badge-tooltip"]');
+        const chipRect = badge.getBoundingClientRect();
+        const tipRect = tooltip?.getBoundingClientRect();
+        return {
+          visible: tooltip != null && getComputedStyle(tooltip).display !== 'none',
+          text: tooltip?.textContent ?? '',
+          chipBottom: chipRect.bottom,
+          chipLeft: chipRect.left,
+          tipTop: tipRect?.top ?? null,
+          tipLeft: tipRect?.left ?? null,
+        };
+      }
+      return null;
+    }, POST_1);
+    expect(tooltipState!.visible).toBe(true);
+    expect(tooltipState!.text).toBe('High engagement velocity · reply target');
+    expect(tooltipState!.tipTop!).toBeGreaterThanOrEqual(tooltipState!.chipBottom + 5);
+    expect(tooltipState!.tipTop!).toBeLessThan(tooltipState!.chipBottom + 8);
+
+    // Fallback: strip User-Name from the article (keeping the status link + time so the post
+    // still extracts) — the chip re-renders at the END of the article with the SAME anatomy.
+    await page.evaluate((id: string) => {
+      const article = [...document.querySelectorAll('article')].find((a) => a.querySelector(`a[href*="/status/${id}"] time`));
+      if (!article) throw new Error('fixture article not found');
+      const userName = article.querySelector('[data-testid="User-Name"]');
+      const time = article.querySelector('time');
+      const link = time?.closest('a');
+      if (!userName || !time || !link) throw new Error('fixture pieces missing');
+      const holder = document.createElement('div');
+      holder.append(link.cloneNode(true));
+      userName.remove();
+      article.prepend(holder.firstChild!);
+    }, POST_1);
+    await expect(badge1).toBeVisible();
+    await page.waitForTimeout(600); // past the scanner throttle: all mutation passes settled
+    const fallback = await page.evaluate((id: string) => {
+      for (const host of document.querySelectorAll('[data-amplifyx-host="badge"]')) {
+        const badge = host.shadowRoot?.querySelector('[data-testid="amplifyx-target-badge"]');
+        if (badge?.getAttribute('data-amplifyx-post-id') !== id) continue;
+        return {
+          placement: host.getAttribute('data-placement'),
+          parentTag: host.parentElement?.tagName ?? null,
+          isArticleLastChild: host.parentElement?.tagName === 'ARTICLE' && host.parentElement.lastElementChild === host,
+          separator: host.shadowRoot?.querySelector('[data-testid="amplifyx-badge-separator"]')?.textContent ?? null,
+        };
+      }
+      return null;
+    }, POST_1);
+    expect(fallback).toEqual({ placement: 'article', parentTag: 'ARTICLE', isArticleLastChild: true, separator: '·' });
+    await expect(page.locator(`${BADGE}[data-amplifyx-post-id="${POST_1}"]`)).toHaveCount(1);
+    expect(errors).toEqual([]);
+  });
+
+  test('popover restyle: 300px card anchored 6px below the chip, left-aligned and clamped, 1b header/chips/footer copy (VAL-TARGET-027)', async ({ context }) => {
+    const errors: string[] = [];
+    const page = await openFixture(context);
+    page.on('pageerror', (error) => errors.push(String(error)));
+    const badge1 = page.locator(`${BADGE}[data-amplifyx-post-id="${POST_1}"]`);
+    await expect(badge1).toBeVisible();
+
+    // Default settings (AI for targets off): the off footer, verbatim.
+    await badge1.click();
+    await expect(page.locator(`${POPOVER} ${POPOVER_AI}`)).toHaveAttribute('data-ai-state', 'off');
+    await expect(page.locator(`${POPOVER} ${POPOVER_AI} [data-testid="amplifyx-popover-ai-notice"]`)).toHaveText(
+      'Local signals only. AI analysis is off in Settings.',
+    );
+    await page.keyboard.press('Escape');
+    await expect(page.locator(POPOVER)).toHaveCount(0);
+
+    // AI-for-targets enabled WITHOUT a key: the no-key footer with the "Connect Jev" link.
+    const options = await context.newPage();
+    await options.goto(await optionsUrl(context));
+    await options.getByTestId('pref-jevForTargets').check();
+    await expect(options.getByTestId('prefs-status')).toHaveAttribute('data-state', 'success');
+    await options.close();
+    await badge1.click();
+    await expect(page.locator(`${POPOVER} ${POPOVER_AI}`)).toHaveAttribute('data-ai-state', 'no-key');
+    await expect(page.locator(`${POPOVER} ${POPOVER_AI} [data-testid="amplifyx-popover-ai-notice"]`)).toHaveText(
+      'Local signals only. Connect Jev to add AI judgment and hook variants.',
+    );
+    await page.keyboard.press('Escape');
+
+    // With a key present: the idle footer + the 1b geometry and header, anchored to the CHIP.
+    // (The pref is already on from the no-key leg, so only the synthetic key save runs here.)
+    const keyOptions = await context.newPage();
+    await keyOptions.goto(await optionsUrl(context));
+    await keyOptions.getByTestId('api-key-input').fill('key-targets-e2e-synthetic');
+    await keyOptions.getByTestId('save-key').click();
+    await expect(keyOptions.getByTestId('key-status')).toHaveAttribute('data-state', 'present');
+    await keyOptions.close();
+    await badge1.click();
+    const popover = page.locator(`${POPOVER}[data-amplifyx-post-id="${POST_1}"]`);
+    await expect(popover).toBeVisible();
+    // Geometry in ONE atomic snapshot (evaluate does not pierce shadow roots — traverse manually):
+    // the 300px panel sits 6px below the chip, left-aligned to it (scrollY is 0 here).
+    const geometry = await page.evaluate((id: string) => {
+      const panel = document.getElementById('amplifyx-target-popover-host')?.shadowRoot?.querySelector('[data-testid="amplifyx-target-popover"]');
+      const panelRect = panel?.getBoundingClientRect();
+      for (const host of document.querySelectorAll('[data-amplifyx-host="badge"]')) {
+        const badge = host.shadowRoot?.querySelector(`[data-testid="amplifyx-target-badge"][data-amplifyx-post-id="${id}"]`);
+        if (!badge) continue;
+        const chipRect = badge.getBoundingClientRect();
+        return {
+          chipTop: chipRect.top,
+          chipBottom: chipRect.bottom,
+          chipLeft: chipRect.left,
+          panelTop: panelRect?.top ?? null,
+          panelLeft: panelRect?.left ?? null,
+          panelWidth: panelRect?.width ?? null,
+        };
+      }
+      return null;
+    }, POST_1);
+    expect(geometry).not.toBeNull();
+    expect(geometry!.panelWidth).toBe(300);
+    // 6px below the chip, left-aligned to it (rounded to whole px — sub-pixel tolerance).
+    expect(Math.abs(geometry!.panelTop! - (geometry!.chipBottom + 6))).toBeLessThan(1.5);
+    expect(Math.abs(geometry!.panelLeft! - geometry!.chipLeft)).toBeLessThan(1.5);
+    await expect(popover.locator('[data-testid="amplifyx-popover-local-score"]')).toHaveText(
+      String(await badge1.locator(BADGE_SCORE).textContent()),
+    );
+    const headlineStyle = await popover.locator('[data-testid="amplifyx-popover-local-score"]').evaluate((el) => {
+      const style = getComputedStyle(el);
+      return { size: style.fontSize, weight: style.fontWeight, numeric: style.fontVariantNumeric };
+    });
+    expect(headlineStyle).toEqual({ size: '22px', weight: '800', numeric: 'tabular-nums' });
+    await expect(popover.locator('[data-testid="amplifyx-popover-title"]')).toHaveText('Reply target');
+    await expect(popover.locator('[data-testid="amplifyx-popover-caption"]')).toHaveText('local signals · @ana_builds');
+    const closeBox = await popover.locator('[data-testid="amplifyx-popover-close"]').boundingBox();
+    expect(closeBox!.height).toBe(28);
+    await expect(popover.locator('[data-testid="amplifyx-popover-ai-notice"]')).toHaveText('AI judgment, once, cached');
+    await expect(popover.locator(DEEP_ANALYSIS)).toHaveText('Deep analysis');
+
+    // Viewport clamp: a narrow viewport pushes the popover's left edge to the 8px margin.
+    await page.setViewportSize({ width: 360, height: 800 });
+    await expect(popover).toBeVisible();
+    const clampedBox = await popover.boundingBox();
+    expect(clampedBox!.width).toBe(300);
+    expect(clampedBox!.x).toBeGreaterThanOrEqual(8);
+    expect(clampedBox!.x + clampedBox!.width).toBeLessThanOrEqual(360 - 8);
+    await page.keyboard.press('Escape');
+    expect(errors).toEqual([]);
   });
 });

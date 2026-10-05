@@ -120,7 +120,13 @@ function ineligibilityOf(post: PostSnapshot, now: number): TargetIneligibilityRe
   return null;
 }
 
-function entry(id: keyof typeof SIGNAL_IDS, value: string, points: number, direction?: SignalDirection): SignalEntry {
+/**
+ * Builds one breakdown entry. `short` (optional) is the Design 1b chip phrase
+ * (library/design-1b.md §5 target-scorer table, rendered in the reply-target popover) — only for
+ * cases that can ever render as a chip (points ≠ 0); zero-point cases pass none and surface only
+ * in the popover's full rows list.
+ */
+function entry(id: keyof typeof SIGNAL_IDS, value: string, points: number, direction?: SignalDirection, short?: string): SignalEntry {
   return {
     id: SIGNAL_IDS[id],
     label: SIGNAL_LABELS[id],
@@ -128,6 +134,7 @@ function entry(id: keyof typeof SIGNAL_IDS, value: string, points: number, direc
     points,
     direction: direction ?? (points > 0 ? 'positive' : points < 0 ? 'negative' : 'neutral'),
     applied: points !== 0,
+    ...(short === undefined ? {} : { short }),
   };
 }
 
@@ -170,6 +177,8 @@ function velocitySignal(post: PostSnapshot): SignalEntry {
     'velocity',
     `${total} engagements in ${formatAge(post.ageMinutes)} (~${formatRate(perHour)}/h - ${band.note})`,
     band.points,
+    undefined,
+    `${formatRate(perHour)} engagements / h`,
   );
 }
 
@@ -188,17 +197,21 @@ function replyRatioSignal(post: PostSnapshot): SignalEntry {
     'replyLikeRatio',
     `${post.replyCount} replies / ${post.likeCount} likes (~${formatRate(ratio)} - ${band.note})`,
     band.points,
+    undefined,
+    'Active conversation',
   );
 }
 
 function questionSignal(contentText: string): SignalEntry {
-  if (contentText.includes('?')) return entry('question', 'question post (invites replies)', TARGET_CONFIG.weights.question);
+  if (contentText.includes('?')) {
+    return entry('question', 'question post (invites replies)', TARGET_CONFIG.weights.question, undefined, 'Question');
+  }
   return entry('question', 'no question detected', 0);
 }
 
 function verifiedSignal(post: PostSnapshot): SignalEntry {
   return post.verified
-    ? entry('verified', 'verified author (small directional modifier)', TARGET_CONFIG.weights.verified)
+    ? entry('verified', 'verified author (small directional modifier)', TARGET_CONFIG.weights.verified, undefined, 'Verified author')
     : entry('verified', 'not verified', 0);
 }
 
@@ -208,7 +221,7 @@ function verifiedSignal(post: PostSnapshot): SignalEntry {
  */
 function depthSignal(post: PostSnapshot): SignalEntry {
   if (post.isReply) {
-    return entry('depth', 'reply inside an existing thread (deep conversation)', TARGET_CONFIG.weights.deepThreadPenalty);
+    return entry('depth', 'reply inside an existing thread (deep conversation)', TARGET_CONFIG.weights.deepThreadPenalty, undefined, 'Deep thread');
   }
   return entry('depth', 'original post (shallow conversation)', 0);
 }
@@ -221,7 +234,7 @@ function depthSignal(post: PostSnapshot): SignalEntry {
 function mutualSignal(post: PostSnapshot): SignalEntry {
   if (post.isReply) return entry('mutual', 'not applied to replies (reply targets never get the network boost)', 0);
   if (post.inNetwork) {
-    return entry('mutual', 'original post by an account the viewer follows (visible)', TARGET_CONFIG.weights.mutualBoost);
+    return entry('mutual', 'original post by an account the viewer follows (visible)', TARGET_CONFIG.weights.mutualBoost, undefined, 'Author you follow');
   }
   return entry('mutual', 'no visible viewer-follows-author marker - boost not applied (never guessed)', 0);
 }
@@ -230,7 +243,7 @@ function baitSignal(contentText: string): SignalEntry {
   for (const pattern of BAIT_PATTERNS) {
     const match = pattern.exec(contentText);
     if (match) {
-      return entry('bait', `bait pattern: "${match[0].toLowerCase()}"`, TARGET_CONFIG.weights.engagementBait);
+      return entry('bait', `bait pattern: "${match[0].toLowerCase()}"`, TARGET_CONFIG.weights.engagementBait, undefined, 'Engagement bait');
     }
   }
   return entry('bait', 'clean', 0);

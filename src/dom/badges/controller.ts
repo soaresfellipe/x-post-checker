@@ -1,11 +1,17 @@
 /**
- * TargetBadges controller — renders reply-target badges into the scanner-provided per-article
- * hosts and drives the detail popover.
+ * TargetBadges controller — renders Design 1b reply-target badges into the scanner-provided
+ * per-article hosts and drives the detail popover.
  *
  * Ownership rules (architecture.md): each badge lives in the article's ONE scanner host (a plain
  * div the scanner created and guarantees unique), rendered through its own Shadow DOM — the
- * React-managed article nodes are never mutated beyond that extension-owned host. The badge
- * button is the ONLY pointer-interactive element (the host stays pointer-events: none), and its
+ * React-managed article nodes are never mutated beyond that extension-owned host. Per the 1b
+ * design (§7) the HOST is placed INSIDE the React-managed `[data-testid="User-Name"]` container
+ * as its last child (after the time link) — the same extension-owned-host pattern, deeper in
+ * React territory: placement is re-applied on every paint (idempotent; the scanner's observer
+ * re-paints after re-renders) and never moves or modifies an X node. When User-Name is absent the
+ * host falls back to the end of the article with the SAME chip anatomy.
+ *
+ * The chip is the ONLY pointer-interactive element (the host stays pointer-events: none), and its
  * click is isolated: stopPropagation + preventDefault so the underlying post is never activated,
  * navigated, or acted upon (VAL-TARGET-016).
  *
@@ -24,8 +30,9 @@ import { postMetricsSignature, type PostSnapshot } from '@/core/post-snapshot';
 import type { Settings } from '@/core/settings-store';
 import type { TargetAnalysisResult } from '@/core/target-analysis';
 import { BADGE_HOST_ATTRIBUTE, BADGE_HOST_VALUE, type ScanEvent } from '@/dom/timeline-scanner';
+import { findFirst } from '@/selectors';
 import { ThemeDetector, applyThemeTokens, setHostTheme, type XTheme } from '@/dom/theme';
-import { BADGE_STYLE, BADGE_TESTID, BADGE_TESTIDS } from './config';
+import { BADGE_COPY, BADGE_GREEN_MIN, BADGE_STYLE, BADGE_TESTID, BADGE_TESTIDS } from './config';
 import { createTargetPopover, type TargetPopover } from './popover';
 import { badgeReason, deriveTargetAiSection, isBadgeEligible } from './view-model';
 
@@ -106,7 +113,7 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
   const pending = new Set<string>();
   const settled = new Map<string, TargetAnalysisResult>();
   /** Context behind the currently open popover, for refreshes (settings changes). */
-  let open: { post: PostSnapshot; score: TargetScore; article: Element } | null = null;
+  let open: { post: PostSnapshot; score: TargetScore; chip: Element } | null = null;
 
   function aiSectionFor(post: PostSnapshot): ReturnType<typeof deriveTargetAiSection> {
     return deriveTargetAiSection({
@@ -117,9 +124,10 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
     });
   }
 
-  function openPopoverFor(post: PostSnapshot, score: TargetScore, article: Element): void {
-    open = { post, score, article };
-    popover.open({ post, score, ai: aiSectionFor(post) }, article);
+  function openPopoverFor(post: PostSnapshot, score: TargetScore, chip: Element): void {
+    open = { post, score, chip };
+    // Anchored 6px below the CHIP, left-aligned to it (design-1b §8) — not the article.
+    popover.open({ post, score, ai: aiSectionFor(post) }, chip);
   }
 
   function refreshPopover(): void {
@@ -183,8 +191,21 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
     return score;
   }
 
+  /**
+   * Design-1b §7 placement: the host goes INSIDE the article's `[data-testid="User-Name"]` as its
+   * last child (after the time link), falling back to the end of the article when User-Name is
+   * absent. Moving/re-appending OUR OWN host is idempotent; no X node is ever moved or modified.
+   */
+  function placeHost(host: HTMLElement, article: Element): void {
+    const userName = findFirst(article, 'userName');
+    const parent: Element = userName ?? article;
+    if (host.parentElement !== parent) parent.append(host);
+    host.dataset.placement = userName ? 'user-name' : 'article';
+  }
+
   function paintBadge(event: ScanEvent, score: TargetScore): void {
     const shadow = event.host.shadowRoot ?? event.host.attachShadow({ mode: 'open' });
+    placeHost(event.host, event.article);
     // Idempotent repaint: every scan pass rebuilds the shadow content from THIS event's data, so
     // repeated passes (and recycled hosts re-rendered for a new post) can never accumulate
     // duplicate badge buttons (VAL-TARGET-008's "without duplicate hosts" contract).
@@ -198,29 +219,40 @@ export function createTargetBadges(options: TargetBadgesOptions): TargetBadges {
     setHostTheme(event.host, themeDetector.getTheme());
 
     const reason = badgeReason(score);
+    // Green at headline >= 70; the neutral style for above-threshold scores below 70 (§7).
+    const tone = score.headline >= BADGE_GREEN_MIN ? 'good' : 'neutral';
+    const separator = doc.createElement('span');
+    separator.dataset.testid = BADGE_TESTIDS.separator;
+    separator.className = 'sep';
+    separator.setAttribute('aria-hidden', 'true');
+    separator.textContent = BADGE_COPY.separator;
     const button = doc.createElement('button');
     button.type = 'button';
     button.dataset.testid = BADGE_TESTID;
     button.setAttribute('data-amplifyx-post-id', event.post.id);
-    button.setAttribute('aria-label', `Reply target score ${score.headline}: ${reason}`);
-    button.className = 'badge';
+    button.setAttribute('aria-label', BADGE_COPY.badgeLabel(score.headline, reason));
+    button.dataset.tone = tone;
+    button.className = 'chip';
     const scoreSpan = doc.createElement('span');
     scoreSpan.dataset.testid = BADGE_TESTIDS.score;
     scoreSpan.className = 'score';
     scoreSpan.textContent = String(score.headline);
-    const reasonSpan = doc.createElement('span');
-    reasonSpan.dataset.testid = BADGE_TESTIDS.reason;
-    reasonSpan.className = 'reason';
-    reasonSpan.textContent = reason;
-    button.append(scoreSpan, reasonSpan);
-    shadow.replaceChildren(themeStyle, style, button);
+    button.append(scoreSpan);
+    const tooltip = doc.createElement('span');
+    tooltip.dataset.testid = BADGE_TESTIDS.tooltip;
+    tooltip.className = 'tooltip';
+    tooltip.setAttribute('role', 'tooltip');
+    tooltip.setAttribute('aria-hidden', 'true');
+    tooltip.textContent = BADGE_COPY.tooltip(reason);
+    shadow.replaceChildren(themeStyle, style, separator, button, tooltip);
     event.host.style.height = 'auto';
+    event.host.style.lineHeight = 'normal';
     // Click isolation (VAL-TARGET-016): the badge consumes its own activation so the underlying
     // post's handlers, navigation, and controls never see it. The popover still opens.
     button.addEventListener('click', (domEvent) => {
       domEvent.stopPropagation();
       domEvent.preventDefault();
-      openPopoverFor(event.post, score, event.article);
+      openPopoverFor(event.post, score, button);
     });
   }
 

@@ -445,3 +445,38 @@ describe('reply:like ratio signal details', () => {
     expect(entry.value).toContain('no replies');
   });
 });
+
+describe('target-signal short phrases (design-1b §5/§8 — popover chips)', () => {
+  it('scoring signals carry the verbatim short phrases; zero-point entries carry none', () => {
+    const busy = scored({
+      text: 'What did you learn the hard way about shipping products quickly but carefully this year?',
+      inNetwork: true,
+      verified: true,
+      ageMinutes: 60,
+      likeCount: 300,
+      replyCount: 90,
+      repostCount: 120,
+    });
+    expect(byId(busy, 'velocity').short).toBe('510 engagements / h'); // (300+90+120) in 1h
+    expect(byId(busy, 'reply-like-ratio').short).toBe('Active conversation');
+    expect(byId(busy, 'question').short).toBe('Question');
+    expect(byId(busy, 'verified-author').short).toBe('Verified author');
+    expect(byId(busy, 'mutual-follow').short).toBe('Author you follow');
+    // Zero-point entries never render as chips — no phrase, exactly like draft signals.
+    expect(byId(busy, 'conversation-depth').short).toBeUndefined();
+    expect(byId(busy, 'engagement-bait').short).toBeUndefined();
+    expect(byId(busy, 'eligibility').short).toBeUndefined();
+  });
+
+  it('penalized signals carry their negative short phrases', () => {
+    const baitThread = scored({
+      text: 'Like and retweet if you agree with this bold claim?',
+      isReply: true,
+      inNetwork: true,
+      likeCount: 10,
+      replyCount: 8,
+    });
+    expect(byId(baitThread, 'engagement-bait').short).toBe('Engagement bait');
+    expect(byId(baitThread, 'conversation-depth').short).toBe('Deep thread');
+  });
+});

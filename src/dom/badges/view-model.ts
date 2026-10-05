@@ -54,7 +54,7 @@ export function targetFailureReason(failure: JevAnalysisFailure): string {
     case 'rate-limited':
       return BADGE_COPY.errorReasons.rateLimited;
     case 'no-key':
-      return BADGE_COPY.noKey;
+      return `${BADGE_COPY.noKeyBefore}${BADGE_COPY.noKeyLink}${BADGE_COPY.noKeyAfter}`;
   }
 }
 
