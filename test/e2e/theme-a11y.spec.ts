@@ -1,4 +1,4 @@
-import type { BrowserContext, Page, Route } from '@playwright/test';
+import type { BrowserContext, Locator, Page, Route } from '@playwright/test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -391,6 +391,18 @@ test.describe('cross-surface theming + a11y sweep (m6-theme-a11y-sweep)', () => 
     );
     expect(copyHeight).toBeGreaterThanOrEqual(28);
 
+    // The done state's hashtag "Add #Tag" links are link-styled buttons too — 28px minimum
+    // (VAL-DRAFT-046; M6-SCRUTINY-004).
+    const hashtagHeight = await page.evaluate(
+      ({ OVERLAY_HOST }) =>
+        document
+          .querySelector(OVERLAY_HOST)!
+          .shadowRoot!.querySelector('[data-testid="overlay-optimizer-hashtag"]')
+          ?.getBoundingClientRect().height ?? -1,
+      { OVERLAY_HOST },
+    );
+    expect(hashtagHeight).toBeGreaterThanOrEqual(28);
+
     // The popover close control: open the popover (the overlay collapses on that outside click —
     // the overlay heights above are already measured).
     await page.locator(`${BADGE}[data-amplifyx-post-id="${POST_1}"]`).click();
@@ -416,6 +428,92 @@ test.describe('cross-surface theming + a11y sweep (m6-theme-a11y-sweep)', () => 
     expect(closeAndNumerics.rowHeadline).toBe('tabular-nums');
     expect(closeAndNumerics.badgeChip).toBe('tabular-nums');
     expect(closeAndNumerics.popoverHeadline).toBe('tabular-nums');
+  });
+
+  test('ordinary state-dependent action buttons are >= 28px tall (VAL-DRAFT-046, M6-SCRUTINY-004)', async () => {
+    // The link-styled composer actions live in ordinary states the shared fixture above never
+    // reaches: no-key (fresh profile), ready (key saved, autoAnalyze off) and error (every Jev
+    // exchange fails). Each state gets its OWN isolated context, following the reduced-motion
+    // pattern; the done-state hashtag links are covered by the VAL-DRAFT-046 test above.
+    const heightOf = (locator: Locator): Promise<number> =>
+      locator.evaluate((el) => el.getBoundingClientRect().height);
+    const isolated = async <T>(run: (context: BrowserContext) => Promise<T>): Promise<T> => {
+      const profile = await mkdtemp(path.join(tmpdir(), 'amplifyx-theme-a11y-'));
+      let context: BrowserContext | null = null;
+      try {
+        context = await launchExtensionContext(profile);
+        return await run(context);
+      } finally {
+        await context?.close();
+        await rm(profile, { recursive: true, force: true });
+      }
+    };
+
+    // no-key Connect Jev (expanding an ordinary no-key draft).
+    const connectJev = await isolated(async (context) => {
+      const page = await openFixture(context);
+      await typeDraft(page, DRAFT);
+      await expand(page);
+      await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'no-key');
+      return heightOf(page.getByTestId('overlay-connect-jev'));
+    });
+    expect(connectJev).toBeGreaterThanOrEqual(28);
+
+    // ready "Analyze with AI" (key saved, autoAnalyze off — the explicit manual action).
+    const analyze = await isolated(async (context) => {
+      const options = await context.newPage();
+      await options.goto(await optionsUrl(context));
+      await expect(options.getByTestId('key-status')).not.toBeEmpty();
+      await options.getByTestId('api-key-input').fill(SYNTHETIC_KEY);
+      await options.getByTestId('save-key').click();
+      await expect(options.getByTestId('key-status')).toHaveAttribute('data-state', 'present');
+      await options.getByTestId('pref-autoAnalyze').uncheck();
+      await expect(options.getByTestId('prefs-status')).toHaveAttribute('data-state', 'success');
+      await options.close();
+      const page = await openFixture(context);
+      // With autoAnalyze off nothing dispatches, so typeDraft's dispatch-counter wait would
+      // never fire — type directly and wait for the row's ready state (the score-overlay
+      // VAL-SETUP-010 pattern).
+      await page.locator(HOME_COMPOSER).click();
+      await page.keyboard.press('Control+A');
+      await page.keyboard.press('Backspace');
+      await page.keyboard.type(DRAFT);
+      await expect(page.getByTestId('amplifyx-overlay-row')).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId('amplifyx-overlay-row')).toHaveAttribute('data-jev-state', 'ready', {
+        timeout: 15_000,
+      });
+      await expand(page);
+      return heightOf(page.getByTestId('overlay-analyze'));
+    });
+    expect(analyze).toBeGreaterThanOrEqual(28);
+
+    // AI-error Retry (row's block) and optimizer-error Retry: every Jev exchange fails with
+    // HTTP 500 — the AI error rides the auto-analyzed draft, the optimizer error after its
+    // action. The two Retry links share a test id, so each is scoped to its section.
+    const retries = await isolated(async (context) => {
+      await context.route('https://api.typesafe.ai/**', (route: Route) =>
+        route.fulfill({ status: 500, contentType: 'text/plain', body: 'stub failure (M6-SCRUTINY-004)' }),
+      );
+      await saveKeyViaOptions(context);
+      const page = await openFixture(context);
+      await typeDraft(page, DRAFT);
+      await expand(page);
+      await expect(page.getByTestId('overlay-jev')).toHaveAttribute('data-jev-state', 'error', {
+        timeout: 15_000,
+      });
+      const aiRetry = page.locator('[data-testid="overlay-jev"]').getByTestId('overlay-retry');
+      await expect(aiRetry).toBeVisible();
+      const aiRetryHeight = await heightOf(aiRetry);
+      await page.getByTestId('overlay-optimize').click();
+      await expect(page.getByTestId('overlay-optimizer')).toHaveAttribute('data-optimizer-state', 'error', {
+        timeout: 15_000,
+      });
+      const optimizerRetry = page.locator('[data-testid="overlay-optimizer"]').getByTestId('overlay-retry');
+      await expect(optimizerRetry).toBeVisible();
+      return { aiRetryHeight, optimizerRetry: await heightOf(optimizerRetry) };
+    });
+    expect(retries.aiRetryHeight).toBeGreaterThanOrEqual(28);
+    expect(retries.optimizerRetry).toBeGreaterThanOrEqual(28);
   });
 
   test('prefers-reduced-motion stops the pending pulse in the row and the popover (VAL-THEME-004)', async () => {

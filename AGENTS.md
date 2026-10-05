@@ -69,11 +69,17 @@ hooks are inert unless the build mode is `e2e`. Never add a test hook outside a
 These rules are cited by comments throughout `src/` and `scripts/`; keep them intact and
 follow them in new code.
 
-- **Pointer discipline.** Overlay, badge, and popover hosts render with
+- **Pointer discipline.** Page-overlaid hosts (overlay, badge, and popover panels) render with
   `pointer-events: none` so they can never block the page; only the extension's own
   buttons re-enable hit-testing. A click inside extension UI must never navigate or
   activate the post behind it. Tests assert this (`test/dom/badges.test.ts`), so a DOM
-  change that flips pointer-events on a host panel is a bug, not a tweak.
+  change that flips pointer-events on a page-overlaid host panel is a bug, not a tweak.
+  **Carve-out (Design 1b decision D2, user-approved 2026-10-05):** the draft overlay's
+  IN-FLOW expanded block's own scroll area legitimately uses `pointer-events: auto`
+  (`src/dom/overlay/overlay.ts`) so wheel/trackpad can scroll extension-owned content —
+  that block occupies its own document-flow space (it pushes the toolbar down instead of
+  covering the page), so it is not a page-overlaid surface and not a click-capture lane.
+  The page-overlaid rule above stays intact and tested; do not weaken it.
 - **One config module per concern; no magic numbers.** Every weight, coefficient,
   threshold, and tuning constant lives in the relevant `config.ts` (`src/core/heuristic-
   engine/config.ts`, `src/core/jev-client/config.ts`, `src/core/optimizer/config.ts`).

@@ -128,7 +128,10 @@ const STYLE = `
   /* ---- the condensed AI block (§4.2 / §6) ---- */
   .ai-block { display: flex; flex-direction: column; gap: 6px; }
   .ai-block .notice { margin: 0; color: var(--fg2); }
-  .ai-block .notice button { pointer-events: auto; background: none; border: 0; padding: 0; color: var(--accent); font: inherit; font-weight: 500; text-decoration: none; cursor: pointer; }
+  /* Link-styled action buttons (Connect Jev / Analyze with AI / Retry, Add #Tag): the link
+   * appearance is retained, but design-1b §10 requires a >= 28px hit target for EVERY button —
+   * the min-height (with middle alignment in the notice line) supplies it (M6-SCRUTINY-004). */
+  .ai-block .notice button { pointer-events: auto; box-sizing: border-box; min-height: 28px; vertical-align: middle; background: none; border: 0; padding: 0; color: var(--accent); font: inherit; font-weight: 500; text-decoration: none; cursor: pointer; }
   .ai-block .notice button:hover { text-decoration: underline; }
   .ai-head { display: flex; align-items: center; gap: 8px; }
   .ai-chip { display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px; font-weight: 500; font-size: 13px; white-space: nowrap; }
@@ -174,13 +177,16 @@ const STYLE = `
   .hashtag-line { margin: 0; }
   .hashtag-link {
     pointer-events: auto;
+    box-sizing: border-box;
+    min-height: 28px;
+    vertical-align: middle;
     background: none; border: 0; padding: 0;
     color: var(--accent); font: inherit; font-weight: 500; text-decoration: none; cursor: pointer;
   }
   .hashtag-link:hover { text-decoration: underline; }
   .error-line { display: flex; align-items: center; gap: 8px; margin: 0; color: var(--fg); }
   .error-line .dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%; background: var(--weak); }
-  .error-line button { pointer-events: auto; background: none; border: 0; padding: 0; color: var(--accent); font: inherit; font-weight: 500; text-decoration: none; cursor: pointer; }
+  .error-line button { pointer-events: auto; box-sizing: border-box; min-height: 28px; vertical-align: middle; background: none; border: 0; padding: 0; color: var(--accent); font: inherit; font-weight: 500; text-decoration: none; cursor: pointer; }
   .error-line button:hover { text-decoration: underline; }
 `;
 
